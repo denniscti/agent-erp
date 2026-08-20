@@ -4,14 +4,15 @@
   import { 
     appState, 
     fetchOrders, 
-    fetchAuditLogs, 
-    fetchInstalledModules, 
     triggerWebhookSimulation,
     checkForUpdates,
     installUpdate,
     fetchModulesGallery,
     installModuleAction,
-    uninstallModuleAction
+    uninstallModuleAction,
+    getAuthStatus,
+    navigate,
+    loadAuthenticatedData
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import MutationDialog from './lib/components/MutationDialog.svelte';
@@ -21,7 +22,7 @@
   let selectedOrderId = $state(null);
   let isNotificationOpen = $state(false);
 
-  // Initialize data on mount
+  // Initialize and bootstrap authentication on mount
   onMount(async () => {
     try {
       const { getVersion } = await import('@tauri-apps/api/app');
@@ -30,10 +31,30 @@
       console.warn("Failed to fetch version from Tauri:", err);
     }
 
-    await fetchOrders();
-    await fetchAuditLogs();
-    await fetchInstalledModules();
-    await fetchModulesGallery();
+    // Step 1: Auth Bootstrap - check authentication status
+    const status = await getAuthStatus();
+
+    // Step 2: Route Gate based on auth status
+    switch (status) {
+      case 'unauthenticated':
+        navigate('/login');
+        break;
+      case 'needs_tenant_creation':
+        navigate('/onboarding');
+        break;
+      case 'needs_tenant_selection':
+        navigate('/select-tenant');
+        break;
+      case 'authenticated':
+        navigate('/app/sales');
+        await loadAuthenticatedData();
+        break;
+      default:
+        navigate('/login');
+        break;
+    }
+
+    appState.isBootstrapping = false;
 
     // Automatically listen to the background notification event from Rust
     const unlisten = await listen('notification-hub', (event) => {
@@ -56,8 +77,10 @@
         });
       }
 
-      // Refresh orders in real-time
-      fetchOrders();
+      // Refresh orders in real-time only if authenticated
+      if (appState.authStatus === 'authenticated') {
+        fetchOrders();
+      }
     });
 
     // Request notification permission early
@@ -106,6 +129,51 @@
   }
 </script>
 
+{#if appState.isBootstrapping}
+  <div class="auth-loading-screen">
+    <div class="spinner-icon" style="width: 24px; height: 24px;"></div>
+    <span>正在確認登入狀態...</span>
+  </div>
+{:else if appState.authStatus === 'unauthenticated' || appState.route === '/login'}
+  <div class="auth-placeholder-container glass-panel">
+    <div class="auth-placeholder-card">
+      <div class="brand-logo" style="margin: 0 auto 16px auto; width: 48px; height: 48px; font-size: 1.5rem;">A</div>
+      <h2>請先登入系統</h2>
+      <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 8px;">
+        目前處於未登入狀態（路由：{appState.route || '/login'}）。
+      </p>
+      <div style="margin-top: 24px; display: flex; gap: 12px; justify-content: center;">
+        <button class="btn btn-primary" onclick={async () => {
+          navigate('/app/sales');
+          appState.authStatus = 'authenticated';
+          await loadAuthenticatedData();
+        }}>
+          模擬登入 (開發測試)
+        </button>
+      </div>
+    </div>
+  </div>
+{:else if appState.authStatus === 'needs_tenant_creation' || appState.route === '/onboarding'}
+  <div class="auth-placeholder-container glass-panel">
+    <div class="auth-placeholder-card">
+      <div class="brand-logo" style="margin: 0 auto 16px auto; width: 48px; height: 48px; font-size: 1.5rem;">A</div>
+      <h2>歡迎！請建立您的首個企業租戶</h2>
+      <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 8px;">
+        帳號已啟用，請完成租戶建立流程（路由：{appState.route || '/onboarding'}）。
+      </p>
+    </div>
+  </div>
+{:else if appState.authStatus === 'needs_tenant_selection' || appState.route === '/select-tenant'}
+  <div class="auth-placeholder-container glass-panel">
+    <div class="auth-placeholder-card">
+      <div class="brand-logo" style="margin: 0 auto 16px auto; width: 48px; height: 48px; font-size: 1.5rem;">A</div>
+      <h2>請選擇您要登入的企業租戶</h2>
+      <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 8px;">
+        偵測到多個租戶權限，請選擇目標租戶（路由：{appState.route || '/select-tenant'}）。
+      </p>
+    </div>
+  </div>
+{:else}
 <div class="app-container">
   <!-- Left Sidebar -->
   <aside class="sidebar">
@@ -498,6 +566,7 @@
     <ChatBox />
   </main>
 </div>
+{/if}
 
 <!-- Security Confirmation dialog (Mutation Interceptor) -->
 <MutationDialog />
@@ -513,6 +582,34 @@
 {/if}
 
 <style>
+  /* Auth Screen & Bootstrap Placeholder Styles */
+  .auth-loading-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    gap: 16px;
+    color: var(--text-secondary);
+    font-size: 1rem;
+  }
+
+  .auth-placeholder-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  .auth-placeholder-card {
+    max-width: 480px;
+    width: 100%;
+    text-align: center;
+    padding: 40px 32px;
+    border-radius: var(--radius-lg);
+  }
+
   /* Local layout classes */
   .workspace-header {
     display: flex;

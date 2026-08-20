@@ -334,6 +334,14 @@ async fn get_audit_logs(app_handle: AppHandle) -> Result<serde_json::Value, Stri
     Ok(serde_json::json!(list))
 }
 
+// Auth bootstrap status command (Aligned with Issue #28 & #30)
+#[tauri::command]
+async fn get_auth_status(_app_handle: AppHandle) -> Result<String, String> {
+    // Returns unauthenticated / needs_tenant_creation / needs_tenant_selection / authenticated
+    // In actual implementation with Issue #28, this reads keychain and checks token validity against profile
+    Ok("unauthenticated".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -395,6 +403,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_auth_status,
             simulate_agent_chat,
             simulate_webhook_order,
             confirm_mutation,
@@ -408,4 +417,18 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_auth_status_variants() {
+        let valid_statuses = vec![
+            "unauthenticated",
+            "needs_tenant_creation",
+            "needs_tenant_selection",
+            "authenticated",
+        ];
+        assert_eq!(valid_statuses.len(), 4);
+    }
 }

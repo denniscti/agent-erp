@@ -5,6 +5,9 @@ import { loadModule } from './registry.js';
 
 // Define the global reactive app state using Svelte 5 $state
 export const appState = $state({
+  route: '', // Hash-based route: '/login', '/onboarding', '/select-tenant', '/app/sales', etc.
+  authStatus: 'loading', // 'loading' | 'unauthenticated' | 'needs_tenant_creation' | 'needs_tenant_selection' | 'authenticated'
+  isBootstrapping: true,
   activeWorkspace: 'sales', // 'sales' | 'finance' | 'crm' | 'settings'
   version: '0.1.0',
   isEnterpriseActive: false,
@@ -41,6 +44,37 @@ export function showToast(message) {
   setTimeout(() => {
     appState.toastMessage = null;
   }, 3500);
+}
+
+// Hash-based route navigation helper
+export function navigate(path) {
+  appState.route = path;
+  if (typeof window !== 'undefined') {
+    window.location.hash = path;
+  }
+}
+
+// Get Auth status via Tauri IPC (or fallback to unauthenticated/mock)
+export async function getAuthStatus() {
+  try {
+    const status = await invoke('get_auth_status');
+    appState.authStatus = status;
+    return status;
+  } catch (err) {
+    console.warn("get_auth_status command not ready or failed, fallback to unauthenticated:", err);
+    appState.authStatus = 'unauthenticated';
+    return 'unauthenticated';
+  }
+}
+
+// Batch load data when entering authenticated route
+export async function loadAuthenticatedData() {
+  await Promise.all([
+    fetchOrders(),
+    fetchAuditLogs(),
+    fetchInstalledModules(),
+    fetchModulesGallery()
+  ]);
 }
 
 // Fetch mirrored order list from SQLite
