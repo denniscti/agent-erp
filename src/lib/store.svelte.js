@@ -240,7 +240,8 @@ pub_fn("approveMutation");
 export async function approveMutation(id) {
   if (!appState.pendingMutation) return;
   try {
-    await invoke('confirm_mutation', { mutationId: id, approved: true, operator: appState.authUser?.email || 'Unknown' });
+    const operator = appState.authUser?.display_name || appState.authUser?.email || 'Unknown';
+    await invoke('confirm_mutation', { mutationId: id, approved: true, operator });
     appState.pendingMutation = null;
     await fetchOrders();
     await fetchAuditLogs();
@@ -259,14 +260,15 @@ pub_fn("rejectMutation");
 export async function rejectMutation(id) {
   if (!appState.pendingMutation) return;
   try {
-    await invoke('confirm_mutation', { mutationId: id, approved: false, operator: appState.authUser?.email || 'Unknown' });
+    const operator = appState.authUser?.display_name || appState.authUser?.email || 'Unknown';
+    await invoke('confirm_mutation', { mutationId: id, approved: false, operator });
     appState.pendingMutation = null;
     await fetchOrders();
     await fetchAuditLogs();
     
     appState.chatMessages.push({
       role: 'assistant',
-      content: `已拒絕訂單 ${id} 的核准寫入。該指令已被安全阻斷，審計日誌已記錄 ${appState.authUser?.email || '操作者'} 的拒絕動作。`
+      content: `已拒絕訂單 ${id} 的核准寫入。該指令已被安全阻斷，審計日誌已記錄 ${operator === 'Unknown' ? '操作者' : operator} 的拒絕動作。`
     });
   } catch (err) {
     console.error("Failed to reject mutation:", err);
@@ -435,8 +437,9 @@ export async function login(email, password) {
   return res;
 }
 
-export async function registerTenant(tenantName, companyName, adminEmail, adminPassword, tenantCode) {
+export async function registerTenant(adminName, tenantName, companyName, adminEmail, adminPassword, tenantCode) {
   const res = await apiCall('POST', '/v1/auth/register-tenant', {
+    admin_name: adminName,
     tenant_name: tenantName,
     company_name: companyName,
     admin_email: adminEmail,
