@@ -73,8 +73,8 @@
 
     // If inside "設定部門" subtask and user types to add department
     if (currentTaskId && activeTask && activeTask.title.includes('設定部門')) {
+      const candidateName = detectDepartmentCandidate(userMessage);
       if (activeTask.status !== 'done') {
-        const candidateName = detectDepartmentCandidate(userMessage);
         if (candidateName) {
           setPendingTaskConfirmation({
             type: 'create_department',
@@ -92,6 +92,27 @@
             currentTaskId,
             'assistant',
             '請告訴我想建立的部門名稱（例如「行銷部」、「研發部」）。'
+          );
+        }
+        return;
+      } else {
+        if (candidateName) {
+          setPendingTaskConfirmation({
+            type: 'create_department',
+            payload: { name: candidateName, taskId: currentTaskId },
+            confirmLabel: '確認建立',
+            cancelLabel: '取消'
+          });
+          await appendTaskMessageAction(
+            currentTaskId,
+            'assistant',
+            `偵測到您想額外建立「${candidateName}」，確認要建立嗎？`
+          );
+        } else {
+          await appendTaskMessageAction(
+            currentTaskId,
+            'assistant',
+            '「設定部門」任務已於稍早完成。若您想繼續新增其他部門，請直接告訴我想建立的部門名稱（例如「研發部」）。'
           );
         }
         return;

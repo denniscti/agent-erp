@@ -157,11 +157,8 @@ mod tests {
         let parent = create_department_impl(&conn, "銷售部".to_string(), None).unwrap();
 
         // When: create_department_impl is executed with parent_id
-        let sub_result = create_department_impl(
-            &conn,
-            "銷售一組".to_string(),
-            Some(parent.id.clone()),
-        );
+        let sub_result =
+            create_department_impl(&conn, "銷售一組".to_string(), Some(parent.id.clone()));
 
         // Then: The sub-department is created and correctly references the parent_id
         assert!(sub_result.is_ok());
@@ -209,12 +206,8 @@ mod tests {
         let conn = setup_test_db();
 
         // When: create_department_impl is executed with whitespace parent_id
-        let result = create_department_impl(
-            &conn,
-            "財務部".to_string(),
-            Some("   ".to_string()),
-        )
-        .unwrap();
+        let result =
+            create_department_impl(&conn, "財務部".to_string(), Some("   ".to_string())).unwrap();
 
         // Then: parent_id is normalized to None
         assert_eq!(result.parent_id, None);
@@ -238,12 +231,8 @@ mod tests {
         let conn = setup_test_db();
         let dept1 = create_department_impl(&conn, "人事部".to_string(), None).unwrap();
         let dept2 = create_department_impl(&conn, "研發部".to_string(), None).unwrap();
-        let dept3 = create_department_impl(
-            &conn,
-            "前端小組".to_string(),
-            Some(dept2.id.clone()),
-        )
-        .unwrap();
+        let dept3 =
+            create_department_impl(&conn, "前端小組".to_string(), Some(dept2.id.clone())).unwrap();
 
         // When: list_departments_impl is called
         let list = list_departments_impl(&conn).unwrap();
