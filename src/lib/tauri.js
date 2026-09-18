@@ -1,3 +1,5 @@
+import { Channel as TauriChannel } from '@tauri-apps/api/core';
+
 // Detect if we are in Tauri runtime
 export const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
 
@@ -124,11 +126,13 @@ let mockLlmProviders = [
 const listeners = {};
 
 // Mock Channel implementation for streaming chat in browser
-export class Channel {
-  constructor() {
-    this.onmessage = null;
+class MockChannel {
+  constructor(onmessage) {
+    this.onmessage = onmessage || null;
   }
 }
+
+export const Channel = isTauri ? TauriChannel : MockChannel;
 
 // 1. Invoke wrapper
 export async function invoke(cmd, args = {}) {
@@ -270,6 +274,34 @@ export async function invoke(cmd, args = {}) {
       const { moduleId } = args;
       const response = await fetch(`/mock_cdn/${moduleId}_module.js`);
       return await response.text();
+    }
+    
+    case 'simulate_agent_chat': {
+      const { workspace, message, channel } = args;
+      if (channel && typeof channel.onmessage === 'function') {
+        let responseText = "Sales Workspace Context Loaded:\n- Product: AI Core Chip.\n- Mirrored Draft: SO-9922.\n- Current Action Required: Request operator's authorization to execute database writes and sync invoice.";
+        if (workspace === 'finance') {
+          responseText = "Finance BI Dashboard Analyzed:\n- Current gross margin is 25.4%.\n- Target is 25.0%.\n- Recommendation: Approve Customer A's PO-2026-0092 to leverage idle capacity and hit Q3 goals.";
+        } else if (workspace === 'crm') {
+          responseText = "Customer CRM Profiler:\n- Customer A has a credit rating of AAA.\n- Past ledger defaults: None.\n- Delivery success rate: 100%.\n- Recommendation: Proceed to process the order immediately.";
+        }
+
+        const words = responseText.split(' ');
+        let idx = 0;
+        const interval = setInterval(() => {
+          if (idx < words.length) {
+            const isLast = idx === words.length - 1;
+            channel.onmessage({ token: `${words[idx]} `, done: isLast });
+            idx++;
+            if (isLast) {
+              clearInterval(interval);
+            }
+          } else {
+            clearInterval(interval);
+          }
+        }, 40);
+      }
+      return null;
     }
     
     case 'agent_chat': {
