@@ -112,6 +112,8 @@ if (!mockTaskMessages || mockTaskMessages.length === 0) {
   saveStorage('agent_erp_mock_task_messages', mockTaskMessages);
 }
 
+let mockDepartments = loadStorage('agent_erp_mock_departments', []);
+
 let mockLlmProviders = [
   { id: "openai", label: "OpenAI GPT-4o", base_url: "https://api.openai.com/v1", model_name: "gpt-4o", requires_key: true, has_key: false, active: true },
   { id: "deepseek", label: "DeepSeek V3 (BYOK)", base_url: "https://api.deepseek.com/v1", model_name: "deepseek-chat", requires_key: true, has_key: false, active: false },
@@ -540,6 +542,29 @@ export async function invoke(cmd, args = {}) {
         .filter(m => m.task_id === (taskId || '').trim())
         .sort((a, b) => a.timestamp - b.timestamp);
       return filtered;
+    }
+
+    case 'create_department': {
+      const { name, parentId, parent_id } = args;
+      const targetParentId = parentId !== undefined ? parentId : parent_id;
+      const trimmedName = (name || '').trim();
+      if (!trimmedName) {
+        throw new Error('Department name cannot be empty');
+      }
+      const now = Math.floor(Date.now() / 1000);
+      const newDept = {
+        id: `dept_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        name: trimmedName,
+        parent_id: targetParentId ? targetParentId.trim() || null : null,
+        created_at: now
+      };
+      mockDepartments.push(newDept);
+      saveStorage('agent_erp_mock_departments', mockDepartments);
+      return newDept;
+    }
+
+    case 'list_departments': {
+      return [...mockDepartments];
     }
     
     default:
