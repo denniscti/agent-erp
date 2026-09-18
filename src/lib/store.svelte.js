@@ -112,7 +112,15 @@ export const appState = $state({
   /** @type {AuthTenant[]} */
   authTenants: [],
   /** @type {AuthTenant | null} */
-  activeTenant: null
+  activeTenant: null,
+
+  // Departments cache
+  /** @type {any[]} */
+  departments: [],
+
+  // Lightweight task confirmation state
+  /** @type {{ type: string, payload: any, confirmLabel: string, cancelLabel: string } | null} */
+  pendingTaskConfirmation: null
 });
 
 export function showToast(message) {
@@ -737,6 +745,106 @@ export async function updateTaskStatusAction(taskId, status) {
     await fetchTasks();
   } catch (err) {
     console.error("Failed to update task status:", err);
+  }
+}
+
+/**
+ * Fetch departments from SQLite / Mock
+ * @returns {Promise<any[]>}
+ */
+export async function fetchDepartments() {
+  try {
+    const list = await invoke('list_departments');
+    appState.departments = list || [];
+    return appState.departments;
+  } catch (err) {
+    console.error("Failed to fetch departments:", err);
+    return [];
+  }
+}
+
+/**
+ * Create a department
+ * @param {string} name
+ * @param {string | null} [parentId]
+ * @returns {Promise<any>}
+ */
+export async function createDepartmentAction(name, parentId = null) {
+  try {
+    const dept = await invoke('create_department', {
+      name,
+      parentId: parentId || null
+    });
+    await fetchDepartments();
+    return dept;
+  } catch (err) {
+    console.error("Failed to create department:", err);
+    throw err;
+  }
+}
+
+/**
+ * Set pending task confirmation
+ * @param {{ type: string, payload: any, confirmLabel?: string, cancelLabel?: string }} confirmation
+ */
+export function setPendingTaskConfirmation(confirmation) {
+  appState.pendingTaskConfirmation = {
+    type: confirmation.type,
+    payload: confirmation.payload || {},
+    confirmLabel: confirmation.confirmLabel || '確認建立',
+    cancelLabel: confirmation.cancelLabel || '取消'
+  };
+}
+
+/**
+ * Clear pending task confirmation
+ */
+export function clearPendingTaskConfirmation() {
+  appState.pendingTaskConfirmation = null;
+}
+
+/**
+ * Confirm pending task action
+ */
+export async function confirmPendingTaskAction() {
+  const conf = appState.pendingTaskConfirmation;
+  if (!conf) return;
+
+  if (conf.type === 'create_department') {
+    const { name, taskId } = conf.payload;
+    clearPendingTaskConfirmation();
+    try {
+      await createDepartmentAction(name);
+      if (taskId) {
+        await updateTaskStatusAction(taskId, 'done');
+        await appendTaskMessageAction(taskId, 'assistant', `已為您建立「${name}」！`);
+        await appendTaskMessageAction('main', 'assistant', `✅「設定部門」已完成，新增了『${name}』`);
+        showToast(`已成功建立「${name}」！`);
+      }
+    } catch (err) {
+      console.error("Failed to create department from confirmation:", err);
+      const errorObj = /** @type {any} */ (err);
+      const errorMsg = typeof err === 'string' ? err : (errorObj?.message || '建立部門失敗');
+      if (taskId) {
+        await appendTaskMessageAction(taskId, 'assistant', `建立「${name}」失敗：${errorMsg}`);
+      }
+      showToast(`建立部門失敗: ${errorMsg}`);
+    }
+  } else {
+    console.warn("Unknown pending task confirmation type:", conf.type);
+    clearPendingTaskConfirmation();
+  }
+}
+
+/**
+ * Cancel pending task action
+ */
+export async function cancelPendingTaskAction() {
+  const conf = appState.pendingTaskConfirmation;
+  const taskId = conf?.payload?.taskId || appState.activeTaskId;
+  clearPendingTaskConfirmation();
+  if (taskId) {
+    await appendTaskMessageAction(taskId, 'assistant', '好的，請告訴我正確的部門名稱');
   }
 }
 
