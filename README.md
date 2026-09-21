@@ -62,6 +62,15 @@ Rust 測試：
 cd src-tauri && cargo test
 ```
 
+## Tag 命名規則
+
+兩種 tag 不要混用，命名空間分開：
+
+- **`vX.Y.Z`**：正式發版用，push 這種 tag 會觸發 `.github/workflows/publish.yml` 的正式建置/發布流程（macOS/Windows 安裝檔、自動更新 manifest）。
+- **milestone 完成標記**（例如 `m2`）：單純標記「這個 commit 對應到某個 milestone 完成的狀態」，方便之後用 `git checkout m2` 回頭查看，**不會**觸發任何 CI/CD——`publish.yml` 只認 `v*` 開頭的 tag。命名時務必避開 `v` 開頭，不要不小心取成看起來像版號的名字。
+
+開發流程已改成 trunk-based（見 [`CLAUDE.md`](./CLAUDE.md#開發流程)），milestone 不再對應一條長期 branch，只在完成時打一個標記 tag。
+
 ## 規範文件
 
 - [`CLAUDE.md`](./CLAUDE.md)：專案角色定位、架構原則、開發流程
