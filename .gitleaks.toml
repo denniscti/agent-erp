@@ -1,0 +1,14 @@
+title = "agent-erp gitleaks config"
+
+[allowlist]
+description = "Known-safe hardcoded values, not real secrets"
+regexTarget = "match"
+regexes = [
+  # SHA256 hash of the literal string "password123", used only as the seed
+  # password for demo/dev accounts (admin@example.com / new@example.com) in
+  # src-tauri/src/lib.rs's init_db. Gated behind AGENT_ERP_SEED_DEMO_DATA=1,
+  # never active in a real deployment unless explicitly opted in. This is a
+  # hash, not a live credential — flagged by gitleaks' generic high-entropy
+  # heuristic, not an actual leak.
+  '''ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f''',
+]

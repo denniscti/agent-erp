@@ -39,6 +39,7 @@ func (m *AgentErp) getNodeContainer(src *dagger.Directory) *dagger.Container {
 // - cargo clippy -- -D warnings
 // - cargo test
 // - npm run build
+// - gitleaks secret scan (full git history)
 func (m *AgentErp) RunAllChecks(ctx context.Context, src *dagger.Directory) error {
 	g, ctx := errgroup.WithContext(ctx)
 
@@ -66,6 +67,20 @@ func (m *AgentErp) RunAllChecks(ctx context.Context, src *dagger.Directory) erro
 			Sync(ctx)
 		if err != nil {
 			return fmt.Errorf("npm_build: build failed: %w", err)
+		}
+		return nil
+	})
+
+	// 3. Gitleaks secret scan (scans full git history, needs .git present in src)
+	safeGo(g, func() error {
+		_, err := dag.Container().
+			From("ghcr.io/gitleaks/gitleaks:latest").
+			WithDirectory("/src", src).
+			WithWorkdir("/src").
+			WithExec([]string{"gitleaks", "detect", "--source", "/src", "--config", "/src/.gitleaks.toml", "--verbose", "--redact"}).
+			Sync(ctx)
+		if err != nil {
+			return fmt.Errorf("gitleaks_scan: secret(s) detected or scan failed: %w", err)
 		}
 		return nil
 	})
