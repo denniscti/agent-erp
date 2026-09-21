@@ -3,7 +3,9 @@
     appState, 
     switchActiveTask, 
     appendTaskMessageAction, 
-    completeDepartmentSetupTask 
+    setPendingTaskConfirmation,
+    confirmPendingTaskAction,
+    cancelPendingTaskAction
   } from '../store.svelte.js';
   import { Channel, invoke } from '../tauri.js';
   import { tick } from 'svelte';
@@ -33,6 +35,30 @@
     }
   });
 
+  function detectDepartmentCandidate(text) {
+    if (!text) return null;
+    const trimmed = text.trim();
+    // 1. Quoted department name: 「行銷部」, "研發部"
+    const quoteMatch = trimmed.match(/[「『"']([\u4e00-\u9fa5A-Za-z0-9]{2,12}部)[」』"']/);
+    if (quoteMatch) return quoteMatch[1];
+
+    // 2. Action verb prefix: 幫我新增/建立/設立 行銷部
+    const actionMatch = trimmed.match(/(?:新增|建立|成立|設定|設立|創立|加)\s*(?:一個|一組)?\s*([A-Za-z0-9\u4e00-\u9fa5]{2,10}部)/);
+    if (actionMatch) return actionMatch[1];
+
+    // 3. Any 2~10 Chinese/alphanumeric characters ending with '部'
+    const stopWords = ['全部', '一部', '內部', '外部', '這部', '那部', '各部', '本部', '局部', '首部'];
+    const words = trimmed.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,10}部/g);
+    if (words) {
+      for (const w of words) {
+        if (!stopWords.includes(w)) {
+          return w;
+        }
+      }
+    }
+    return null;
+  }
+
   async function handleSend(e) {
     if (e) e.preventDefault();
     if (!inputVal.trim() || appState.isChatStreaming) return;
@@ -47,9 +73,48 @@
 
     // If inside "設定部門" subtask and user types to add department
     if (currentTaskId && activeTask && activeTask.title.includes('設定部門')) {
+      const candidateName = detectDepartmentCandidate(userMessage);
       if (activeTask.status !== 'done') {
-        const deptName = userMessage.includes('部') ? userMessage.replace(/.*(新增|建立|要|加)/, '').trim() || '銷售部' : '銷售部';
-        await completeDepartmentSetupTask(currentTaskId, deptName);
+        if (candidateName) {
+          setPendingTaskConfirmation({
+            type: 'create_department',
+            payload: { name: candidateName, taskId: currentTaskId },
+            confirmLabel: '確認建立',
+            cancelLabel: '取消'
+          });
+          await appendTaskMessageAction(
+            currentTaskId,
+            'assistant',
+            `偵測到您想建立「${candidateName}」，確認要建立嗎？`
+          );
+        } else {
+          await appendTaskMessageAction(
+            currentTaskId,
+            'assistant',
+            '請告訴我想建立的部門名稱（例如「行銷部」、「研發部」）。'
+          );
+        }
+        return;
+      } else {
+        if (candidateName) {
+          setPendingTaskConfirmation({
+            type: 'create_department',
+            payload: { name: candidateName, taskId: currentTaskId },
+            confirmLabel: '確認建立',
+            cancelLabel: '取消'
+          });
+          await appendTaskMessageAction(
+            currentTaskId,
+            'assistant',
+            `偵測到您想額外建立「${candidateName}」，確認要建立嗎？`
+          );
+        } else {
+          await appendTaskMessageAction(
+            currentTaskId,
+            'assistant',
+            '「設定部門」任務已於稍早完成。若您想繼續新增其他部門，請直接告訴我想建立的部門名稱（例如「研發部」）。'
+          );
+        }
         return;
       }
     }
@@ -89,6 +154,21 @@
   function handleQuickPrompt(prompt) {
     inputVal = prompt;
     handleSend();
+  }
+
+  async function handleQuickCreateDepartment(deptName = '銷售部') {
+    if (!activeTask) return;
+    setPendingTaskConfirmation({
+      type: 'create_department',
+      payload: { name: deptName, taskId: activeTask.id },
+      confirmLabel: '確認建立',
+      cancelLabel: '取消'
+    });
+    await appendTaskMessageAction(
+      activeTask.id,
+      'assistant',
+      `偵測到您想建立「${deptName}」，確認要建立嗎？`
+    );
   }
 </script>
 
@@ -180,13 +260,38 @@
     {#if appState.activeTaskId && activeTask && activeTask.title.includes('設定部門') && activeTask.status !== 'done'}
       <div class="subtask-quick-action glass-panel">
         <div class="quick-action-title">🏢 快速建立部門引導</div>
-        <p class="quick-action-desc">點擊下方按鈕可快速建立「銷售部」並將結果自動摘要回報給主 Agent：</p>
+        <p class="quick-action-desc">點擊下方按鈕可快速觸發建立「銷售部」的確認流程：</p>
         <button 
           class="btn btn-primary btn-sm" 
-          onclick={() => completeDepartmentSetupTask(activeTask.id, '銷售部')}
+          onclick={() => handleQuickCreateDepartment('銷售部')}
         >
           ✨ 建立「銷售部」並完成任務
         </button>
+      </div>
+    {/if}
+
+    <!-- Lightweight Subtask Confirmation Card -->
+    {#if appState.pendingTaskConfirmation}
+      <div class="task-confirmation-card glass-panel">
+        <div class="confirmation-header">
+          <span class="confirmation-icon">🏢</span>
+          <span class="confirmation-title">待確認動作</span>
+        </div>
+        <div class="confirmation-content">
+          {#if appState.pendingTaskConfirmation.type === 'create_department'}
+            偵測到您想建立<strong>「{appState.pendingTaskConfirmation.payload.name}」</strong>，確認要建立嗎？
+          {:else}
+            確認執行此動作嗎？
+          {/if}
+        </div>
+        <div class="confirmation-actions">
+          <button class="btn btn-primary btn-sm" onclick={confirmPendingTaskAction}>
+            {appState.pendingTaskConfirmation.confirmLabel || '確認建立'}
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick={cancelPendingTaskAction}>
+            {appState.pendingTaskConfirmation.cancelLabel || '取消'}
+          </button>
+        </div>
       </div>
     {/if}
 
@@ -389,6 +494,73 @@
     color: var(--text-secondary);
     margin-bottom: 12px;
     line-height: 1.45;
+  }
+
+  .task-confirmation-card {
+    padding: 16px 20px;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(var(--accent-rgb), 0.45);
+    background: rgba(var(--accent-rgb), 0.08);
+    max-width: 92%;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+    animation: cardFadeIn 0.25s ease-out;
+  }
+
+  .confirmation-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .confirmation-icon {
+    font-size: 1.1rem;
+  }
+
+  .confirmation-title {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .confirmation-content {
+    font-size: 0.88rem;
+    color: var(--text-secondary);
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+
+  .confirmation-content strong {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .confirmation-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .btn-secondary {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    padding: 6px 14px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.16);
+    color: var(--text-primary);
+  }
+
+  @keyframes cardFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
   }
 
   .chat-input-container {

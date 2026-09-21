@@ -4,6 +4,7 @@ use tauri::http::Response;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub mod auth;
+pub mod departments;
 mod downloader;
 pub mod tasks;
 pub mod tps2_types;
@@ -167,6 +168,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     tasks::create_tasks_tables(&conn)
         .map_err(|e| format!("Failed to create tasks tables: {}", e))?;
+
+    departments::create_departments_table(&conn)
+        .map_err(|e| format!("Failed to create departments table: {}", e))?;
 
     // Seed mock order if empty
     let mut stmt = conn
@@ -589,7 +593,9 @@ pub fn run() {
             tasks::list_tasks,
             tasks::update_task_status,
             tasks::append_task_message,
-            tasks::get_task_messages
+            tasks::get_task_messages,
+            departments::create_department,
+            departments::list_departments
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
