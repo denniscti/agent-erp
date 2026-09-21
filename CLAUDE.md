@@ -31,7 +31,8 @@ TPS2 是我們整合的外部後端（Go + Clean Architecture/DDD），分析／
 
 ## 開發流程
 
-- **依 milestone 開 feature branch**：目前 M1（帳號與租戶起步）的開發都在 `m1-account-tenant-onboarding` branch 進行，不要直接在 `main` 上開發功能；等 M1 全部完成才合併回 `main`。之後新的 milestone 比照這個模式，各自開一條 branch。
+- **開發流程（2026-09-21 起改為 trunk-based）**：每個 issue/功能各自開 feature branch，PR 直接對 `main` 開，通過 CI 跟審查就合併，不再等整個 milestone 做完才合併回 `main`。改這個做法的理由：`main` 目前沒有保護任何正式使用者（發版是手動打 tag 觸發，不是 main 的 HEAD 自動發布），繼續讓 milestone branch 跟 main 長期分岔，只會累積 rebase/squash-merge 衝突的技術債（M2 開發期間就實際發生過）。**重要例外**：真的要發版時，不能無腦抓 `main` 的最新 commit 去打 tag，要刻意確認這個時間點的功能組合是完整、想要發布的狀態，因為 main 上隨時可能躺著還沒做完的功能。
+  - 舊模式的歷史產物：`m1-account-tenant-onboarding`（M1 完成後已合併回 main）、`m2-team-onboarding`（M2 開發期間用過，之後合併回 main 即刪除）——這兩條 milestone branch 不是慣例，之後新 milestone 不會再開對應的 branch。
 - **跨 repo 的 milestone 命名慣例不同**：agent-erp 用 `M1`/`M2`/... 對應產品里程碑（目前有兩組編號的 M1-M6 milestone 混在一起，指涉功能時要用完整標題而非只講數字，避免混淆）；TPS2 用 `vX.Y.0` 版本號命名。當某個 agent-erp milestone 需要後端配合、但還沒排進 TPS2 既有 milestone 時，慣例是**在 TPS2 開一個專屬 milestone**（例如 `v0.10.0-Account-Tenant-Onboarding-Backend`），標題直接對應被卡住的 agent-erp milestone，集中追蹤這波開發過程中發現的所有後端缺口，不要分散開在不同既有 milestone 底下。
 
 ---
