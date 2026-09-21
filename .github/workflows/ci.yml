@@ -14,7 +14,7 @@ env:
 jobs:
   resolve-dagger-version:
     runs-on: >-
-      ${{ github.repository == 'NumaxTPS2/agent-erp'
+      ${{ github.repository == 'Numax/agent-erp'
           && fromJSON('["self-hosted","coolify"]')
           || 'ubuntu-latest' }}
     outputs:
@@ -38,7 +38,7 @@ jobs:
   check-quality:
     needs: resolve-dagger-version
     runs-on: >-
-      ${{ github.repository == 'NumaxTPS2/agent-erp'
+      ${{ github.repository == 'Numax/agent-erp'
           && fromJSON(format('["self-hosted","dagger:{0}"]', needs.resolve-dagger-version.outputs.dagger_version))
           || 'ubuntu-latest' }}
 
@@ -47,7 +47,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup Dagger (only for hosted runners)
-        if: github.repository != 'NumaxTPS2/agent-erp'
+        if: github.repository != 'Numax/agent-erp'
         env:
           DAGGER_VERSION: ${{ needs.resolve-dagger-version.outputs.dagger_version }}
         run: |
