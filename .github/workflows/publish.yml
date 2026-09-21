@@ -81,10 +81,10 @@ jobs:
     needs: publish-tauri
     permissions:
       contents: write
-    runs-on: >-
-      ${{ github.repository == 'NumaxTPS2/agent-erp'
-          && fromJSON('["self-hosted","coolify"]')
-          || 'ubuntu-latest' }}
+    # Same fromJSON/runs-on limitation as ci.yml (see notes there) — Gitea's
+    # expression evaluator can't resolve fromJSON() into an actual list for
+    # runs-on, so this must be a plain literal.
+    runs-on: [self-hosted, coolify]
     steps:
       - uses: actions/checkout@v6
 

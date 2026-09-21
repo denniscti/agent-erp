@@ -34,8 +34,14 @@ jobs:
 
   check-quality:
     needs: resolve-dagger-version
-    runs-on: >-
-      ${{ fromJSON(format('["self-hosted","dagger:{0}"]', needs.resolve-dagger-version.outputs.dagger_version)) }}
+    # NOTE: this label is a literal that must be kept in sync with dagger.json's
+    # engineVersion by hand. Gitea's expression evaluator doesn't support
+    # fromJSON()/format() for computing `runs-on` dynamically (confirmed: it
+    # resolves to the literal label "Array" instead of an actual list), so we
+    # can't derive this from needs.resolve-dagger-version.outputs.dagger_version
+    # here. The "Validate Dagger CLI Version" step below still catches drift
+    # at runtime and fails loudly if this label falls out of sync.
+    runs-on: [self-hosted, "dagger:0.21.7"]
 
     steps:
       - name: Checkout Code
