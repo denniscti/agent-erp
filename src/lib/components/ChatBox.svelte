@@ -35,7 +35,7 @@
     }
   });
 
-  function detectDepartmentCandidate(text) {
+  function detectDepartmentCandidateRegex(text) {
     if (!text) return null;
     const trimmed = text.trim();
     // 1. Quoted department name: 「行銷部」, "研發部"
@@ -59,6 +59,19 @@
     return null;
   }
 
+  async function detectDepartmentCandidate(text) {
+    if (!text || !text.trim()) return null;
+    try {
+      const llmResult = await invoke('detect_department_intent', { userMessage: text.trim() });
+      if (llmResult && typeof llmResult === 'string' && llmResult.trim()) {
+        return llmResult.trim();
+      }
+    } catch (err) {
+      console.warn('[LLM Department Detection] Failed or unavailable, falling back to regex:', err);
+    }
+    return detectDepartmentCandidateRegex(text);
+  }
+
   async function handleSend(e) {
     if (e) e.preventDefault();
     if (!inputVal.trim() || appState.isChatStreaming) return;
@@ -73,7 +86,7 @@
 
     // If inside "設定部門" subtask and user types to add department
     if (currentTaskId && activeTask && activeTask.title.includes('設定部門')) {
-      const candidateName = detectDepartmentCandidate(userMessage);
+      const candidateName = await detectDepartmentCandidate(userMessage);
       if (activeTask.status !== 'done') {
         if (candidateName) {
           setPendingTaskConfirmation({

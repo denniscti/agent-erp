@@ -598,6 +598,10 @@ export async function invoke(cmd, args = {}) {
     case 'list_departments': {
       return [...mockDepartments];
     }
+
+    case 'detect_department_intent': {
+      return null;
+    }
     
     default:
       console.warn(`Unhandled mock IPC command: ${cmd}`);

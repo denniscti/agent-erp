@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mac": "bash ./scripts/dev-mac.sh",
+    "dev:win": "powershell -ExecutionPolicy Bypass -File ./scripts/dev-win.ps1",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./jsconfig.json",
+    "test:llm": "node ./scripts/test-nvidia-api.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

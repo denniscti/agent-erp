@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub mod auth;
 pub mod departments;
 mod downloader;
+pub mod llm;
 pub mod tasks;
 pub mod tps2_types;
 
@@ -595,7 +596,8 @@ pub fn run() {
             tasks::append_task_message,
             tasks::get_task_messages,
             departments::create_department,
-            departments::list_departments
+            departments::list_departments,
+            llm::detect_department_intent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
