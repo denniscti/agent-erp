@@ -40,25 +40,27 @@ window.__SHELL__.setSystemPrompt(newModule.agent.systemPrompt);
 
 **效果**：AI 從「通用助理」立即轉變為該業務領域的「域內專家」，其回答風格、優先考慮的資訊、乃至語氣均由模組控制。
 
-### 3.2. 技能（Skills）動態註冊
+### 3.2. 工具（Tools）動態註冊
 
-每個模組在 `agent.skills` 中聲明一組技能名稱，對應模組所需的業務操作能力。Shell 在模組切換時，向 AI 執行環境動態解除舊模組的技能繫結，並重新掛載新模組的技能：
+每個模組在 `agent.tools` 中聲明一組工具定義（格式見第 7 節，跟 `task_driven_workflow.md` 第 3.2 節的 `AgentProfile`/`ToolDefinition` 結構共用同一份定義），對應模組所需的業務操作能力。Shell 在模組切換時，向 AI 執行環境動態解除舊模組的工具繫結，並重新掛載新模組的工具：
 
 ```javascript
 // Shell 在模組切換時執行
-window.__SHELL__.unregisterSkills(prevModule.agent.skills);
-window.__SHELL__.registerSkills(newModule.agent.skills);
+window.__SHELL__.unregisterTools(prevModule.agent.tools);
+window.__SHELL__.registerTools(newModule.agent.tools);
 ```
 
-AI 工具列表（Tool List）因此動態更新，確保 AI 在「訂單審核」模組中只能呼叫訂單相關的 IPC 指令，不會越界呼叫庫存或財務指令。
+AI 工具列表（Tool List）因此動態更新，確保 AI 在「訂單審核」模組中只能呼叫訂單相關的工具，不會越界呼叫庫存或財務指令。工具清單只決定 AI「能不能看到、選到」這個動作——選到之後仍要經過第 8 節的人在迴圈確認才會真的執行，不會因為在白名單內就跳過確認。
 
 ### 3.3. AI 域內身份範例
 
-| 模組              | `systemPrompt` 定義的身份  | 可用技能範例                                       |
+| 模組              | `systemPrompt` 定義的身份  | 可用工具範例                                       |
 |-------------------|----------------------------|----------------------------------------------------|
 | `order_approval`  | 訂單審核專家               | `get_orders`, `approve_order`, `check_capacity`    |
 | `finance_analysis`| 財務分析師                 | `get_pnl_report`, `flag_anomaly`, `export_csv`     |
 | `inventory`       | 庫存管理專員               | `get_stock_levels`, `create_purchase_order`, `alert_low_stock` |
+
+表中名稱是每個工具 `ToolDefinition.function.name` 的簡寫，完整定義（含 `description`/`parameters`）見第 7 節。
 
 ---
 
@@ -85,8 +87,8 @@ AgentERP 的每一個業務操作均遵循以下五步驟工作流程：
    └─ 在 agent-main 對話框以自然語言輸入業務意圖
        例：「顯示今日所有待審的訂單，金額超過 50 萬的優先排列」
 
-3. AI 處理（AI Processes with Skills）
-   └─ AI 解析意圖，呼叫對應技能（如 get_orders）查詢資料
+3. AI 處理（AI Processes with Tools）
+   └─ AI 解析意圖，呼叫對應工具（如 get_orders）查詢資料
    └─ AI 將結果整理為結構化回應卡片，透過 Shell API 推送至 context-panel
 
 4. 使用者驗證（User Verifies in Context Panel）
@@ -95,7 +97,7 @@ AgentERP 的每一個業務操作均遵循以下五步驟工作流程：
 
 5. 使用者確認（User Confirms / Approves）
    └─ 在 context-panel 中點擊「核准」或對 AI 說「核准這三筆訂單」
-   └─ AI 呼叫 approve_order 技能（IPC → Rust → 資料庫），完成操作
+   └─ AI 呼叫 approve_order 工具（IPC → Rust → 資料庫），完成操作
    └─ 操作結果以 Toast 或 AI 回覆訊息告知使用者
 ```
 
@@ -136,41 +138,57 @@ AI 透過在其回應 JSON 中包含 `__shell_render__` 指令通知 Shell 觸�
 {
   "agent": {
     "systemPrompt": "你是一位訂單審核專家，負責協助業務主管審核銷售訂單。你只能查詢和核准訂單，無法修改訂單金額或客戶資料。在提供建議前，你應優先呼叫 get_orders 取得最新資料。",
-    "skills": ["get_orders", "approve_order", "check_capacity"]
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "approve_order",
+          "description": "核准指定的銷售訂單",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "orderId": { "type": "string", "description": "訂單編號" }
+            },
+            "required": ["orderId"]
+          }
+        }
+      }
+    ]
   }
 }
 ```
 
-| 欄位            | 型別             | 必填 | 說明                                                                    |
-|-----------------|------------------|------|-------------------------------------------------------------------------|
-| `systemPrompt`  | `string`         | 是   | 注入 AI 的系統提示詞，定義 AI 的角色、能力範圍與行為準則               |
-| `skills`        | `string[]`       | 是   | 本模組允許 AI 呼叫的技能（IPC 指令）名稱列表，Shell 僅允許列表內的指令 |
+| 欄位            | 型別               | 必填 | 說明                                                                                                                                    |
+|-----------------|--------------------|------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `systemPrompt`  | `string`           | 是   | 注入 AI 的系統提示詞，定義 AI 的角色、能力範圍與行為準則                                                                               |
+| `tools`         | `ToolDefinition[]` | 是   | 本模組允許 AI 呼叫的工具定義列表，格式與 OpenAI／NVIDIA NIM 的 `tools` 參數相容（`type`/`function.name`/`function.description`/`function.parameters`）。Shell 僅允許列表內宣告過的 `function.name`，且每次呼叫都要經過第 8 節的人在迴圈確認才會真的轉發執行——只放工具名稱清單不夠，AI 需要 `description`/`parameters` 才能判斷要不要呼叫、怎麼帶參數 |
 
 ---
 
-## 8. 技能名稱與 Tauri IPC 指令的對應關係
+## 8. 工具名稱與 Tauri IPC 指令的對應關係
 
-`agent.skills` 中的每個技能名稱對應一個 Rust 端以 `#[tauri::command]` 標記的指令函式。對應方式採用直接映射（技能名稱即指令函式名稱）：
+`agent.tools` 中每個 `function.name` 對應一個 Rust 端以 `#[tauri::command]` 標記的指令函式。對應方式採用直接映射（`function.name` 即指令函式名稱）：
 
 ```
-技能名稱（manifest）     →  Tauri IPC 指令名稱   →  Rust 函式
-─────────────────────────────────────────────────────────────
-"get_orders"            →  get_orders            →  async fn get_orders(...)
-"approve_order"         →  approve_order         →  async fn approve_order(...)
-"check_capacity"        →  check_capacity        →  async fn check_capacity(...)
+工具名稱（manifest 的 function.name）  →  Tauri IPC 指令名稱   →  Rust 函式
+──────────────────────────────────────────────────────────────────────────
+"get_orders"                          →  get_orders            →  async fn get_orders(...)
+"approve_order"                       →  approve_order         →  async fn approve_order(...)
+"check_capacity"                      →  check_capacity        →  async fn check_capacity(...)
 ```
 
-Shell 在模組載入完成後，向 AI 執行環境提供一個工具呼叫代理（Tool Call Proxy），攔截 AI 發出的工具呼叫請求，驗證技能名稱是否在當前模組的白名單內，若通過則透過 `invoke(skillName, args)` 轉發至 Tauri 後端：
+Shell 在模組載入完成後，向 AI 執行環境提供一個工具呼叫代理（Tool Call Proxy），攔截 AI 發出的工具呼叫請求，驗證工具名稱是否在當前模組的白名單內；若通過，不會立即執行，而是先轉譯成人看得懂的確認文字，交給使用者明確確認（比照 `task_driven_workflow.md` 第 3.2 節任務層級已驗證過的 human-in-the-loop 模式），使用者確認後才真的透過 `invoke(toolName, args)` 轉發至 Tauri 後端：
 
 ```javascript
 // Shell 的 Tool Call Proxy 核心邏輯
-async function handleToolCall(skillName, args) {
-  const allowedSkills = activeModule.agent.skills;
-  if (!allowedSkills.includes(skillName)) {
-    throw new Error(`技能 "${skillName}" 不在當前模組的授權範圍內。`);
+async function handleToolCall(toolName, args) {
+  const allowedTools = activeModule.agent.tools.map(t => t.function.name);
+  if (!allowedTools.includes(toolName)) {
+    throw new Error(`工具 "${toolName}" 不在當前模組的授權範圍內。`);
   }
-  return await invoke(skillName, args);
+  // 不會直接執行：轉譯成待確認卡片，等待使用者明確確認後才真的呼叫 invoke()
+  return presentPendingConfirmation(toolName, args);
 }
 ```
 
-這確保了即使 AI 模型嘗試呼叫未授權的指令，Shell 層也會在前端攔截阻斷，形成雙重防護（Shell 前端 + Rust 端 IPC 白名單）。
+這確保了兩層獨立的防護：白名單擋 AI 模型嘗試呼叫未授權的指令（Shell 前端 + Rust 端 IPC 雙重防護），人在迴圈確認則擋白名單內、但 AI 誤判或幻覺出的錯誤動作——兩者缺一不可，白名單通過不代表可以跳過確認。

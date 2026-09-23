@@ -54,6 +54,7 @@ npm run build      # 前端靜態資源建置
 | `TPS2_BASE_URL` | 是 | TPS2 環境的 base URL（例如 `https://api-tps2-dev.numax.com.tw`）。留空或不設定則走本地 mock |
 | `CF_ACCESS_CLIENT_ID` | 視環境而定 | 若目標環境有 Cloudflare Access 保護才需要，對應 `CF-Access-Client-Id` header |
 | `CF_ACCESS_CLIENT_SECRET` | 視環境而定 | 若目標環境有 Cloudflare Access 保護才需要，對應 `CF-Access-Client-Secret` header |
+| `AGENT_ERP_LLM_TRACE_RETENTION_DAYS` | 否 | `llm_traces` 表（見 [`task_driven_workflow.md`](./docs/system_design/task_driven_workflow.md) 第 3.3 節）的保留天數，App 啟動時清除超過此天數的紀錄。未設定則預設 30 天 |
 
 ```bash
 # 本地開發需要預設測試帳號時：

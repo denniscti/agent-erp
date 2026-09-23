@@ -59,15 +59,114 @@ interface Conversation {
 
 ## 3.1. 主 Agent 與子 Agent：任務由子 Agent 代理，結果回報主 Agent
 
-模組層級的環境對話（第 3 節的 Ambient Conversation）由**主 Agent** 負責——它是使用者切換模組時看到的那個持續身份（`agent_first_ux.md` 第 3 節的 systemPrompt/skills）。
+模組層級的環境對話（第 3 節的 Ambient Conversation）由**主 Agent** 負責——它是使用者切換模組時看到的那個持續身份（`agent_first_ux.md` 第 3 節的 `AgentProfile`，見本文件第 3.2 節）。
 
 每個 Task 一旦建立，實際協助使用者完成它的不是主 Agent 本人，而是一個**專屬這個 Task 的子 Agent**：
 
-- 子 Agent 在該 Task 綁定的 `Conversation` 裡跟使用者互動，範疇收斂在這個 Task 本身——`systemPrompt` 可以比模組層級更具體（例：「你正在協助處理『超預算核准』這筆採購案的核准/拒絕，不需要處理其他業務」），`skills` 也可以只給這個任務需要的子集，不用整個模組的技能都開放
+- 子 Agent 在該 Task 綁定的 `Conversation` 裡跟使用者互動，範疇收斂在這個 Task 本身——`systemPrompt` 可以比模組層級更具體（例：「你正在協助處理『超預算核准』這筆採購案的核准/拒絕，不需要處理其他業務」），`tools` 也可以只給這個任務需要的子集，不用整個模組的工具都開放
 - 主 Agent **不需要持有子 Agent 的完整對話記錄**——上下文不會隨著任務數量增加而被拖大，每個子 Agent 各自輕量、聚焦
 - 子 Agent 的任務結束時（狀態轉為 `done`/`cancelled`），把結果**摘要**回報給主 Agent 的環境對話（以系統訊息形式插入，例如：「✅「超預算核准」已由主管核准，金額 $XX」）——使用者即使沒有點進子任務，回到環境對話也能看到事情有進展，不需要自己去每個任務裡確認
 
 這個關係跟第 4 節的任務面板互動一致：點擊任務卡片＝切換到該 Task 專屬的子 Agent 與其 `Conversation`；回到環境對話＝切回主 Agent，主 Agent 手上只有各子 Agent回報的摘要，不是原始逐字稿。
+
+---
+
+## 3.2. AgentProfile 的格式與人在迴圈執行
+
+「Skill」這個詞在本文件裡保留給未來的程序性指南內容（見本節最後一段的名詞界定），不用來稱呼下面這個結構。不管是模組層級的主 Agent，還是任務層級的子 Agent，兩者的身份與能力定義都是同一種結構，稱為 `AgentProfile`：
+
+```typescript
+interface AgentProfile {
+  systemPrompt: string;
+  tools: ToolDefinition[];
+}
+
+interface ToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: object;   // JSON Schema
+  };
+}
+```
+
+`ToolDefinition` 的形狀跟 OpenAI／NVIDIA NIM 的 `tools` 參數相容，AI 端不需要額外轉換格式。子 Agent 的 `tools` 是主 Agent `tools` 的子集——子 Agent 的範疇收斂在單一 Task，不會持有比主 Agent 更大的呼叫權限。
+
+AI 選中一個工具並帶出參數後，不會直接執行：一律先轉譯成人看得懂的確認文字，插入該 Task（或環境對話）的訊息串等待使用者明確確認，確認後才真的呼叫對應的 Tauri command。白名單檢查（是否為宣告過的工具名稱）跟人在迴圈確認是兩層獨立的防護，缺一不可——白名單擋越權呼叫，確認卡片擋 AI 誤判或幻覺出的錯誤動作。
+
+任務層級的 `tools` 目前直接定義在 Rust 程式碼裡（依任務類型對應一組固定的工具函式），模組層級走 `manifest.json`（見 `agent_first_ux.md` 第 7 節）——兩者的外部化程度不需要同步，任務層級之後有需要再抽離成獨立設定。
+
+每個任務類型／模組的 `tools` 集合是靜態、依 ID 固定給的，不隨任務目前的狀態或對話進度動態增減；也沒有版本機制——改了程式碼或 manifest 就是改了，跟 App 本身的版本綁在一起，同一時間只存在一份定義。多版本並存（例如已進行中的對話沿用建立當下的舊版 `AgentProfile`）是一個獨立於本文件之外的問題，只有在真的出現這種需求時才需要另外設計。
+
+**`AgentProfile` 不是 Skill**：`systemPrompt`（一句話框住角色與邊界）加 `tools`（單一動作的呼叫規格），兩者都不是「教 AI 怎麼一步步協助使用者完成某類任務」的程序性指南（步驟、範例、邊界情況、什麼時候該先問清楚）。後者才是「Skill」這個詞該指的東西，目前無論模組層級或任務層級都還沒有這一層內容，是獨立於 `AgentProfile` 之外、尚待設計的問題。
+
+---
+
+## 3.3. Harness：驅動迴圈、跨模組共用與觀測性
+
+Harness 是驅動「模型 ⇄ 工具執行」這個迴圈的執行環境本身——`AgentProfile`（第 3.2 節）跟 Skill 都只是餵給 harness 的輸入資料，harness 才是真正跑這個迴圈、決定要不要真的執行 AI 選中的動作的程式碼。目前這段邏輯散落在 `ChatBox.svelte`（觸發偵測、呈現確認卡片）與 `store.svelte.js`（確認後執行、結果回填）裡，且完全綁定「設定部門」這一個任務，沒有可以跨模組／跨任務共用的形式。
+
+### 核心迴圈（跨模組/任務共用，不重寫）
+
+```
+1. 組 AgentProfile（systemPrompt + tools）送給模型
+2. 收到回應：
+   - 無 tool_call → 直接顯示文字回覆
+   - 有 tool_call → 白名單檢查 function.name 是否在 AgentProfile.tools 內
+     → 通過：查該工具的 ToolHandler，呼叫 handler.describeConfirmation(args)
+       產生確認文字，插入待確認卡片
+     → 不通過：AI 選中未宣告過的工具，視為異常（見下方觀測性）
+3. 使用者確認後：呼叫 handler.execute(args)
+4. 執行結果丟給 handler.formatResult(result)，插入對話訊息
+```
+
+### ToolHandler（各模組/任務註冊，harness 核心不需要知道細節）
+
+```typescript
+interface ToolHandler {
+  definition: ToolDefinition;
+  describeConfirmation(args): string;
+  execute(args): Promise<unknown>;
+  formatResult(result): string;
+  requiresConfirmation?: boolean;   // 預設 true，唯讀查詢可設 false
+}
+```
+
+harness 核心迴圈只寫一次、跨模組共用；各模組/任務只要註冊自己的 `ToolHandler[]`，不用重寫整套確認卡片流程。`requiresConfirmation` 讓「唯讀查詢是否也要走確認卡片」變成每個工具自己的明確選擇，不是套用同一套流程時的疏漏。
+
+### 是否讓 harness 本身可抽換（不同實作互換）
+
+現階段不做。目前只有一個實作（#93/#94 的部門偵測），沒有第二個具體案例可以歸納「抽換介面該長什麼樣」——跟 `agent_first_ux.md` 原先那套模組層級設計犯過的錯一樣：在還沒有真實案例前先設計一層抽象。常見會想「優化」的地方，都已經有更精準的抽換點可以用，不需要整個 harness 可抽換：換 LLM 供應商/模型交給 `NimClient` trait；要不要確認交給 `ToolHandler.requiresConfirmation`；重試/逾時策略是 `NimClient` 實作內部的事。真的需要「整套迴圈邏輯本身要換」（例如模型一次連續選好幾個工具、不必每次都回來問人，跟現在的單輪一個工具不同形狀）的情境出現時，才需要設計抽換介面。
+
+### 觀測性——兩條分開的紀錄，不要混用同一張表
+
+**1. 人的決定**（沿用既有 `audit_logs` 表：`id`/`action_type`/`arguments`/`decision`/`operator`/`timestamp`，已用於訂單核准/拒絕流程）：每次確認/取消寫一筆，`decision` = `"approved"`/`"rejected"`（沿用既有訂單核准流程的詞彙，不同功能不要各自發明一套決定詞彙）；白名單檢查未通過時也寫一筆，`decision` = `"rejected_unauthorized"`，跟使用者主動取消分開查，用來事後追蹤 AI 有沒有出現越界呼叫的異常行為。目前部門建立/查詢流程完全沒有寫入這張表——harness 落地時要補上，這不是新增能力，是把既有機制套用到所有工具呼叫。
+
+**2. LLM 互動內容**（新表 `llm_traces`，供事後檢視、優化 prompt 用，跟業務稽核用的 `audit_logs` 刻意分開，不合併）：
+
+```sql
+CREATE TABLE llm_traces (
+  id TEXT PRIMARY KEY,
+  agent_scope TEXT NOT NULL,      -- 這次呼叫屬於哪個 AgentProfile（module id 或 task id）
+  system_prompt TEXT NOT NULL,
+  tools_json TEXT NOT NULL,       -- 送出的 tools schema
+  user_message TEXT NOT NULL,
+  raw_response TEXT,              -- 模型原始回應（content 或 tool_calls 的 JSON）
+  parsed_result TEXT,             -- harness 解析後的結果
+  model TEXT NOT NULL,
+  latency_ms INTEGER,
+  error TEXT,                     -- 呼叫失敗時記錄錯誤訊息
+  human_decision TEXT,            -- 之後使用者確認/取消的結果，NULL = 尚未確認或無需確認
+  created_at INTEGER NOT NULL
+)
+```
+
+harness 核心每次呼叫模型就寫一筆（`parsed_result`/`error` 收到回應後補上），使用者確認/取消時回填同一筆的 `human_decision`（用 `id` 關聯，不等使用者做出決定才一次寫入，避免沒有決定的案例查不到模型當時的判斷）。這樣可以直接查「哪些 `parsed_result` 是 `NULL` 但 `user_message` 看起來應該要中」、「哪些被使用者 cancel、原始輸入長什麼樣」，拿去調整 `system_prompt`。
+
+**保留期限**：預設保留 30 天，可用環境變數 `AGENT_ERP_LLM_TRACE_RETENTION_DAYS` 覆寫（比照現有 `AGENT_ERP_SEED_DEMO_DATA`/`TPS2_BASE_URL` 的慣例）。App 啟動時執行一次 `DELETE FROM llm_traces WHERE created_at < now - retention_days`，不另開背景排程/timer——跟這個專案目前沒有背景常駐服務的風格一致。不做「無限期保留、之後再讓使用者手動清」，避免累積成使用者沒注意過的儲存負擔。
+
+**不在這次規劃範圍內**：`llm_traces` 是給開發者調 prompt 用的工程資料，跟業務稽核軌跡的用途不同，兩張表刻意不合併。執行結果失敗（例如核准後才發現部門重名）目前只透過對話訊息/Toast 呈現給使用者，不寫進 `audit_logs`——這張表的 `decision` 欄位語意是「人的決定」，不是「執行結果」，混在一起會讓查詢語意不清楚；之後真的需要追蹤「核准了但執行失敗」的案例，要另外設計，不要塞進同一個欄位。
 
 ---
 
@@ -77,7 +176,7 @@ interface Conversation {
 
 - 標題列顯示未完成任務數量徽章（`pending` + `in_progress` 的數量總和，不含 `done`/`cancelled`）
 - 每個任務卡片顯示：標題、狀態標籤、（若為子任務）父任務名稱、指派對象、（若已完成）完成時間
-- 點擊任務卡片：載入該任務綁定的 `Conversation` 到 `agent-main`，若任務所屬模組跟目前不同，Shell 同步切換模組（systemPrompt/skills 一併替換，見 `agent_first_ux.md` 第 3 節）
+- 點擊任務卡片：載入該任務綁定的 `Conversation` 到 `agent-main`，若任務所屬模組跟目前不同，Shell 同步切換模組（`AgentProfile` 一併替換，見第 3.2 節與 `agent_first_ux.md` 第 3 節）
 
 ---
 
@@ -87,7 +186,7 @@ interface Conversation {
 
 > 你好，我是 AgentERP 智能助理。您目前有 **{n}** 筆待處理任務、**{m}** 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：
 
-下方渲染一組「常用任務類型」卡片（依模組宣告的技能範疇整理，非特定任務實例），使用者點擊即可帶著範例意圖起手；也可以完全忽略卡片、直接輸入自然語言。
+下方渲染一組「常用任務類型」卡片（依模組宣告的工具範疇整理，非特定任務實例），使用者點擊即可帶著範例意圖起手；也可以完全忽略卡片、直接輸入自然語言。
 
 ---
 
