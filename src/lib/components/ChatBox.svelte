@@ -10,12 +10,17 @@
   import { Channel, invoke } from '../tauri.js';
   import { tick } from 'svelte';
   import QuickStartCards from './QuickStartCards.svelte';
+  import { getAgentProfileForTask, runAgentTurn } from '../workflow/index.js';
 
   let inputVal = $state('');
   let chatEnd = $state(null);
 
   let activeTask = $derived(
     appState.activeTaskId ? appState.tasks.find(t => t.id === appState.activeTaskId) : null
+  );
+
+  let currentTaskProfile = $derived(
+    activeTask ? getAgentProfileForTask(activeTask) : null
   );
 
   let currentMessages = $derived(
@@ -35,46 +40,6 @@
     }
   });
 
-  function detectDepartmentCandidateRegex(text) {
-    if (!text) return null;
-    const trimmed = text.trim();
-    if (trimmed.includes('列') || trimmed.includes('查') || trimmed.includes('哪些部門') || trimmed.includes('部門列表') || trimmed.includes('清單')) {
-      return { tool: 'list_departments' };
-    }
-    // 1. Quoted department name: 「行銷部」, "研發部"
-    const quoteMatch = trimmed.match(/[「『"']([\u4e00-\u9fa5A-Za-z0-9]{2,12}部)[」』"']/);
-    if (quoteMatch) return { tool: 'create_department', name: quoteMatch[1] };
-
-    // 2. Action verb prefix: 幫我新增/建立/設立 行銷部
-    const actionMatch = trimmed.match(/(?:新增|建立|成立|設定|設立|創立|加)\s*(?:一個|一組)?\s*([A-Za-z0-9\u4e00-\u9fa5]{2,10}部)/);
-    if (actionMatch) return { tool: 'create_department', name: actionMatch[1] };
-
-    // 3. Any 2~10 Chinese/alphanumeric characters ending with '部'
-    const stopWords = ['全部', '一部', '內部', '外部', '這部', '那部', '各部', '本部', '局部', '首部'];
-    const words = trimmed.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,10}部/g);
-    if (words) {
-      for (const w of words) {
-        if (!stopWords.includes(w)) {
-          return { tool: 'create_department', name: w };
-        }
-      }
-    }
-    return null;
-  }
-
-  async function detectDepartmentIntent(text) {
-    if (!text || !text.trim()) return null;
-    try {
-      const llmResult = await invoke('detect_department_intent', { userMessage: text.trim() });
-      if (llmResult && typeof llmResult === 'object' && llmResult.tool) {
-        return llmResult;
-      }
-    } catch (err) {
-      console.warn('[LLM Department Detection] Failed or unavailable, falling back to regex:', err);
-    }
-    return detectDepartmentCandidateRegex(text);
-  }
-
   async function handleSend(e) {
     if (e) e.preventDefault();
     if (!inputVal.trim() || appState.isChatStreaming) return;
@@ -87,40 +52,31 @@
     // Append user message
     await appendTaskMessageAction(currentTaskId, 'user', userMessage);
 
-    // If inside "設定部門" subtask and user types to add/query department
-    if (currentTaskId && activeTask && activeTask.title.includes('設定部門')) {
-      const intent = await detectDepartmentIntent(userMessage);
-      if (intent && intent.tool === 'create_department') {
-        const candidateName = intent.name;
-        setPendingTaskConfirmation({
-          type: 'create_department',
-          payload: { name: candidateName, taskId: currentTaskId },
-          confirmLabel: '確認建立',
-          cancelLabel: '取消'
-        });
-        const msg = activeTask.status !== 'done'
-          ? `偵測到您想建立「${candidateName}」，確認要建立嗎？`
-          : `偵測到您想額外建立「${candidateName}」，確認要建立嗎？`;
-        await appendTaskMessageAction(currentTaskId, 'assistant', msg);
+    // If inside a task with an active AgentProfile (Task-Driven Workflow)
+    if (currentTaskId && currentTaskProfile) {
+      const turnResult = await runAgentTurn(
+        userMessage,
+        currentTaskProfile,
+        { taskId: currentTaskId, activeTask },
+        {
+          llmDetector: async (msg) => {
+            try {
+              return await invoke('detect_department_intent', { userMessage: msg });
+            } catch {
+              return null;
+            }
+          }
+        }
+      );
+
+      if (turnResult.type === 'pending_confirmation' && turnResult.confirmation) {
+        setPendingTaskConfirmation(turnResult.confirmation);
+        await appendTaskMessageAction(currentTaskId, 'assistant', turnResult.content || '');
         return;
-      } else if (intent && intent.tool === 'list_departments') {
-        setPendingTaskConfirmation({
-          type: 'list_departments',
-          payload: { taskId: currentTaskId },
-          confirmLabel: '確認查詢',
-          cancelLabel: '取消'
-        });
-        await appendTaskMessageAction(
-          currentTaskId,
-          'assistant',
-          '偵測到您想查詢目前已建立的組織部門列表，確認要查詢嗎？'
-        );
-        return;
-      } else {
-        const msg = activeTask.status !== 'done'
-          ? '請告訴我想建立的部門名稱（例如「行銷部」、「研發部」），或詢問目前有哪些已建立的部門。'
-          : '「設定部門」任務已於稍早完成。若您想繼續新增其他部門或查詢列表，請直接告訴我。';
-        await appendTaskMessageAction(currentTaskId, 'assistant', msg);
+      } else if (turnResult.type === 'executed' || turnResult.type === 'error' || turnResult.type === 'text') {
+        if (turnResult.content) {
+          await appendTaskMessageAction(currentTaskId, 'assistant', turnResult.content);
+        }
         return;
       }
     }
@@ -162,19 +118,32 @@
     handleSend();
   }
 
-  async function handleQuickCreateDepartment(deptName = '銷售部') {
-    if (!activeTask) return;
-    setPendingTaskConfirmation({
-      type: 'create_department',
-      payload: { name: deptName, taskId: activeTask.id },
-      confirmLabel: '確認建立',
-      cancelLabel: '取消'
-    });
-    await appendTaskMessageAction(
-      activeTask.id,
-      'assistant',
-      `偵測到您想建立「${deptName}」，確認要建立嗎？`
+  async function handleQuickAction() {
+    if (!currentTaskProfile?.quickAction || !activeTask) return;
+    const qa = currentTaskProfile.quickAction;
+    const toolName = qa.defaultTool;
+    const args = qa.defaultArgs || {};
+    const handler = currentTaskProfile.toolHandlers?.find(
+      (h) => (h.definition?.function?.name || h.name) === toolName
     );
+    if (!handler) return;
+
+    const confirmText = handler.describeConfirmation(args, {
+      taskId: activeTask.id,
+      activeTask
+    });
+
+    setPendingTaskConfirmation({
+      toolName,
+      handler,
+      args,
+      confirmText,
+      taskId: activeTask.id,
+      confirmLabel: handler.confirmLabel || '確認建立',
+      cancelLabel: handler.cancelLabel || '取消'
+    });
+
+    await appendTaskMessageAction(activeTask.id, 'assistant', confirmText);
   }
 </script>
 
@@ -262,21 +231,21 @@
       </div>
     {/if}
 
-    <!-- Subtask View: Interactive Quick Action Button for Department Setup -->
-    {#if appState.activeTaskId && activeTask && activeTask.title.includes('設定部門') && activeTask.status !== 'done'}
+    <!-- Subtask View: Declarative Quick Action Button from AgentProfile -->
+    {#if appState.activeTaskId && currentTaskProfile?.quickAction && activeTask?.status !== 'done'}
       <div class="subtask-quick-action glass-panel">
-        <div class="quick-action-title">🏢 快速建立部門引導</div>
-        <p class="quick-action-desc">點擊下方按鈕可快速觸發建立「銷售部」的確認流程：</p>
+        <div class="quick-action-title">{currentTaskProfile.quickAction.title}</div>
+        <p class="quick-action-desc">{currentTaskProfile.quickAction.desc}</p>
         <button 
           class="btn btn-primary btn-sm" 
-          onclick={() => handleQuickCreateDepartment('銷售部')}
+          onclick={handleQuickAction}
         >
-          ✨ 建立「銷售部」並完成任務
+          {currentTaskProfile.quickAction.buttonText}
         </button>
       </div>
     {/if}
 
-    <!-- Lightweight Subtask Confirmation Card -->
+    <!-- Lightweight Subtask Confirmation Card (Domain-agnostic via ToolHandler) -->
     {#if appState.pendingTaskConfirmation}
       <div class="task-confirmation-card glass-panel">
         <div class="confirmation-header">
@@ -284,17 +253,15 @@
           <span class="confirmation-title">待確認動作</span>
         </div>
         <div class="confirmation-content">
-          {#if appState.pendingTaskConfirmation.type === 'create_department'}
-            偵測到您想建立<strong>「{appState.pendingTaskConfirmation.payload.name}」</strong>，確認要建立嗎？
-          {:else if appState.pendingTaskConfirmation.type === 'list_departments'}
-            偵測到您想查詢目前已建立的<strong>組織部門列表</strong>，確認要查詢嗎？
+          {#if appState.pendingTaskConfirmation.confirmText}
+            {appState.pendingTaskConfirmation.confirmText}
           {:else}
             確認執行此動作嗎？
           {/if}
         </div>
         <div class="confirmation-actions">
           <button class="btn btn-primary btn-sm" onclick={confirmPendingTaskAction}>
-            {appState.pendingTaskConfirmation.confirmLabel || '確認建立'}
+            {appState.pendingTaskConfirmation.confirmLabel || '確認'}
           </button>
           <button class="btn btn-secondary btn-sm" onclick={cancelPendingTaskAction}>
             {appState.pendingTaskConfirmation.cancelLabel || '取消'}
@@ -536,11 +503,6 @@
     color: var(--text-secondary);
     margin-bottom: 14px;
     line-height: 1.5;
-  }
-
-  .confirmation-content strong {
-    color: var(--accent);
-    font-weight: 600;
   }
 
   .confirmation-actions {

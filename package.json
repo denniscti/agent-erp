@@ -10,6 +10,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./jsconfig.json",
+    "test": "node --test tests/workflow-harness.test.js",
+    "test:workflow": "node --test tests/workflow-harness.test.js",
     "test:llm": "node ./scripts/test-nvidia-api.mjs",
     "seed:data": "node ./scripts/seed-test-data.mjs",
     "tauri": "tauri"

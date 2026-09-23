@@ -10,6 +10,7 @@
 
 import { invoke, check, relaunch } from './tauri.js';
 import { loadModule } from './registry.js';
+import { executeConfirmation, executeCancellation } from './workflow/harness.js';
 
 function loadTaskPanelCollapsed() {
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -119,7 +120,7 @@ export const appState = $state({
   departments: [],
 
   // Lightweight task confirmation state
-  /** @type {{ type: string, payload: any, confirmLabel: string, cancelLabel: string } | null} */
+  /** @type {import('./workflow/types.js').PendingConfirmation | null} */
   pendingTaskConfirmation: null
 });
 
@@ -785,14 +786,20 @@ export async function createDepartmentAction(name, parentId = null) {
 
 /**
  * Set pending task confirmation
- * @param {{ type: string, payload: any, confirmLabel?: string, cancelLabel?: string }} confirmation
+ * @param {import('./workflow/types.js').PendingConfirmation | any} confirmation
  */
 export function setPendingTaskConfirmation(confirmation) {
   appState.pendingTaskConfirmation = {
-    type: confirmation.type,
-    payload: confirmation.payload || {},
-    confirmLabel: confirmation.confirmLabel || '確認建立',
-    cancelLabel: confirmation.cancelLabel || '取消'
+    toolName: confirmation.toolName || confirmation.type,
+    handler: confirmation.handler,
+    args: confirmation.args || confirmation.payload || {},
+    confirmText: confirmation.confirmText || '',
+    taskId: confirmation.taskId || confirmation.payload?.taskId || appState.activeTaskId,
+    confirmLabel: confirmation.confirmLabel || '確認',
+    cancelLabel: confirmation.cancelLabel || '取消',
+    // Backward compatibility fields
+    type: confirmation.type || confirmation.toolName,
+    payload: confirmation.payload || confirmation.args || {}
   };
 }
 
@@ -804,82 +811,49 @@ export function clearPendingTaskConfirmation() {
 }
 
 /**
- * Confirm pending task action
+ * Confirm pending task action (Domain-agnostic via ToolHandler)
  */
 export async function confirmPendingTaskAction() {
   const conf = appState.pendingTaskConfirmation;
   if (!conf) return;
 
-  if (conf.type === 'create_department') {
-    const { name, taskId } = conf.payload;
-    clearPendingTaskConfirmation();
-    try {
-      await createDepartmentAction(name);
-      if (taskId) {
-        await updateTaskStatusAction(taskId, 'done');
-        await appendTaskMessageAction(taskId, 'assistant', `已為您建立「${name}」！`);
-        await appendTaskMessageAction('main', 'assistant', `✅「設定部門」已完成，新增了『${name}』`);
-        showToast(`已成功建立「${name}」！`);
-      }
-    } catch (err) {
-      console.error("Failed to create department from confirmation:", err);
-      const errorObj = /** @type {any} */ (err);
-      const errorMsg = typeof err === 'string' ? err : (errorObj?.message || '建立部門失敗');
-      if (taskId) {
-        await appendTaskMessageAction(taskId, 'assistant', `建立「${name}」失敗：${errorMsg}`);
-      }
-      showToast(`建立部門失敗: ${errorMsg}`);
+  const taskId = conf.taskId || conf.payload?.taskId || appState.activeTaskId;
+  clearPendingTaskConfirmation();
+
+  try {
+    const { content } = await executeConfirmation(conf, { 
+      taskId, 
+      activeTask: appState.tasks.find(t => t.id === taskId) 
+    });
+    if (taskId && content) {
+      await appendTaskMessageAction(taskId, 'assistant', content);
     }
-  } else if (conf.type === 'list_departments') {
-    const { taskId } = conf.payload;
-    clearPendingTaskConfirmation();
-    try {
-      const depts = await fetchDepartments();
-      if (depts && depts.length > 0) {
-        const deptNames = depts.map((d, i) => `${i + 1}. ${d.name}${d.parent_id ? ' (子部門)' : ''}`).join('\n');
-        if (taskId) {
-          await appendTaskMessageAction(
-            taskId,
-            'assistant',
-            `目前系統中已建立的部門列表（共 ${depts.length} 個）：\n${deptNames}`
-          );
-        }
-      } else {
-        if (taskId) {
-          await appendTaskMessageAction(
-            taskId,
-            'assistant',
-            '目前系統中尚未建立任何部門。您可以告訴我想建立的部門名稱（例如「行銷部」、「研發部」）。'
-          );
-        }
-      }
-      showToast('已完成部門列表查詢！');
-    } catch (err) {
-      console.error("Failed to list departments from confirmation:", err);
-      if (taskId) {
-        await appendTaskMessageAction(taskId, 'assistant', `查詢部門列表失敗：${err}`);
-      }
-      showToast(`查詢失敗: ${err}`);
+  } catch (err) {
+    console.error("Failed to execute confirmation from ToolHandler:", err);
+    const errorObj = /** @type {any} */ (err);
+    const errorMsg = typeof err === 'string' ? err : (errorObj?.message || '執行動作失敗');
+    if (taskId) {
+      await appendTaskMessageAction(taskId, 'assistant', `執行動作失敗：${errorMsg}`);
     }
-  } else {
-    console.warn("Unknown pending task confirmation type:", conf.type);
-    clearPendingTaskConfirmation();
+    showToast(`執行失敗: ${errorMsg}`);
   }
 }
 
 /**
- * Cancel pending task action
+ * Cancel pending task action (Domain-agnostic via ToolHandler)
  */
 export async function cancelPendingTaskAction() {
   const conf = appState.pendingTaskConfirmation;
-  const taskId = conf?.payload?.taskId || appState.activeTaskId;
-  const confType = conf?.type;
+  const taskId = conf?.taskId || conf?.payload?.taskId || appState.activeTaskId;
   clearPendingTaskConfirmation();
-  if (taskId) {
-    if (confType === 'list_departments') {
-      await appendTaskMessageAction(taskId, 'assistant', '好的，已取消部門列表查詢。');
-    } else {
-      await appendTaskMessageAction(taskId, 'assistant', '好的，請告訴我正確的部門名稱');
+
+  if (taskId && conf) {
+    const { content } = executeCancellation(conf, { 
+      taskId, 
+      activeTask: appState.tasks.find(t => t.id === taskId) 
+    });
+    if (content) {
+      await appendTaskMessageAction(taskId, 'assistant', content);
     }
   }
 }
