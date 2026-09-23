@@ -830,6 +830,37 @@ export async function confirmPendingTaskAction() {
       }
       showToast(`建立部門失敗: ${errorMsg}`);
     }
+  } else if (conf.type === 'list_departments') {
+    const { taskId } = conf.payload;
+    clearPendingTaskConfirmation();
+    try {
+      const depts = await fetchDepartments();
+      if (depts && depts.length > 0) {
+        const deptNames = depts.map((d, i) => `${i + 1}. ${d.name}${d.parent_id ? ' (子部門)' : ''}`).join('\n');
+        if (taskId) {
+          await appendTaskMessageAction(
+            taskId,
+            'assistant',
+            `目前系統中已建立的部門列表（共 ${depts.length} 個）：\n${deptNames}`
+          );
+        }
+      } else {
+        if (taskId) {
+          await appendTaskMessageAction(
+            taskId,
+            'assistant',
+            '目前系統中尚未建立任何部門。您可以告訴我想建立的部門名稱（例如「行銷部」、「研發部」）。'
+          );
+        }
+      }
+      showToast('已完成部門列表查詢！');
+    } catch (err) {
+      console.error("Failed to list departments from confirmation:", err);
+      if (taskId) {
+        await appendTaskMessageAction(taskId, 'assistant', `查詢部門列表失敗：${err}`);
+      }
+      showToast(`查詢失敗: ${err}`);
+    }
   } else {
     console.warn("Unknown pending task confirmation type:", conf.type);
     clearPendingTaskConfirmation();
@@ -842,9 +873,14 @@ export async function confirmPendingTaskAction() {
 export async function cancelPendingTaskAction() {
   const conf = appState.pendingTaskConfirmation;
   const taskId = conf?.payload?.taskId || appState.activeTaskId;
+  const confType = conf?.type;
   clearPendingTaskConfirmation();
   if (taskId) {
-    await appendTaskMessageAction(taskId, 'assistant', '好的，請告訴我正確的部門名稱');
+    if (confType === 'list_departments') {
+      await appendTaskMessageAction(taskId, 'assistant', '好的，已取消部門列表查詢。');
+    } else {
+      await appendTaskMessageAction(taskId, 'assistant', '好的，請告訴我正確的部門名稱');
+    }
   }
 }
 

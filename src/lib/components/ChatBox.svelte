@@ -38,13 +38,16 @@
   function detectDepartmentCandidateRegex(text) {
     if (!text) return null;
     const trimmed = text.trim();
+    if (trimmed.includes('列') || trimmed.includes('查') || trimmed.includes('哪些部門') || trimmed.includes('部門列表') || trimmed.includes('清單')) {
+      return { tool: 'list_departments' };
+    }
     // 1. Quoted department name: 「行銷部」, "研發部"
     const quoteMatch = trimmed.match(/[「『"']([\u4e00-\u9fa5A-Za-z0-9]{2,12}部)[」』"']/);
-    if (quoteMatch) return quoteMatch[1];
+    if (quoteMatch) return { tool: 'create_department', name: quoteMatch[1] };
 
     // 2. Action verb prefix: 幫我新增/建立/設立 行銷部
     const actionMatch = trimmed.match(/(?:新增|建立|成立|設定|設立|創立|加)\s*(?:一個|一組)?\s*([A-Za-z0-9\u4e00-\u9fa5]{2,10}部)/);
-    if (actionMatch) return actionMatch[1];
+    if (actionMatch) return { tool: 'create_department', name: actionMatch[1] };
 
     // 3. Any 2~10 Chinese/alphanumeric characters ending with '部'
     const stopWords = ['全部', '一部', '內部', '外部', '這部', '那部', '各部', '本部', '局部', '首部'];
@@ -52,19 +55,19 @@
     if (words) {
       for (const w of words) {
         if (!stopWords.includes(w)) {
-          return w;
+          return { tool: 'create_department', name: w };
         }
       }
     }
     return null;
   }
 
-  async function detectDepartmentCandidate(text) {
+  async function detectDepartmentIntent(text) {
     if (!text || !text.trim()) return null;
     try {
       const llmResult = await invoke('detect_department_intent', { userMessage: text.trim() });
-      if (llmResult && typeof llmResult === 'string' && llmResult.trim()) {
-        return llmResult.trim();
+      if (llmResult && typeof llmResult === 'object' && llmResult.tool) {
+        return llmResult;
       }
     } catch (err) {
       console.warn('[LLM Department Detection] Failed or unavailable, falling back to regex:', err);
@@ -84,50 +87,40 @@
     // Append user message
     await appendTaskMessageAction(currentTaskId, 'user', userMessage);
 
-    // If inside "設定部門" subtask and user types to add department
+    // If inside "設定部門" subtask and user types to add/query department
     if (currentTaskId && activeTask && activeTask.title.includes('設定部門')) {
-      const candidateName = await detectDepartmentCandidate(userMessage);
-      if (activeTask.status !== 'done') {
-        if (candidateName) {
-          setPendingTaskConfirmation({
-            type: 'create_department',
-            payload: { name: candidateName, taskId: currentTaskId },
-            confirmLabel: '確認建立',
-            cancelLabel: '取消'
-          });
-          await appendTaskMessageAction(
-            currentTaskId,
-            'assistant',
-            `偵測到您想建立「${candidateName}」，確認要建立嗎？`
-          );
-        } else {
-          await appendTaskMessageAction(
-            currentTaskId,
-            'assistant',
-            '請告訴我想建立的部門名稱（例如「行銷部」、「研發部」）。'
-          );
-        }
+      const intent = await detectDepartmentIntent(userMessage);
+      if (intent && intent.tool === 'create_department') {
+        const candidateName = intent.name;
+        setPendingTaskConfirmation({
+          type: 'create_department',
+          payload: { name: candidateName, taskId: currentTaskId },
+          confirmLabel: '確認建立',
+          cancelLabel: '取消'
+        });
+        const msg = activeTask.status !== 'done'
+          ? `偵測到您想建立「${candidateName}」，確認要建立嗎？`
+          : `偵測到您想額外建立「${candidateName}」，確認要建立嗎？`;
+        await appendTaskMessageAction(currentTaskId, 'assistant', msg);
+        return;
+      } else if (intent && intent.tool === 'list_departments') {
+        setPendingTaskConfirmation({
+          type: 'list_departments',
+          payload: { taskId: currentTaskId },
+          confirmLabel: '確認查詢',
+          cancelLabel: '取消'
+        });
+        await appendTaskMessageAction(
+          currentTaskId,
+          'assistant',
+          '偵測到您想查詢目前已建立的組織部門列表，確認要查詢嗎？'
+        );
         return;
       } else {
-        if (candidateName) {
-          setPendingTaskConfirmation({
-            type: 'create_department',
-            payload: { name: candidateName, taskId: currentTaskId },
-            confirmLabel: '確認建立',
-            cancelLabel: '取消'
-          });
-          await appendTaskMessageAction(
-            currentTaskId,
-            'assistant',
-            `偵測到您想額外建立「${candidateName}」，確認要建立嗎？`
-          );
-        } else {
-          await appendTaskMessageAction(
-            currentTaskId,
-            'assistant',
-            '「設定部門」任務已於稍早完成。若您想繼續新增其他部門，請直接告訴我想建立的部門名稱（例如「研發部」）。'
-          );
-        }
+        const msg = activeTask.status !== 'done'
+          ? '請告訴我想建立的部門名稱（例如「行銷部」、「研發部」），或詢問目前有哪些已建立的部門。'
+          : '「設定部門」任務已於稍早完成。若您想繼續新增其他部門或查詢列表，請直接告訴我。';
+        await appendTaskMessageAction(currentTaskId, 'assistant', msg);
         return;
       }
     }
@@ -293,6 +286,8 @@
         <div class="confirmation-content">
           {#if appState.pendingTaskConfirmation.type === 'create_department'}
             偵測到您想建立<strong>「{appState.pendingTaskConfirmation.payload.name}」</strong>，確認要建立嗎？
+          {:else if appState.pendingTaskConfirmation.type === 'list_departments'}
+            偵測到您想查詢目前已建立的<strong>組織部門列表</strong>，確認要查詢嗎？
           {:else}
             確認執行此動作嗎？
           {/if}

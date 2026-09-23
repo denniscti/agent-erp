@@ -243,6 +243,55 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
             ("usr_mock_admin", "tnt_mock_2", "member"),
         )
         .map_err(|e| format!("Failed to seed user_tenant 2: {}", e))?;
+
+        // Seed default mock departments if empty
+        let mut stmt_depts = conn
+            .prepare("SELECT count(*) FROM departments")
+            .map_err(|e| e.to_string())?;
+        let depts_count: i64 = stmt_depts.query_row([], |row| row.get(0)).unwrap_or(0);
+        if depts_count == 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            conn.execute(
+                "INSERT INTO departments (id, name, parent_id, created_at) VALUES
+                 ('dept_mock_1', '總經理室', NULL, ?1),
+                 ('dept_mock_2', '研發總處', NULL, ?1),
+                 ('dept_mock_3', '前端小組', 'dept_mock_2', ?1),
+                 ('dept_mock_4', '後端架構組', 'dept_mock_2', ?1),
+                 ('dept_mock_5', '行銷業務部', NULL, ?1),
+                 ('dept_mock_6', '財務會計處', NULL, ?1)",
+                [now],
+            )
+            .map_err(|e| format!("Failed to seed departments: {}", e))?;
+        }
+
+        // Seed default mock tasks if empty
+        let mut stmt_tasks = conn
+            .prepare("SELECT count(*) FROM tasks")
+            .map_err(|e| e.to_string())?;
+        let tasks_count: i64 = stmt_tasks.query_row([], |row| row.get(0)).unwrap_or(0);
+        if tasks_count == 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, parent_task_id, module_id, assignee, created_at) VALUES
+                 ('task_parent_1', '新租戶起步', 'in_progress', NULL, 'sales', '主管', ?1),
+                 ('task_sub_1', '設定部門', 'pending', 'task_parent_1', 'sales', '主管', ?1),
+                 ('task_sub_2', '邀請團隊成員', 'pending', 'task_parent_1', 'sales', '主管', ?1)",
+                [now],
+            ).map_err(|e| format!("Failed to seed tasks: {}", e))?;
+
+            conn.execute(
+                "INSERT INTO task_messages (id, task_id, role, content, timestamp) VALUES
+                 ('msg_1', 'main', 'assistant', '你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 3 筆待處理任務、1 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：', ?1),
+                 ('msg_2', 'task_sub_1', 'assistant', '您好！我是部門設定助理。新租戶建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？（您可以直接輸入「我想新增行銷部」或詢問「目前有哪些部門」）', ?1)",
+                [now],
+            ).map_err(|e| format!("Failed to seed task messages: {}", e))?;
+        }
     }
 
     Ok(())

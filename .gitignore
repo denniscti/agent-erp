@@ -7,6 +7,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+dist_seed_data.json
 
 # Rust / Cargo Output
 src-tauri/target/

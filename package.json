@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./jsconfig.json",
     "test:llm": "node ./scripts/test-nvidia-api.mjs",
+    "seed:data": "node ./scripts/seed-test-data.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

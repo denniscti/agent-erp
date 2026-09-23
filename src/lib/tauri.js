@@ -114,7 +114,20 @@ if (!mockTaskMessages || mockTaskMessages.length === 0) {
   saveStorage('agent_erp_mock_task_messages', mockTaskMessages);
 }
 
-let mockDepartments = loadStorage('agent_erp_mock_departments', []);
+const defaultMockDepartments = [
+  { id: "dept_mock_1", name: "總經理室", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "dept_mock_2", name: "研發總處", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "dept_mock_3", name: "前端小組", parent_id: "dept_mock_2", created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "dept_mock_4", name: "後端架構組", parent_id: "dept_mock_2", created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+  { id: "dept_mock_5", name: "行銷業務部", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+  { id: "dept_mock_6", name: "財務會計處", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
+];
+
+let mockDepartments = loadStorage('agent_erp_mock_departments', defaultMockDepartments);
+if (!mockDepartments || mockDepartments.length === 0) {
+  mockDepartments = defaultMockDepartments;
+  saveStorage('agent_erp_mock_departments', mockDepartments);
+}
 
 let mockLlmProviders = [
   { id: "openai", label: "OpenAI GPT-4o", base_url: "https://api.openai.com/v1", model_name: "gpt-4o", requires_key: true, has_key: false, active: true },
