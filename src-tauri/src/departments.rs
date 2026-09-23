@@ -45,6 +45,17 @@ pub fn create_department_impl(
         return Err("Department name cannot be empty".to_string());
     }
 
+    let mut check_stmt = conn
+        .prepare("SELECT 1 FROM departments WHERE LOWER(TRIM(name)) = LOWER(?1) LIMIT 1")
+        .map_err(|e| format!("Failed to prepare duplicate check query: {}", e))?;
+    let exists = check_stmt
+        .exists(params![trimmed_name])
+        .map_err(|e| format!("Failed to check for duplicate department: {}", e))?;
+
+    if exists {
+        return Err(format!("部門「{}」已存在，請使用不同名稱", trimmed_name));
+    }
+
     let trimmed_parent_id = parent_id
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty());
@@ -246,5 +257,76 @@ mod tests {
         assert_eq!(list[2].id, dept3.id);
         assert_eq!(list[2].name, "前端小組");
         assert_eq!(list[2].parent_id, Some(dept2.id));
+    }
+
+    #[test]
+    fn test_tc_dept_dup_01_duplicate_chinese_name_error() {
+        // Given: An initialized database with an existing department "行銷部"
+        let conn = setup_test_db();
+        create_department_impl(&conn, "行銷部".to_string(), None).unwrap();
+
+        // When: create_department_impl is called with the exact same name "行銷部"
+        let result = create_department_impl(&conn, "行銷部".to_string(), None);
+
+        // Then: It returns a validation error indicating duplicate department name
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "部門「行銷部」已存在，請使用不同名稱");
+    }
+
+    #[test]
+    fn test_tc_dept_dup_02_duplicate_with_whitespace_trim_error() {
+        // Given: An initialized database with an existing department "行銷部"
+        let conn = setup_test_db();
+        create_department_impl(&conn, "行銷部".to_string(), None).unwrap();
+
+        // When: create_department_impl is called with surrounding whitespace "  行銷部  "
+        let result = create_department_impl(&conn, "  行銷部  ".to_string(), None);
+
+        // Then: It is trimmed and detected as duplicate, returning the expected error message
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "部門「行銷部」已存在，請使用不同名稱");
+    }
+
+    #[test]
+    fn test_tc_dept_dup_03_duplicate_case_insensitive_error() {
+        // Given: An initialized database with an existing department "HR"
+        let conn = setup_test_db();
+        create_department_impl(&conn, "HR".to_string(), None).unwrap();
+
+        // When: create_department_impl is called with lower-case "hr"
+        let result = create_department_impl(&conn, "hr".to_string(), None);
+
+        // Then: It is matched case-insensitively and rejected
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "部門「hr」已存在，請使用不同名稱");
+    }
+
+    #[test]
+    fn test_tc_dept_dup_04_different_name_success() {
+        // Given: An initialized database with an existing department "行銷部"
+        let conn = setup_test_db();
+        create_department_impl(&conn, "行銷部".to_string(), None).unwrap();
+
+        // When: create_department_impl is called with a distinct department name "研發部"
+        let result = create_department_impl(&conn, "研發部".to_string(), None);
+
+        // Then: The new department is created successfully
+        assert!(result.is_ok());
+        let dept = result.unwrap();
+        assert_eq!(dept.name, "研發部");
+    }
+
+    #[test]
+    fn test_tc_dept_dup_05_duplicate_subdepartment_name_error() {
+        // Given: An existing department "銷售部"
+        let conn = setup_test_db();
+        let parent = create_department_impl(&conn, "銷售部".to_string(), None).unwrap();
+
+        // When: create_department_impl is called with same name "銷售部" even if under parent_id
+        let result = create_department_impl(&conn, "銷售部".to_string(), Some(parent.id));
+
+        // Then: Duplicate check is global and rejects creation
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "部門「銷售部」已存在，請使用不同名稱");
     }
 }
