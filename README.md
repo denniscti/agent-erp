@@ -40,6 +40,7 @@ npm run dev        # 瀏覽器 mock 模式
 npm run tauri dev  # 真實 Tauri 視窗
 npm run check      # svelte-check 型別檢查
 npm run build      # 前端靜態資源建置
+npm run tauri build  # 打包成當前平台可安裝的桌面應用（.app/.dmg、.exe/.msi 等）
 ```
 
 ### 對接真實 TPS2 環境
@@ -71,6 +72,28 @@ Rust 測試：
 
 ```bash
 cd src-tauri && cargo test
+```
+
+### 使用 LLM 部門意圖偵測（NVIDIA NIM）
+
+「設定部門」任務裡判斷使用者想建立/查詢部門的意圖，預設走本地正規表達式；設定 `NVIDIA_API_KEY` 後會改用 NVIDIA NIM（`z-ai/glm-5.3-flash`）判斷，對間接語意（例如「我想開一個 IT 專責小組」）判斷得更準，API 沒設定、呼叫失敗、或回傳 `NONE` 時都會自動退回正規表達式，不影響原有流程。
+
+| 變數 | 必填 | 說明 |
+|---|---|---|
+| `NVIDIA_API_KEY` | 否 | [NVIDIA NIM](https://build.nvidia.com/) 的 API key（Free Endpoint 免費申請即可，但官方定位僅供評估/測試，不建議正式生產流量） |
+
+只有 `npm run tauri dev` 會用到這把 key，`npm run dev` 純瀏覽器模式下無作用（規則同上方 TPS2 環境變數）——`npm run tauri dev` 會啟動真的 Rust process（不是純網頁瀏覽），這個 process 會繼承**啟動它的那個終端機**當下的環境變數，所以 key 要在執行 `npm run tauri dev` 之前，於同一個終端機 session 裡設定好：
+
+```bash
+# 直接用環境變數：
+NVIDIA_API_KEY=nvapi-xxx npm run tauri dev
+
+# 或用便利腳本，會自動從 .env 讀取、沒有的話互動式提示輸入（macOS/Linux 用 dev:mac，Windows 用 dev:win）：
+npm run dev:mac
+npm run dev:win
+
+# 單獨測試 API key 是否可用，不需要啟動整個 App：
+NVIDIA_API_KEY=nvapi-xxx npm run test:llm
 ```
 
 ## Tag 命名規則
