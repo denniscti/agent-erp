@@ -614,7 +614,7 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'detect_department_intent': {
-      return null;
+      return { attempted: false, tool_call: null };
     }
 
     case 'record_audit_log': {

@@ -20,6 +20,12 @@ pub enum DepartmentToolCall {
     ListDepartments,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq, Eq)]
+pub struct DetectDepartmentIntentResult {
+    pub attempted: bool,
+    pub tool_call: Option<DepartmentToolCall>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ToolDefinition {
     pub r#type: String,
@@ -279,15 +285,23 @@ pub async fn execute_detect_department_intent<C: NimClient>(
     client: &C,
     api_key: Option<&str>,
     user_message: &str,
-) -> Result<Option<DepartmentToolCall>, String> {
+) -> Result<DetectDepartmentIntentResult, String> {
     let key = match api_key {
         Some(k) if !k.trim().is_empty() => k.trim(),
-        _ => return Ok(None),
+        _ => {
+            return Ok(DetectDepartmentIntentResult {
+                attempted: false,
+                tool_call: None,
+            })
+        }
     };
 
     let trimmed_msg = user_message.trim();
     if trimmed_msg.is_empty() {
-        return Ok(None);
+        return Ok(DetectDepartmentIntentResult {
+            attempted: false,
+            tool_call: None,
+        });
     }
 
     let tools = Some(get_department_tools());
@@ -295,7 +309,10 @@ pub async fn execute_detect_department_intent<C: NimClient>(
         .chat_completion(key, SYSTEM_PROMPT, trimmed_msg, tools)
         .await?;
 
-    Ok(parse_department_tool_call(&raw_response))
+    Ok(DetectDepartmentIntentResult {
+        attempted: true,
+        tool_call: parse_department_tool_call(&raw_response),
+    })
 }
 
 #[tauri::command]
@@ -303,7 +320,7 @@ pub async fn execute_detect_department_intent<C: NimClient>(
 pub async fn detect_department_intent<R: tauri::Runtime>(
     _app_handle: tauri::AppHandle<R>,
     user_message: String,
-) -> Result<Option<DepartmentToolCall>, String> {
+) -> Result<DetectDepartmentIntentResult, String> {
     let api_key = get_nvidia_api_key();
     let client = ReqwestNimClient::default();
     execute_detect_department_intent(&client, api_key.as_deref(), &user_message).await
@@ -351,13 +368,16 @@ pub(crate) mod tests {
         // When: execute_detect_department_intent is executed
         let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-        // Then: Successfully returns Some(CreateDepartment { name: "行銷部" })
+        // Then: Successfully returns attempted: true with Some(CreateDepartment { name: "行銷部" })
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),
-            Some(DepartmentToolCall::CreateDepartment {
-                name: "行銷部".to_string()
-            })
+            DetectDepartmentIntentResult {
+                attempted: true,
+                tool_call: Some(DepartmentToolCall::CreateDepartment {
+                    name: "行銷部".to_string()
+                }),
+            }
         );
     }
 
@@ -383,13 +403,16 @@ pub(crate) mod tests {
         // When: execute_detect_department_intent is executed
         let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-        // Then: Returns trimmed department name Some(CreateDepartment { name: "研發部" })
+        // Then: Returns attempted: true with trimmed department name Some(CreateDepartment { name: "研發部" })
         assert!(result.is_ok());
         assert_eq!(
             result.unwrap(),
-            Some(DepartmentToolCall::CreateDepartment {
-                name: "研發部".to_string()
-            })
+            DetectDepartmentIntentResult {
+                attempted: true,
+                tool_call: Some(DepartmentToolCall::CreateDepartment {
+                    name: "研發部".to_string()
+                }),
+            }
         );
     }
 
@@ -415,13 +438,19 @@ pub(crate) mod tests {
         // When: execute_detect_department_intent is executed
         let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-        // Then: Successfully returns Some(ListDepartments)
+        // Then: Successfully returns attempted: true with Some(ListDepartments)
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(DepartmentToolCall::ListDepartments));
+        assert_eq!(
+            result.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: true,
+                tool_call: Some(DepartmentToolCall::ListDepartments),
+            }
+        );
     }
 
     #[tokio::test]
-    async fn test_tc_llm_04_no_tool_calls_returns_none() {
+    async fn test_tc_llm_04_no_tool_calls_returns_attempted_true_with_none_tool() {
         // Given: A mock client returning only text content without tool_calls
         let mock_client = MockNimClient {
             response: Ok(ChatMessageResponse {
@@ -435,13 +464,19 @@ pub(crate) mod tests {
         // When: execute_detect_department_intent is executed
         let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-        // Then: Returns Ok(None)
+        // Then: Returns attempted: true with None tool_call (model was called, decided no tools)
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            result.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: true,
+                tool_call: None,
+            }
+        );
     }
 
     #[tokio::test]
-    async fn test_tc_llm_05_empty_tool_calls_vector_returns_none() {
+    async fn test_tc_llm_05_empty_tool_calls_vector_returns_attempted_true_with_none_tool() {
         // Given: A mock client returning empty tool_calls vector
         let mock_client = MockNimClient {
             response: Ok(ChatMessageResponse {
@@ -455,13 +490,20 @@ pub(crate) mod tests {
         // When: execute_detect_department_intent is executed
         let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-        // Then: Returns Ok(None)
+        // Then: Returns attempted: true with None tool_call
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            result.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: true,
+                tool_call: None,
+            }
+        );
     }
 
     #[tokio::test]
-    async fn test_tc_llm_06_create_department_empty_or_missing_name_returns_none() {
+    async fn test_tc_llm_06_create_department_empty_or_missing_name_returns_attempted_true_with_none(
+    ) {
         // Given: Tool call with empty name or missing property
         let empty_args_list = vec!["{}", "{\"name\":\"\"}", "{\"name\":\"   \"}"];
 
@@ -485,14 +527,23 @@ pub(crate) mod tests {
             // When: execute_detect_department_intent is executed
             let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-            // Then: Returns Ok(None)
+            // Then: Returns attempted: true with None
             assert!(result.is_ok());
-            assert_eq!(result.unwrap(), None, "Failed for args: {}", args);
+            assert_eq!(
+                result.unwrap(),
+                DetectDepartmentIntentResult {
+                    attempted: true,
+                    tool_call: None,
+                },
+                "Failed for args: {}",
+                args
+            );
         }
     }
 
     #[tokio::test]
-    async fn test_tc_llm_07_create_department_malformed_json_arguments_returns_none() {
+    async fn test_tc_llm_07_create_department_malformed_json_arguments_returns_attempted_true_with_none(
+    ) {
         // Given: Tool call with malformed JSON arguments
         let mock_client = MockNimClient {
             response: Ok(ChatMessageResponse {
@@ -513,13 +564,19 @@ pub(crate) mod tests {
         // When: execute_detect_department_intent is executed
         let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-        // Then: Returns Ok(None) safely without crashing
+        // Then: Returns attempted: true with None safely
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            result.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: true,
+                tool_call: None,
+            }
+        );
     }
 
     #[tokio::test]
-    async fn test_tc_llm_08_unknown_tool_name_returns_none() {
+    async fn test_tc_llm_08_unknown_tool_name_returns_attempted_true_with_none() {
         // Given: Tool call with an unrecognized function name
         let mock_client = MockNimClient {
             response: Ok(ChatMessageResponse {
@@ -540,13 +597,19 @@ pub(crate) mod tests {
         // When: execute_detect_department_intent is executed
         let result = execute_detect_department_intent(&mock_client, api_key, user_msg).await;
 
-        // Then: Returns Ok(None)
+        // Then: Returns attempted: true with None
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+        assert_eq!(
+            result.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: true,
+                tool_call: None,
+            }
+        );
     }
 
     #[tokio::test]
-    async fn test_tc_llm_09_and_10_api_key_none_or_blank_short_circuits() {
+    async fn test_tc_llm_09_and_10_api_key_none_or_blank_returns_attempted_false() {
         // Given: A mock client that would return an error if called
         let mock_client = MockNimClient {
             response: Err("Should not be called".to_string()),
@@ -556,21 +619,33 @@ pub(crate) mod tests {
         let result_none =
             execute_detect_department_intent(&mock_client, None, "我想新增技術部").await;
 
-        // Then: Short-circuits and returns Ok(None) without error
+        // Then: Short-circuits and returns attempted: false without calling model
         assert!(result_none.is_ok());
-        assert_eq!(result_none.unwrap(), None);
+        assert_eq!(
+            result_none.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: false,
+                tool_call: None,
+            }
+        );
 
         // When: api_key is blank (TC-LLM-10)
         let result_blank =
             execute_detect_department_intent(&mock_client, Some("   "), "我想新增技術部").await;
 
-        // Then: Short-circuits and returns Ok(None) without error
+        // Then: Short-circuits and returns attempted: false without calling model
         assert!(result_blank.is_ok());
-        assert_eq!(result_blank.unwrap(), None);
+        assert_eq!(
+            result_blank.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: false,
+                tool_call: None,
+            }
+        );
     }
 
     #[tokio::test]
-    async fn test_tc_llm_11_and_12_user_message_empty_or_whitespace_short_circuits() {
+    async fn test_tc_llm_11_and_12_user_message_empty_or_whitespace_returns_attempted_false() {
         // Given: A mock client that would return an error if called
         let mock_client = MockNimClient {
             response: Err("Should not be called".to_string()),
@@ -580,16 +655,28 @@ pub(crate) mod tests {
         // When: user_message is empty (TC-LLM-11)
         let res_empty = execute_detect_department_intent(&mock_client, api_key, "").await;
 
-        // Then: Short-circuits and returns Ok(None)
+        // Then: Short-circuits and returns attempted: false
         assert!(res_empty.is_ok());
-        assert_eq!(res_empty.unwrap(), None);
+        assert_eq!(
+            res_empty.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: false,
+                tool_call: None,
+            }
+        );
 
         // When: user_message is whitespace only (TC-LLM-12)
         let res_space = execute_detect_department_intent(&mock_client, api_key, "   \n\t ").await;
 
-        // Then: Short-circuits and returns Ok(None)
+        // Then: Short-circuits and returns attempted: false
         assert!(res_space.is_ok());
-        assert_eq!(res_space.unwrap(), None);
+        assert_eq!(
+            res_space.unwrap(),
+            DetectDepartmentIntentResult {
+                attempted: false,
+                tool_call: None,
+            }
+        );
     }
 
     #[tokio::test]

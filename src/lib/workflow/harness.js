@@ -127,47 +127,56 @@ export async function detectIntentWithFallbackAndTrace(userMessage, profile, con
 
   // 1. Try LLM detector first if provided
   if (typeof opts.llmDetector === 'function') {
-    const nowSec = Math.floor(Date.now() / 1000);
-    traceId = opts.traceId || `trace_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-
-    const traceRecord = {
-      id: traceId,
-      agent_scope: ctx.agentScope || ctx.taskId || profile?.id || 'general',
-      system_prompt: profile?.systemPrompt || '',
-      tools_json: JSON.stringify(profile?.tools || []),
-      user_message: trimmed,
-      raw_response: null,
-      parsed_result: null,
-      model: opts.model || profile?.model || 'z-ai/glm-5.3-flash',
-      latency_ms: null,
-      error: null,
-      human_decision: null,
-      created_at: nowSec
-    };
-
     const startTime = Date.now();
-    let llmResult = null;
+    let llmRawResult = null;
     let callError = null;
 
     try {
-      llmResult = await opts.llmDetector(trimmed, profile);
-      traceRecord.latency_ms = Date.now() - startTime;
-      traceRecord.raw_response = JSON.stringify(llmResult);
-      if (llmResult && typeof llmResult === 'object' && llmResult.tool) {
-        traceRecord.parsed_result = JSON.stringify(llmResult);
-      }
+      llmRawResult = await opts.llmDetector(trimmed, profile);
     } catch (err) {
-      traceRecord.latency_ms = Date.now() - startTime;
       callError = err;
-      traceRecord.error = err?.message || String(err);
       console.warn('[Harness] LLM intent detection failed or unavailable, falling back to regex:', err);
     }
 
-    // Record trace in DB/storage
-    await logLlmTrace(traceRecord, opts.tracer);
+    // Determine if the LLM call was actually attempted (e.g. API key was present)
+    // If llmRawResult explicitly states attempted === false, it means unconfigured / skipped.
+    const wasAttempted = callError != null || (llmRawResult != null && llmRawResult.attempted !== false);
 
-    if (llmResult && typeof llmResult === 'object' && llmResult.tool) {
-      return { intent: llmResult, traceId };
+    if (wasAttempted) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      traceId = opts.traceId || `trace_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+      // Extract tool intent (supports DetectDepartmentIntentResult { attempted, tool_call } or direct { tool, ... })
+      let detectedIntent = null;
+      if (llmRawResult && typeof llmRawResult === 'object') {
+        if (llmRawResult.tool_call && typeof llmRawResult.tool_call === 'object' && llmRawResult.tool_call.tool) {
+          detectedIntent = llmRawResult.tool_call;
+        } else if (llmRawResult.tool) {
+          detectedIntent = llmRawResult;
+        }
+      }
+
+      const traceRecord = {
+        id: traceId,
+        agent_scope: ctx.agentScope || ctx.taskId || profile?.id || 'general',
+        system_prompt: profile?.systemPrompt || '',
+        tools_json: JSON.stringify(profile?.tools || []),
+        user_message: trimmed,
+        raw_response: llmRawResult != null ? JSON.stringify(llmRawResult) : null,
+        parsed_result: detectedIntent ? JSON.stringify(detectedIntent) : null,
+        model: opts.model || profile?.model || 'z-ai/glm-5.3-flash',
+        latency_ms: Date.now() - startTime,
+        error: callError ? (callError?.message || String(callError)) : null,
+        human_decision: null,
+        created_at: nowSec
+      };
+
+      // Record trace in DB/storage only when model was actually attempted
+      await logLlmTrace(traceRecord, opts.tracer);
+
+      if (detectedIntent) {
+        return { intent: detectedIntent, traceId };
+      }
     }
   }
 

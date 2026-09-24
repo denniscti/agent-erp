@@ -590,3 +590,62 @@ test('TC-HN-OBS-06: Legacy confirmation without traceId executes safely', async 
   assert.equal(capturedAuditLogs[0].decision, 'rejected');
   assert.equal(capturedDecisions.length, 0);
 });
+
+test('TC-HN-OBS-07: Unconfigured API key (attempted: false) does NOT log trace to llm_traces', async () => {
+  // Given: Preconditions - Detector returns attempted: false because NVIDIA_API_KEY is not configured
+  const capturedTraces = [];
+  const mockTracer = async (trace) => {
+    capturedTraces.push({ ...trace });
+  };
+  const unconfiguredDetector = async () => ({
+    attempted: false,
+    tool_call: null
+  });
+
+  const userMessage = '請幫我新增「資訊部」';
+
+  // When:  Operation to execute - Run agent turn
+  const turnResult = await runAgentTurn(
+    userMessage,
+    departmentAgentProfile,
+    { taskId: 'task_m2_dept' },
+    { llmDetector: unconfiguredDetector, tracer: mockTracer }
+  );
+
+  // Then:  Regex fallback detects intent, confirmation card is built, but zero traces are written
+  assert.equal(turnResult.type, 'pending_confirmation');
+  assert.equal(turnResult.confirmation.toolName, 'create_department');
+  assert.equal(turnResult.confirmation.args.name, '資訊部');
+  assert.equal(turnResult.traceId, null);
+  assert.equal(capturedTraces.length, 0, 'No trace must be written when model was not attempted');
+});
+
+test('TC-HN-OBS-08: Model invoked but decided no tools (attempted: true, tool_call: null) logs trace with null parsed_result', async () => {
+  // Given: Preconditions - Model was invoked with valid API key, but model decided no tool is needed
+  const capturedTraces = [];
+  const mockTracer = async (trace) => {
+    capturedTraces.push({ ...trace });
+  };
+  const invokedTextDetector = async () => ({
+    attempted: true,
+    tool_call: null
+  });
+
+  const userMessage = '今天台北天氣如何？';
+
+  // When:  Operation to execute - Run agent turn
+  const turnResult = await runAgentTurn(
+    userMessage,
+    departmentAgentProfile,
+    { taskId: 'task_m2_dept' },
+    { llmDetector: invokedTextDetector, tracer: mockTracer }
+  );
+
+  // Then:  Returns fallback text guidance, and trace IS written with parsed_result: null
+  assert.equal(turnResult.type, 'text');
+  assert.equal(capturedTraces.length, 1);
+  assert.equal(capturedTraces[0].user_message, '今天台北天氣如何？');
+  assert.equal(capturedTraces[0].parsed_result, null);
+  assert.ok(capturedTraces[0].latency_ms >= 0);
+  assert.equal(capturedTraces[0].error, null);
+});
