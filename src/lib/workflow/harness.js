@@ -135,10 +135,22 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
     try {
       const result = await handler.execute(args, ctx);
       const content = handler.formatResult(result, args, ctx);
+      const completesTask = Boolean(handler.completesTask);
+      const summary = typeof handler.describeTaskSummary === 'function'
+        ? handler.describeTaskSummary(result, args, ctx)
+        : null;
+      const toast = typeof handler.describeToast === 'function'
+        ? handler.describeToast(result, args, ctx)
+        : null;
       return {
         type: 'executed',
         result,
-        content
+        content,
+        toolName,
+        args,
+        completesTask,
+        summary,
+        toast
       };
     } catch (execErr) {
       console.error(`[Harness Error] Execution of tool "${toolName}" failed:`, execErr);
@@ -178,7 +190,7 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
  * Executes a pending confirmation.
  * @param {import('./types.js').PendingConfirmation} confirmation
  * @param {any} [context]
- * @returns {Promise<{ result: any, content: string, toolName: string, args: any }>}
+ * @returns {Promise<{ result: any, content: string, toolName: string, args: any, completesTask: boolean, summary: string | null, toast: string | null }>}
  */
 export async function executeConfirmation(confirmation, context = {}) {
   if (!confirmation || !confirmation.handler) {
@@ -193,12 +205,22 @@ export async function executeConfirmation(confirmation, context = {}) {
 
   const result = await handler.execute(args, ctx);
   const content = handler.formatResult(result, args, ctx);
+  const completesTask = Boolean(handler.completesTask);
+  const summary = typeof handler.describeTaskSummary === 'function'
+    ? handler.describeTaskSummary(result, args, ctx)
+    : null;
+  const toast = typeof handler.describeToast === 'function'
+    ? handler.describeToast(result, args, ctx)
+    : null;
 
   return {
     result,
     content,
     toolName,
-    args
+    args,
+    completesTask,
+    summary,
+    toast
   };
 }
 

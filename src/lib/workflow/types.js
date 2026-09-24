@@ -22,8 +22,10 @@
  * @property {ToolDefinition} definition - The tool definition compliant with OpenAI / NIM format.
  * @property {(args: any, context?: any) => string} describeConfirmation - Formats human-readable confirmation text.
  * @property {(args: any, context?: any) => Promise<any>} execute - Executes the actual tool operation (e.g. Tauri IPC).
- * @property {(result: any, args?: any, context?: any) => string} formatResult - Formats execution result for conversation.
  * @property {boolean} [requiresConfirmation] - Whether human confirmation is required before execution (default: true).
+ * @property {boolean} [completesTask] - Whether successful execution marks the active task as completed ('done').
+ * @property {(result: any, args?: any, context?: any) => string} [describeTaskSummary] - Formats summary message reported to main ambient conversation.
+ * @property {(result: any, args?: any, context?: any) => string} [describeToast] - Formats toast notification message upon successful execution.
  * @property {(args?: any, context?: any) => string} [describeCancel] - Formats human-readable cancellation response.
  * @property {(text: string) => ({ tool: string, [key: string]: any } | null)} [extractCandidateRegex] - Offline regex fallback parser.
  * @property {string} [confirmLabel] - Custom label for confirmation button (default: '確認').

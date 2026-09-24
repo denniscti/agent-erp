@@ -25,6 +25,7 @@ export const createDepartmentToolHandler = {
     }
   },
   requiresConfirmation: true,
+  completesTask: true,
   confirmLabel: '確認建立',
   cancelLabel: '取消',
 
@@ -36,28 +37,26 @@ export const createDepartmentToolHandler = {
       : `偵測到您想建立「${name}」，確認要建立嗎？`;
   },
 
-  async execute(args, context = {}) {
+  describeTaskSummary(_result, args) {
+    const name = args?.name ? String(args.name).trim() : '新部門';
+    return `✅「設定部門」已完成，新增了『${name}』`;
+  },
+
+  describeToast(_result, args) {
+    const name = args?.name ? String(args.name).trim() : '新部門';
+    return `已成功建立「${name}」！`;
+  },
+
+  async execute(args) {
     const name = args?.name ? String(args.name).trim() : '';
     if (!name) {
       throw new Error('部門名稱不能為空');
     }
 
-    const dept = await invoke('create_department', {
+    return await invoke('create_department', {
       name,
       parentId: args?.parentId || null
     });
-
-    if (context?.taskId) {
-      await invoke('update_task_status', { taskId: context.taskId, status: 'done' });
-      // Report summary to main agent ambient conversation
-      await invoke('append_task_message', {
-        taskId: 'main',
-        role: 'assistant',
-        content: `✅「設定部門」已完成，新增了『${name}』`
-      });
-    }
-
-    return dept;
   },
 
   formatResult(_result, args) {
@@ -114,6 +113,10 @@ export const listDepartmentsToolHandler = {
 
   describeConfirmation() {
     return '偵測到您想查詢目前已建立的組織部門列表，確認要查詢嗎？';
+  },
+
+  describeToast() {
+    return '已完成部門列表查詢！';
   },
 
   async execute() {

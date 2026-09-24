@@ -41,17 +41,11 @@ test('TC-HN-01: create_department normal intent requires confirmation', async ()
 test('TC-HN-02: create_department user confirmation executes handler and formats result', async () => {
   // Given: Preconditions - A pending confirmation for create_department with mock actions
   let createdDeptName = null;
-  let taskStatusUpdated = null;
-  let reportedMainMessage = null;
 
   const mockHandler = {
     ...createDepartmentToolHandler,
-    async execute(args, ctx) {
+    async execute(args) {
       createdDeptName = args.name;
-      if (ctx.taskId) {
-        taskStatusUpdated = 'done';
-        reportedMainMessage = `✅「設定部門」已完成，新增了『${args.name}』`;
-      }
       return { id: 'dept_123', name: args.name };
     }
   };
@@ -67,10 +61,11 @@ test('TC-HN-02: create_department user confirmation executes handler and formats
   // When:  Operation to execute - User confirms the action
   const execResult = await executeConfirmation(confirmation, { taskId: 'task_m2_dept' });
 
-  // Then:  Expected result - Execution succeeded, status updated, result formatted
+  // Then:  Expected result - Execution succeeded, completesTask flag, summary and toast formatted
   assert.equal(createdDeptName, '研發部');
-  assert.equal(taskStatusUpdated, 'done');
-  assert.equal(reportedMainMessage, '✅「設定部門」已完成，新增了『研發部』');
+  assert.equal(execResult.completesTask, true);
+  assert.equal(execResult.summary, '✅「設定部門」已完成，新增了『研發部』');
+  assert.equal(execResult.toast, '已成功建立「研發部」！');
   assert.equal(execResult.content, '已為您建立「研發部」！');
   assert.equal(execResult.toolName, 'create_department');
 });
@@ -130,6 +125,8 @@ test('TC-HN-04: list_departments normal intent and execution formatting', async 
   assert.ok(listExec.content.includes('共 2 個'));
   assert.ok(listExec.content.includes('1. 業務部'));
   assert.ok(listExec.content.includes('2. 銷售一組 (子部門)'));
+  assert.equal(listExec.toast, '已完成部門列表查詢！');
+  assert.equal(listExec.completesTask, false);
 });
 
 test('TC-HN-05: tool with requiresConfirmation: false executes directly without pending card', async () => {
@@ -322,9 +319,12 @@ test('TC-EXT-01: Cross-module reusability - 2nd module registers ToolHandlers an
       }
     },
     requiresConfirmation: true,
+    completesTask: true,
     confirmLabel: '送出邀請',
     cancelLabel: '取消邀請',
     describeConfirmation: (args) => `偵測到您想邀請「${args.email}」擔任 ${args.role || '成員'}，確認要發送邀請信嗎？`,
+    describeTaskSummary: (_res, args) => `✅「邀請成員」已完成，新增了『${args.email}』`,
+    describeToast: (_res, args) => `已成功送出邀請信給「${args.email}」！`,
     execute: async (args) => {
       invitedEmail = args.email;
       return { success: true, email: args.email };
@@ -363,4 +363,7 @@ test('TC-EXT-01: Cross-module reusability - 2nd module registers ToolHandlers an
   // Then:  2nd module executed cleanly with zero changes to harness core
   assert.equal(invitedEmail, 'user@example.com');
   assert.equal(confirmResult.content, '已成功送出邀請信給「user@example.com」！');
+  assert.equal(confirmResult.completesTask, true);
+  assert.equal(confirmResult.summary, '✅「邀請成員」已完成，新增了『user@example.com』');
+  assert.equal(confirmResult.toast, '已成功送出邀請信給「user@example.com」！');
 });

@@ -821,12 +821,31 @@ export async function confirmPendingTaskAction() {
   clearPendingTaskConfirmation();
 
   try {
-    const { content } = await executeConfirmation(conf, { 
+    const { content, toolName, completesTask, summary, toast } = await executeConfirmation(conf, { 
       taskId, 
       activeTask: appState.tasks.find(t => t.id === taskId) 
     });
+
     if (taskId && content) {
       await appendTaskMessageAction(taskId, 'assistant', content);
+    }
+
+    if (taskId && completesTask) {
+      await updateTaskStatusAction(taskId, 'done');
+    }
+
+    if (summary) {
+      await appendTaskMessageAction('main', 'assistant', summary);
+    }
+
+    if (toolName === 'create_department' || toolName === 'list_departments') {
+      await fetchDepartments();
+    }
+
+    if (toast) {
+      showToast(toast);
+    } else {
+      showToast(`已成功執行「${toolName}」！`);
     }
   } catch (err) {
     console.error("Failed to execute confirmation from ToolHandler:", err);
