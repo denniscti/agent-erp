@@ -52,6 +52,7 @@
  * @property {any} args - Parsed arguments for the tool call.
  * @property {string} confirmText - Human-readable confirmation prompt text.
  * @property {string} [taskId] - ID of the task context if applicable.
+ * @property {string} [traceId] - Associated LLM trace record ID for human decision backfilling.
  * @property {string} [confirmLabel] - Label for confirmation button.
  * @property {string} [cancelLabel] - Label for cancellation button.
  * @property {any} [payload] - Backward compatibility payload object.
@@ -65,6 +66,8 @@
  * @property {PendingConfirmation} [confirmation]
  * @property {any} [result]
  * @property {string} [error]
+ * @property {string} [traceId]
  */
 
 export {};
+

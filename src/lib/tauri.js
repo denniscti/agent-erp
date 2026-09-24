@@ -18,7 +18,8 @@ let mockOrders = [
   }
 ];
 
-let mockAuditLogs = [];
+let mockAuditLogs = loadStorage('agent_erp_mock_audit_logs', []);
+let mockLlmTraces = loadStorage('agent_erp_mock_llm_traces', []);
 let mockInstalledModules = [];
 
 function loadStorage(key, defaultVal) {
@@ -614,6 +615,71 @@ export async function invoke(cmd, args = {}) {
 
     case 'detect_department_intent': {
       return null;
+    }
+
+    case 'record_audit_log': {
+      const { action_type, actionType, arguments: argsPayload, args: directArgs, decision, operator } = args;
+      const now = Math.floor(Date.now() / 1000);
+      const logId = `LOG-${now}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const rawArgs = argsPayload !== undefined ? argsPayload : directArgs;
+      const newLog = {
+        id: logId,
+        action_type: (action_type || actionType || '').trim(),
+        arguments: typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs || {}),
+        decision: (decision || '').trim(),
+        operator: (operator || 'user').trim(),
+        timestamp: now
+      };
+      mockAuditLogs.unshift(newLog);
+      saveStorage('agent_erp_mock_audit_logs', mockAuditLogs);
+      return logId;
+    }
+
+    case 'record_llm_trace': {
+      const trace = args.trace || args;
+      const now = Math.floor(Date.now() / 1000);
+      const traceId = trace.id || `trace_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const existingIndex = mockLlmTraces.findIndex(t => t.id === traceId);
+      const traceRecord = {
+        id: traceId,
+        agent_scope: trace.agent_scope || trace.agentScope || 'general',
+        system_prompt: trace.system_prompt || trace.systemPrompt || '',
+        tools_json: trace.tools_json || trace.toolsJson || '[]',
+        user_message: trace.user_message || trace.userMessage || '',
+        raw_response: trace.raw_response !== undefined ? trace.raw_response : (trace.rawResponse || null),
+        parsed_result: trace.parsed_result !== undefined ? trace.parsed_result : (trace.parsedResult || null),
+        model: trace.model || 'z-ai/glm-5.3-flash',
+        latency_ms: trace.latency_ms !== undefined ? trace.latency_ms : (trace.latencyMs !== undefined ? trace.latencyMs : null),
+        error: trace.error || null,
+        human_decision: trace.human_decision || trace.humanDecision || null,
+        created_at: trace.created_at || trace.createdAt || now
+      };
+      if (existingIndex >= 0) {
+        mockLlmTraces[existingIndex] = {
+          ...mockLlmTraces[existingIndex],
+          ...traceRecord,
+          human_decision: traceRecord.human_decision !== null ? traceRecord.human_decision : mockLlmTraces[existingIndex].human_decision
+        };
+      } else {
+        mockLlmTraces.unshift(traceRecord);
+      }
+      saveStorage('agent_erp_mock_llm_traces', mockLlmTraces);
+      return traceId;
+    }
+
+    case 'update_llm_trace_decision': {
+      const { id, decision } = args;
+      const trace = mockLlmTraces.find(t => t.id === id);
+      if (!trace) {
+        throw new Error(`Trace not found: ${id}`);
+      }
+      trace.human_decision = decision;
+      saveStorage('agent_erp_mock_llm_traces', mockLlmTraces);
+      return null;
+    }
+
+    case 'get_llm_traces': {
+      return [...mockLlmTraces];
     }
     
     default:

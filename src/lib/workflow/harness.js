@@ -2,7 +2,94 @@
  * @file harness.js
  * @description Domain-agnostic Core Loop Harness for Task-Driven Workflow.
  * Implements the execution loop described in task_driven_workflow.md section 3.3.
+ * Integrates dual-track observability: audit_logs for human decisions & security alerts,
+ * and llm_traces for LLM interactions and post-hoc evaluation.
  */
+
+import { invoke } from '../tauri.js';
+
+/**
+ * Safely records an audit log entry.
+ * @param {string} actionType
+ * @param {any} args
+ * @param {'approved' | 'rejected' | 'rejected_unauthorized'} decision
+ * @param {string} [operator]
+ * @param {((entry: any) => Promise<any>) | null} [customLogger]
+ * @returns {Promise<string | null>}
+ */
+export async function logAuditEvent(actionType, args, decision, operator = 'user', customLogger = null) {
+  const argsString = typeof args === 'string' ? args : JSON.stringify(args || {});
+  const entry = {
+    action_type: actionType,
+    arguments: argsString,
+    decision,
+    operator: operator || 'user'
+  };
+
+  if (typeof customLogger === 'function') {
+    try {
+      return await customLogger(entry);
+    } catch (err) {
+      console.warn('[Harness Observability] Custom audit logger failed:', err);
+    }
+  }
+
+  try {
+    return await invoke('record_audit_log', entry);
+  } catch (err) {
+    console.warn('[Harness Observability] Failed to record audit log via invoke:', err);
+    return null;
+  }
+}
+
+/**
+ * Safely records an LLM trace record.
+ * @param {any} traceRecord
+ * @param {((trace: any) => Promise<any>) | null} [customTracer]
+ * @returns {Promise<string | null>}
+ */
+export async function logLlmTrace(traceRecord, customTracer = null) {
+  if (typeof customTracer === 'function') {
+    try {
+      return await customTracer(traceRecord);
+    } catch (err) {
+      console.warn('[Harness Observability] Custom tracer failed:', err);
+    }
+  }
+
+  try {
+    return await invoke('record_llm_trace', { trace: traceRecord });
+  } catch (err) {
+    console.warn('[Harness Observability] Failed to record llm trace via invoke:', err);
+    return null;
+  }
+}
+
+/**
+ * Safely updates human decision for an LLM trace.
+ * @param {string} traceId
+ * @param {'approved' | 'rejected'} decision
+ * @param {((id: string, decision: string) => Promise<any>) | null} [customDecisionUpdater]
+ * @returns {Promise<any>}
+ */
+export async function updateLlmTraceDecision(traceId, decision, customDecisionUpdater = null) {
+  if (!traceId) return null;
+
+  if (typeof customDecisionUpdater === 'function') {
+    try {
+      return await customDecisionUpdater(traceId, decision);
+    } catch (err) {
+      console.warn('[Harness Observability] Custom trace decision updater failed:', err);
+    }
+  }
+
+  try {
+    return await invoke('update_llm_trace_decision', { id: traceId, decision });
+  } catch (err) {
+    console.warn('[Harness Observability] Failed to update llm trace decision via invoke:', err);
+    return null;
+  }
+}
 
 /**
  * Checks if a tool name is declared in the AgentProfile tools whitelist.
@@ -21,28 +108,66 @@ export function checkToolWhitelist(toolName, profile) {
 }
 
 /**
- * Detects intent using LLM with regex fallback.
+ * Detects intent using LLM with timing and trace logging, falling back to candidate regex extractors.
  * @param {string} userMessage
  * @param {import('./types.js').AgentProfile} profile
- * @param {(msg: string, profile: import('./types.js').AgentProfile) => Promise<{ tool: string, [key: string]: any } | null>} [llmDetector]
- * @returns {Promise<{ tool: string, [key: string]: any } | null>}
+ * @param {any} [context]
+ * @param {any} [options]
+ * @returns {Promise<{ intent: { tool: string, [key: string]: any } | null, traceId: string | null }>}
  */
-export async function detectIntentWithFallback(userMessage, profile, llmDetector) {
+export async function detectIntentWithFallbackAndTrace(userMessage, profile, context = {}, options = {}) {
   if (!userMessage || !userMessage.trim()) {
-    return null;
+    return { intent: null, traceId: null };
   }
 
   const trimmed = userMessage.trim();
+  const ctx = context || {};
+  const opts = options || {};
+  let traceId = null;
 
   // 1. Try LLM detector first if provided
-  if (typeof llmDetector === 'function') {
+  if (typeof opts.llmDetector === 'function') {
+    const nowSec = Math.floor(Date.now() / 1000);
+    traceId = opts.traceId || `trace_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    const traceRecord = {
+      id: traceId,
+      agent_scope: ctx.agentScope || ctx.taskId || profile?.id || 'general',
+      system_prompt: profile?.systemPrompt || '',
+      tools_json: JSON.stringify(profile?.tools || []),
+      user_message: trimmed,
+      raw_response: null,
+      parsed_result: null,
+      model: opts.model || profile?.model || 'z-ai/glm-5.3-flash',
+      latency_ms: null,
+      error: null,
+      human_decision: null,
+      created_at: nowSec
+    };
+
+    const startTime = Date.now();
+    let llmResult = null;
+    let callError = null;
+
     try {
-      const llmResult = await llmDetector(trimmed, profile);
+      llmResult = await opts.llmDetector(trimmed, profile);
+      traceRecord.latency_ms = Date.now() - startTime;
+      traceRecord.raw_response = JSON.stringify(llmResult);
       if (llmResult && typeof llmResult === 'object' && llmResult.tool) {
-        return llmResult;
+        traceRecord.parsed_result = JSON.stringify(llmResult);
       }
     } catch (err) {
+      traceRecord.latency_ms = Date.now() - startTime;
+      callError = err;
+      traceRecord.error = err?.message || String(err);
       console.warn('[Harness] LLM intent detection failed or unavailable, falling back to regex:', err);
+    }
+
+    // Record trace in DB/storage
+    await logLlmTrace(traceRecord, opts.tracer);
+
+    if (llmResult && typeof llmResult === 'object' && llmResult.tool) {
+      return { intent: llmResult, traceId };
     }
   }
 
@@ -53,7 +178,7 @@ export async function detectIntentWithFallback(userMessage, profile, llmDetector
         try {
           const match = handler.extractCandidateRegex(trimmed);
           if (match && match.tool) {
-            return match;
+            return { intent: match, traceId };
           }
         } catch (regexErr) {
           console.warn('[Harness] Handler regex extractor error:', regexErr);
@@ -62,23 +187,45 @@ export async function detectIntentWithFallback(userMessage, profile, llmDetector
     }
   }
 
-  return null;
+  return { intent: null, traceId };
+}
+
+/**
+ * Backward-compatible detectIntentWithFallback signature.
+ * @param {string} userMessage
+ * @param {import('./types.js').AgentProfile} profile
+ * @param {(msg: string, profile: import('./types.js').AgentProfile) => Promise<{ tool: string, [key: string]: any } | null>} [llmDetector]
+ * @returns {Promise<{ tool: string, [key: string]: any } | null>}
+ */
+export async function detectIntentWithFallback(userMessage, profile, llmDetector) {
+  const res = await detectIntentWithFallbackAndTrace(
+    userMessage,
+    profile,
+    {},
+    { llmDetector }
+  );
+  return res.intent;
 }
 
 /**
  * Runs one turn of the agent workflow loop.
  * @param {string} userMessage
  * @param {import('./types.js').AgentProfile} profile
- * @param {{ taskId?: string | null, activeTask?: any, [key: string]: any }} [context]
- * @param {{ llmDetector?: (msg: string, profile: import('./types.js').AgentProfile) => Promise<any> }} [options]
+ * @param {{ taskId?: string | null, activeTask?: any, agentScope?: string, operator?: string, [key: string]: any }} [context]
+ * @param {{ llmDetector?: (msg: string, profile: import('./types.js').AgentProfile) => Promise<any>, tracer?: (trace: any) => Promise<any>, auditLogger?: (entry: any) => Promise<any>, [key: string]: any }} [options]
  * @returns {Promise<import('./types.js').TurnResult>}
  */
 export async function runAgentTurn(userMessage, profile, context = {}, options = {}) {
   const ctx = context || {};
   const opts = options || {};
 
-  // Step 1: Detect intent
-  const intent = await detectIntentWithFallback(userMessage, profile, opts.llmDetector);
+  // Step 1: Detect intent with trace logging
+  const { intent, traceId } = await detectIntentWithFallbackAndTrace(
+    userMessage,
+    profile,
+    ctx,
+    opts
+  );
 
   // If no tool was detected, return guidance/fallback text
   if (!intent || !intent.tool) {
@@ -87,7 +234,8 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
       : '請提供具體的操作需求，我將為您執行相應的任務。';
     return {
       type: 'text',
-      content: fallbackMsg
+      content: fallbackMsg,
+      traceId
     };
   }
 
@@ -105,10 +253,21 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
       args,
       allowedTools: profile?.tools?.map((t) => t?.function?.name)
     });
+
+    // Write audit log for security anomaly (decision = 'rejected_unauthorized')
+    await logAuditEvent(
+      toolName,
+      args,
+      'rejected_unauthorized',
+      ctx.operator || 'system',
+      opts.auditLogger
+    );
+
     return {
       type: 'error',
       error: `Unauthorized tool call: ${toolName}`,
-      content: errMsg
+      content: errMsg,
+      traceId
     };
   }
 
@@ -123,7 +282,8 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
     return {
       type: 'error',
       error: `Missing ToolHandler for ${toolName}`,
-      content: errMsg
+      content: errMsg,
+      traceId
     };
   }
 
@@ -150,7 +310,8 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
         args,
         completesTask,
         summary,
-        toast
+        toast,
+        traceId
       };
     } catch (execErr) {
       console.error(`[Harness Error] Execution of tool "${toolName}" failed:`, execErr);
@@ -158,7 +319,8 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
       return {
         type: 'error',
         error: errString,
-        content: `執行工具「${toolName}」失敗：${errString}`
+        content: `執行工具「${toolName}」失敗：${errString}`,
+        traceId
       };
     }
   }
@@ -172,27 +334,30 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
     args,
     confirmText,
     taskId: ctx.taskId || null,
+    traceId: traceId || null,
     confirmLabel: handler.confirmLabel || '確認',
     cancelLabel: handler.cancelLabel || '取消',
     // Backward compatibility fields
     type: toolName,
-    payload: { ...args, taskId: ctx.taskId || null }
+    payload: { ...args, taskId: ctx.taskId || null, traceId: traceId || null }
   };
 
   return {
     type: 'pending_confirmation',
     confirmation,
-    content: confirmText
+    content: confirmText,
+    traceId
   };
 }
 
 /**
- * Executes a pending confirmation.
+ * Executes a pending confirmation and records human decision in audit_logs and llm_traces.
  * @param {import('./types.js').PendingConfirmation} confirmation
  * @param {any} [context]
+ * @param {{ auditLogger?: (entry: any) => Promise<any>, decisionUpdater?: (id: string, decision: string) => Promise<any> }} [options]
  * @returns {Promise<{ result: any, content: string, toolName: string, args: any, completesTask: boolean, summary: string | null, toast: string | null }>}
  */
-export async function executeConfirmation(confirmation, context = {}) {
+export async function executeConfirmation(confirmation, context = {}, options = {}) {
   if (!confirmation || !confirmation.handler) {
     throw new Error('No pending confirmation or handler found.');
   }
@@ -202,6 +367,22 @@ export async function executeConfirmation(confirmation, context = {}) {
     taskId: confirmation.taskId || context?.taskId,
     ...context
   };
+  const opts = options || {};
+
+  // Record audit log for human approval (decision = 'approved')
+  await logAuditEvent(
+    toolName,
+    args,
+    'approved',
+    ctx.operator || 'user',
+    opts.auditLogger
+  );
+
+  // Backfill human_decision on the associated LLM trace
+  const traceId = confirmation.traceId || confirmation.payload?.traceId;
+  if (traceId) {
+    await updateLlmTraceDecision(traceId, 'approved', opts.decisionUpdater);
+  }
 
   const result = await handler.execute(args, ctx);
   const content = handler.formatResult(result, args, ctx);
@@ -225,12 +406,13 @@ export async function executeConfirmation(confirmation, context = {}) {
 }
 
 /**
- * Executes a cancellation for a pending confirmation.
+ * Executes a cancellation for a pending confirmation and records human decision in audit_logs and llm_traces.
  * @param {import('./types.js').PendingConfirmation} confirmation
  * @param {any} [context]
- * @returns {{ content: string, toolName: string, args: any }}
+ * @param {{ auditLogger?: (entry: any) => Promise<any>, decisionUpdater?: (id: string, decision: string) => Promise<any> }} [options]
+ * @returns {Promise<{ content: string, toolName: string, args: any }>}
  */
-export function executeCancellation(confirmation, context = {}) {
+export async function executeCancellation(confirmation, context = {}, options = {}) {
   if (!confirmation || !confirmation.handler) {
     return {
       content: '好的，已取消操作。',
@@ -244,6 +426,22 @@ export function executeCancellation(confirmation, context = {}) {
     taskId: confirmation.taskId || context?.taskId,
     ...context
   };
+  const opts = options || {};
+
+  // Record audit log for human rejection/cancellation (decision = 'rejected')
+  await logAuditEvent(
+    toolName,
+    args,
+    'rejected',
+    ctx.operator || 'user',
+    opts.auditLogger
+  );
+
+  // Backfill human_decision on the associated LLM trace
+  const traceId = confirmation.traceId || confirmation.payload?.traceId;
+  if (traceId) {
+    await updateLlmTraceDecision(traceId, 'rejected', opts.decisionUpdater);
+  }
 
   const content = typeof handler.describeCancel === 'function'
     ? handler.describeCancel(args, ctx)

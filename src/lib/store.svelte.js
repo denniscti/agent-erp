@@ -842,6 +842,9 @@ export async function confirmPendingTaskAction() {
       await fetchDepartments();
     }
 
+    // Refresh audit logs in store
+    await fetchAuditLogs();
+
     if (toast) {
       showToast(toast);
     } else {
@@ -867,10 +870,12 @@ export async function cancelPendingTaskAction() {
   clearPendingTaskConfirmation();
 
   if (taskId && conf) {
-    const { content } = executeCancellation(conf, { 
+    const { content } = await executeCancellation(conf, { 
       taskId, 
       activeTask: appState.tasks.find(t => t.id === taskId) 
     });
+    // Refresh audit logs in store
+    await fetchAuditLogs();
     if (content) {
       await appendTaskMessageAction(taskId, 'assistant', content);
     }

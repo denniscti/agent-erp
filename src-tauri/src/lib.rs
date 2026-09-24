@@ -7,6 +7,7 @@ pub mod auth;
 pub mod departments;
 mod downloader;
 pub mod llm;
+pub mod llm_traces;
 pub mod tasks;
 pub mod tps2_types;
 
@@ -172,6 +173,17 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     departments::create_departments_table(&conn)
         .map_err(|e| format!("Failed to create departments table: {}", e))?;
+
+    llm_traces::create_llm_traces_table(&conn)
+        .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
+
+    let trace_retention_days = llm_traces::parse_trace_retention_days(
+        std::env::var("AGENT_ERP_LLM_TRACE_RETENTION_DAYS")
+            .ok()
+            .as_deref(),
+    );
+    let now = llm_traces::current_timestamp();
+    let _ = llm_traces::cleanup_expired_llm_traces(&conn, trace_retention_days, now);
 
     // Seed mock order if empty
     let mut stmt = conn
@@ -646,7 +658,11 @@ pub fn run() {
             tasks::get_task_messages,
             departments::create_department,
             departments::list_departments,
-            llm::detect_department_intent
+            llm::detect_department_intent,
+            llm_traces::record_llm_trace,
+            llm_traces::update_llm_trace_decision,
+            llm_traces::get_llm_traces,
+            llm_traces::record_audit_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

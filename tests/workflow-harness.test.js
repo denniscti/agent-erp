@@ -6,7 +6,10 @@ import {
   detectIntentWithFallback,
   runAgentTurn,
   executeConfirmation,
-  executeCancellation
+  executeCancellation,
+  logAuditEvent,
+  logLlmTrace,
+  updateLlmTraceDecision
 } from '../src/lib/workflow/harness.js';
 
 import {
@@ -29,13 +32,15 @@ test('TC-HN-01: create_department normal intent requires confirmation', async ()
   // When:  Operation to execute - Run one agent turn through harness
   const turnResult = await runAgentTurn(userMessage, departmentAgentProfile, context, { llmDetector: mockLLM });
 
-  // Then:  Expected result - Returns pending_confirmation with formatted text
+  // Then:  Expected result - Returns pending_confirmation with formatted text and traceId
   assert.equal(turnResult.type, 'pending_confirmation');
   assert.equal(turnResult.confirmation.toolName, 'create_department');
   assert.equal(turnResult.confirmation.args.name, '行銷部');
   assert.equal(turnResult.content, '偵測到您想建立「行銷部」，確認要建立嗎？');
   assert.equal(turnResult.confirmation.confirmLabel, '確認建立');
   assert.equal(turnResult.confirmation.cancelLabel, '取消');
+  assert.ok(turnResult.traceId, 'Trace ID must be generated');
+  assert.equal(turnResult.confirmation.traceId, turnResult.traceId);
 });
 
 test('TC-HN-02: create_department user confirmation executes handler and formats result', async () => {
@@ -81,7 +86,7 @@ test('TC-HN-03: create_department user cancellation invokes describeCancel', asy
   };
 
   // When:  Operation to execute - User cancels the action
-  const cancelResult = executeCancellation(confirmation, { taskId: 'task_m2_dept' });
+  const cancelResult = await executeCancellation(confirmation, { taskId: 'task_m2_dept' });
 
   // Then:  Expected result - Custom cancel guidance returned
   assert.equal(cancelResult.content, '好的，請告訴我正確的部門名稱');
@@ -366,4 +371,222 @@ test('TC-EXT-01: Cross-module reusability - 2nd module registers ToolHandlers an
   assert.equal(confirmResult.completesTask, true);
   assert.equal(confirmResult.summary, '✅「邀請成員」已完成，新增了『user@example.com』');
   assert.equal(confirmResult.toast, '已成功送出邀請信給「user@example.com」！');
+});
+
+// ==========================================
+// Observability Tests (audit_logs & llm_traces)
+// ==========================================
+
+test('TC-HN-OBS-01: Department creation approval logs approved in audit_logs and backfills llm_traces', async () => {
+  // Given: Preconditions - A tracer and auditLogger capturing events, LLM detects create_department
+  const capturedAuditLogs = [];
+  const capturedTraces = [];
+  const capturedDecisions = [];
+
+  const mockTracer = async (trace) => {
+    capturedTraces.push({ ...trace });
+  };
+  const mockAuditLogger = async (entry) => {
+    capturedAuditLogs.push({ ...entry });
+  };
+  const mockDecisionUpdater = async (traceId, decision) => {
+    capturedDecisions.push({ traceId, decision });
+  };
+
+  const userMessage = '我想建立行銷部';
+  const mockLLM = async () => ({ tool: 'create_department', name: '行銷部' });
+
+  // When:  Operation to execute - Run agent turn
+  const turnResult = await runAgentTurn(
+    userMessage,
+    departmentAgentProfile,
+    { taskId: 'task_m2_dept', operator: 'admin_user' },
+    { llmDetector: mockLLM, tracer: mockTracer, auditLogger: mockAuditLogger }
+  );
+
+  // Then:  Trace recorded with latency, parsed result, and human_decision is initially null
+  assert.equal(turnResult.type, 'pending_confirmation');
+  assert.equal(capturedTraces.length, 1);
+  assert.equal(capturedTraces[0].user_message, '我想建立行銷部');
+  assert.equal(capturedTraces[0].model, 'z-ai/glm-5.3-flash');
+  assert.ok(capturedTraces[0].latency_ms !== null);
+  assert.equal(capturedTraces[0].human_decision, null);
+  assert.equal(capturedAuditLogs.length, 0); // No decision yet
+
+  // When:  User confirms the action
+  const confirmResult = await executeConfirmation(
+    turnResult.confirmation,
+    { taskId: 'task_m2_dept', operator: 'admin_user' },
+    { auditLogger: mockAuditLogger, decisionUpdater: mockDecisionUpdater }
+  );
+
+  // Then:  Audit log is recorded with 'approved' and decision updater backfills 'approved'
+  assert.equal(confirmResult.completesTask, true);
+  assert.equal(capturedAuditLogs.length, 1);
+  assert.equal(capturedAuditLogs[0].action_type, 'create_department');
+  assert.equal(capturedAuditLogs[0].decision, 'approved');
+  assert.equal(capturedAuditLogs[0].operator, 'admin_user');
+  assert.equal(capturedDecisions.length, 1);
+  assert.equal(capturedDecisions[0].traceId, turnResult.confirmation.traceId);
+  assert.equal(capturedDecisions[0].decision, 'approved');
+});
+
+test('TC-HN-OBS-02: Department creation cancellation logs rejected in audit_logs and backfills llm_traces', async () => {
+  // Given: Preconditions - Observer stubs capturing logs and traces
+  const capturedAuditLogs = [];
+  const capturedDecisions = [];
+
+  const mockTracer = async () => {};
+  const mockAuditLogger = async (entry) => {
+    capturedAuditLogs.push({ ...entry });
+  };
+  const mockDecisionUpdater = async (traceId, decision) => {
+    capturedDecisions.push({ traceId, decision });
+  };
+
+  const userMessage = '建立研發部';
+  const mockLLM = async () => ({ tool: 'create_department', name: '研發部' });
+
+  // When:  Operation to execute - Run agent turn
+  const turnResult = await runAgentTurn(
+    userMessage,
+    departmentAgentProfile,
+    { taskId: 'task_m2_dept', operator: 'test_operator' },
+    { llmDetector: mockLLM, tracer: mockTracer, auditLogger: mockAuditLogger }
+  );
+
+  // When:  User cancels the action
+  const cancelResult = await executeCancellation(
+    turnResult.confirmation,
+    { taskId: 'task_m2_dept', operator: 'test_operator' },
+    { auditLogger: mockAuditLogger, decisionUpdater: mockDecisionUpdater }
+  );
+
+  // Then:  Audit log records decision 'rejected' and decision updater backfills 'rejected'
+  assert.equal(cancelResult.content, '好的，請告訴我正確的部門名稱');
+  assert.equal(capturedAuditLogs.length, 1);
+  assert.equal(capturedAuditLogs[0].action_type, 'create_department');
+  assert.equal(capturedAuditLogs[0].decision, 'rejected');
+  assert.equal(capturedAuditLogs[0].operator, 'test_operator');
+  assert.equal(capturedDecisions.length, 1);
+  assert.equal(capturedDecisions[0].traceId, turnResult.confirmation.traceId);
+  assert.equal(capturedDecisions[0].decision, 'rejected');
+});
+
+test('TC-HN-OBS-03: Unauthorized tool call records rejected_unauthorized in audit_logs', async () => {
+  // Given: Preconditions - Model hallucinates an unauthorized tool
+  const capturedAuditLogs = [];
+  const mockTracer = async () => {};
+  const mockAuditLogger = async (entry) => {
+    capturedAuditLogs.push({ ...entry });
+  };
+
+  const userMessage = '幫我刪除部門';
+  const mockAttackLLM = async () => ({ tool: 'delete_department', name: '行銷部' });
+
+  // When:  Operation to execute - Run agent turn
+  const turnResult = await runAgentTurn(
+    userMessage,
+    departmentAgentProfile,
+    { operator: 'security_monitor' },
+    { llmDetector: mockAttackLLM, tracer: mockTracer, auditLogger: mockAuditLogger }
+  );
+
+  // Then:  Returns error and writes rejected_unauthorized audit log
+  assert.equal(turnResult.type, 'error');
+  assert.equal(capturedAuditLogs.length, 1);
+  assert.equal(capturedAuditLogs[0].action_type, 'delete_department');
+  assert.equal(capturedAuditLogs[0].decision, 'rejected_unauthorized');
+  assert.equal(capturedAuditLogs[0].operator, 'security_monitor');
+});
+
+test('TC-HN-OBS-04: LLM error records trace with error string and latency_ms', async () => {
+  // Given: Preconditions - LLM detector throws an API error
+  const capturedTraces = [];
+  const mockTracer = async (trace) => {
+    capturedTraces.push({ ...trace });
+  };
+  const failingLLM = async () => {
+    throw new Error('NVIDIA NIM 503 Service Unavailable');
+  };
+
+  // When:  Operation to execute - Run turn
+  const turnResult = await runAgentTurn(
+    '查詢有哪些部門',
+    departmentAgentProfile,
+    { taskId: 'task_m2_dept' },
+    { llmDetector: failingLLM, tracer: mockTracer }
+  );
+
+  // Then:  Trace record contains error message and latency
+  assert.equal(capturedTraces.length, 1);
+  assert.equal(capturedTraces[0].error, 'NVIDIA NIM 503 Service Unavailable');
+  assert.ok(capturedTraces[0].latency_ms >= 0);
+  assert.equal(capturedTraces[0].user_message, '查詢有哪些部門');
+});
+
+test('TC-HN-OBS-05: Direct execution without confirmation does not create audit log', async () => {
+  // Given: Preconditions - Tool with requiresConfirmation: false
+  const capturedAuditLogs = [];
+  const mockTracer = async () => {};
+  const directTool = {
+    definition: {
+      type: 'function',
+      function: { name: 'query_health', description: 'desc' }
+    },
+    requiresConfirmation: false,
+    describeConfirmation: () => '',
+    execute: async () => ({ healthy: true }),
+    formatResult: () => 'OK'
+  };
+  const profile = {
+    systemPrompt: 'Bot',
+    tools: [directTool.definition],
+    toolHandlers: [directTool]
+  };
+
+  // When:  Operation to execute - Run turn
+  const turnResult = await runAgentTurn(
+    'Check health',
+    profile,
+    {},
+    {
+      llmDetector: async () => ({ tool: 'query_health' }),
+      tracer: mockTracer,
+      auditLogger: async (entry) => capturedAuditLogs.push(entry)
+    }
+  );
+
+  // Then:  Executed directly, audit_logs remains untouched (only human decisions are logged)
+  assert.equal(turnResult.type, 'executed');
+  assert.equal(capturedAuditLogs.length, 0);
+});
+
+test('TC-HN-OBS-06: Legacy confirmation without traceId executes safely', async () => {
+  // Given: Preconditions - A confirmation object without traceId
+  const legacyConfirmation = {
+    toolName: 'create_department',
+    handler: createDepartmentToolHandler,
+    args: { name: '測試部' },
+    confirmText: '確認建立？'
+  };
+
+  const capturedAuditLogs = [];
+  const capturedDecisions = [];
+
+  // When:  Executing legacy cancellation
+  const cancelResult = await executeCancellation(
+    legacyConfirmation,
+    {},
+    {
+      auditLogger: async (e) => capturedAuditLogs.push(e),
+      decisionUpdater: async (id, d) => capturedDecisions.push({ id, d })
+    }
+  );
+
+  // Then:  Audit log is written without error, decision updater skipped safely
+  assert.equal(cancelResult.content, '好的，請告訴我正確的部門名稱');
+  assert.equal(capturedAuditLogs.length, 1);
+  assert.equal(capturedAuditLogs[0].decision, 'rejected');
+  assert.equal(capturedDecisions.length, 0);
 });
