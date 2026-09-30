@@ -18,7 +18,10 @@
     simulateTokenExpiry,
     fetchTasks,
     initMainChatGreeting,
-    switchActiveTask
+    switchActiveTask,
+    fetchMembers,
+    onboardMemberAction,
+    assignMemberRoleAction
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -36,6 +39,44 @@
   let isNotificationOpen = $state(false);
   let isInitialized = $state(false);
 
+  let newMemberName = $state('');
+  let newMemberEmail = $state('');
+  let newMemberRole = $state('member');
+  let isAddingMember = $state(false);
+  let memberError = $state('');
+
+  async function handleOnboardMember(e) {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (!newMemberName.trim() || !newMemberEmail.trim()) {
+      memberError = '請填寫姓名與電子郵件';
+      return;
+    }
+    isAddingMember = true;
+    memberError = '';
+    try {
+      await onboardMemberAction({
+        name: newMemberName.trim(),
+        email: newMemberEmail.trim(),
+        role: newMemberRole
+      });
+      newMemberName = '';
+      newMemberEmail = '';
+      newMemberRole = 'member';
+    } catch (err) {
+      memberError = err?.message || '新增成員失敗';
+    } finally {
+      isAddingMember = false;
+    }
+  }
+
+  async function handleRoleChange(userId, newRole) {
+    try {
+      await assignMemberRoleAction(userId, newRole);
+    } catch (err) {
+      console.error("Failed to assign role:", err);
+    }
+  }
+
   async function initializeAppData() {
     if (isInitialized) return;
     await fetchOrders();
@@ -43,6 +84,7 @@
     await fetchInstalledModules();
     await fetchModulesGallery();
     await fetchTasks();
+    await fetchMembers();
     await initMainChatGreeting();
     isInitialized = true;
   }
@@ -444,6 +486,106 @@
                     >
                       模擬 PO Webhook 送入
                     </button>
+                  </div>
+                </div>
+
+                <!-- Member & Role Management -->
+                <div class="settings-group glass-panel">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <h3>成員與角色管理 (Member & Role Management)</h3>
+                    <button class="btn btn-sm" onclick={fetchMembers}>
+                      重新整理成員
+                    </button>
+                  </div>
+                  <p class="settings-desc">管理當前租戶下的組織成員與權限角色（Owner / Admin / Member）。點擊即可即時指派或收回角色。</p>
+
+                  <!-- Add Member Form -->
+                  <form onsubmit={handleOnboardMember} class="member-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
+                    <div style="flex: 1; min-width: 140px;">
+                      <label for="member-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">成員姓名</label>
+                      <input 
+                        id="member-name-input"
+                        type="text" 
+                        class="form-input" 
+                        placeholder="例：王小明" 
+                        bind:value={newMemberName}
+                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                      />
+                    </div>
+                    <div style="flex: 1.5; min-width: 180px;">
+                      <label for="member-email-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">電子郵件</label>
+                      <input 
+                        id="member-email-input"
+                        type="email" 
+                        class="form-input" 
+                        placeholder="例：user@company.com" 
+                        bind:value={newMemberEmail}
+                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                      />
+                    </div>
+                    <div style="width: 150px;">
+                      <label for="member-role-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">指派角色</label>
+                      <select 
+                        id="member-role-select"
+                        bind:value={newMemberRole}
+                        style="width: 100%; padding: 7px 8px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                      >
+                        <option value="member">Member (一般成員)</option>
+                        <option value="admin">Admin (管理員)</option>
+                        <option value="owner">Owner (擁有者)</option>
+                      </select>
+                    </div>
+                    <button 
+                      type="submit" 
+                      class="btn btn-primary btn-sm" 
+                      disabled={isAddingMember}
+                      style="height: 35px; white-space: nowrap; padding: 0 16px;"
+                    >
+                      {#if isAddingMember}新增中...{:else}+ 新增成員{/if}
+                    </button>
+                  </form>
+                  
+                  {#if memberError}
+                    <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{memberError}</div>
+                  {/if}
+
+                  <!-- Member List -->
+                  <div class="member-list" style="display: flex; flex-direction: column; gap: 8px;">
+                    {#if appState.members.length === 0}
+                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無成員資料，請新增成員。</div>
+                    {:else}
+                      {#each appState.members as member (member.user_id || member.id)}
+                        <div class="member-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                          <div style="display: flex; align-items: center; gap: 12px;">
+                            <div style="width: 36px; height: 36px; border-radius: 50%; background: rgba(var(--accent-cyan), 0.1); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.9rem;">
+                              {(member.name || member.email || 'M').charAt(0).toUpperCase()}
+                            </div>
+                            <div>
+                              <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{member.name || member.email}</span>
+                                <span class="badge {member.role === 'owner' ? 'badge-amber' : member.role === 'admin' ? 'badge-cyan' : 'badge-slate'}" style="font-size: 0.72rem; text-transform: uppercase;">
+                                  {member.role}
+                                </span>
+                              </div>
+                              <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 2px;">{member.email}</div>
+                            </div>
+                          </div>
+                          
+                          <div style="display: flex; align-items: center; gap: 10px;">
+                            <span style="font-size: 0.8rem; color: var(--text-muted);">切換角色：</span>
+                            <select 
+                              value={member.role} 
+                              onchange={(e) => handleRoleChange(member.user_id || member.id, e.target.value)}
+                              style="padding: 5px 8px; font-size: 0.82rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                            >
+                              <option value="owner">Owner (擁有者)</option>
+                              <option value="admin">Admin (管理員)</option>
+                              <option value="member">Member (一般成員)</option>
+                            </select>
+                          </div>
+                        </div>
+                      {/each}
+                    {/if}
                   </div>
                 </div>
               </div>

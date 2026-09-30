@@ -1,5 +1,3 @@
-import { Channel as TauriChannel } from '@tauri-apps/api/core';
-
 // Detect if we are in Tauri runtime
 export const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
 
@@ -146,7 +144,7 @@ class MockChannel {
   }
 }
 
-export const Channel = isTauri ? TauriChannel : MockChannel;
+export const Channel = MockChannel;
 
 // 1. Invoke wrapper
 export async function invoke(cmd, args = {}) {
@@ -156,8 +154,9 @@ export async function invoke(cmd, args = {}) {
   }
 
   // Browser Mock Implementation
-  console.log(`[Mock IPC] invoke: ${cmd}`, args);
-  await new Promise(resolve => setTimeout(resolve, 300)); // Simulating latency
+  if (typeof window !== 'undefined') {
+    await new Promise(resolve => setTimeout(resolve, 300)); // Simulating latency in browser UI
+  }
 
   switch (cmd) {
     case 'get_mirrored_orders':
@@ -509,6 +508,79 @@ export async function invoke(cmd, args = {}) {
         mockSessions = null;
         saveStorage('agent_erp_mock_session', null);
         return {};
+      }
+      if ((method === 'GET' && path === '/v1/tenant-admin/members') || (method === 'POST' && path === '/v1/tenant-admin/members/list')) {
+        if (!mockSessions || !mockSessions.active_tenant_id) {
+          throw { code: "IAM_ERR_INVALID_CREDENTIALS", message: "auth: Session not found" };
+        }
+        const userTnts = mockUserTenants.filter(ut => ut.tenant_id === mockSessions.active_tenant_id);
+        const members = userTnts.map(ut => {
+          const u = mockUsers.find(user => user.id === ut.user_id);
+          return {
+            id: ut.user_id,
+            user_id: ut.user_id,
+            email: u ? u.email : 'unknown@example.com',
+            name: u ? (u.name || u.email) : 'Unknown Member',
+            role: ut.role
+          };
+        });
+        return { members };
+      }
+      if (method === 'POST' && (path === '/v1/tenant-admin/members/onboard' || path === '/v1/tenant-admin/employees/onboard')) {
+        if (!mockSessions || !mockSessions.active_tenant_id) {
+          throw { code: "IAM_ERR_INVALID_CREDENTIALS", message: "auth: Session not found" };
+        }
+        const { email, name, role } = body;
+        const trimmedEmail = (email || '').trim();
+        const trimmedName = (name || '').trim();
+        const trimmedRole = (role || 'member').trim().toLowerCase();
+        if (!trimmedEmail || !trimmedName) {
+          throw { code: "IAM_ERR_INVALID_ARGUMENT", message: "email and name cannot be empty" };
+        }
+        if (!['owner', 'admin', 'member'].includes(trimmedRole)) {
+          throw { code: "IAM_ERR_INVALID_ARGUMENT", message: "invalid role: must be owner, admin, or member" };
+        }
+        const existingUser = mockUsers.find(u => u.email.toLowerCase() === trimmedEmail.toLowerCase());
+        if (existingUser && mockUserTenants.some(ut => ut.tenant_id === mockSessions.active_tenant_id && ut.user_id === existingUser.id)) {
+          throw { code: "IAM_ERR_ALREADY_EXISTS", message: "member already exists in this tenant" };
+        }
+        let userId;
+        if (existingUser) {
+          userId = existingUser.id;
+        } else {
+          userId = `usr_${Date.now()}_${Math.floor(100 + Math.random() * 900)}`;
+          mockUsers.push({ id: userId, email: trimmedEmail, password: 'password123', name: trimmedName });
+          saveStorage('agent_erp_mock_users', mockUsers);
+        }
+        mockUserTenants.push({ user_id: userId, tenant_id: mockSessions.active_tenant_id, role: trimmedRole });
+        saveStorage('agent_erp_mock_user_tenants', mockUserTenants);
+        return {
+          id: userId,
+          user_id: userId,
+          email: trimmedEmail,
+          name: trimmedName,
+          role: trimmedRole
+        };
+      }
+      if (method === 'POST' && (path === '/v1/tenant-admin/members/assign-role' || path === '/v1/tenant-admin/employees/assign-role')) {
+        if (!mockSessions || !mockSessions.active_tenant_id) {
+          throw { code: "IAM_ERR_INVALID_CREDENTIALS", message: "auth: Session not found" };
+        }
+        const targetUserId = (body.user_id || body.member_id || '').trim();
+        const targetRole = (body.role || body.role_name || '').trim().toLowerCase();
+        if (!targetUserId || !targetRole) {
+          throw { code: "IAM_ERR_INVALID_ARGUMENT", message: "missing user_id or role" };
+        }
+        if (!['owner', 'admin', 'member'].includes(targetRole)) {
+          throw { code: "IAM_ERR_INVALID_ARGUMENT", message: "invalid role: must be owner, admin, or member" };
+        }
+        const utIndex = mockUserTenants.findIndex(ut => ut.tenant_id === mockSessions.active_tenant_id && ut.user_id === targetUserId);
+        if (utIndex === -1) {
+          throw { code: "IAM_ERR_INVALID_ARGUMENT", message: "member not found in this tenant" };
+        }
+        mockUserTenants[utIndex].role = targetRole;
+        saveStorage('agent_erp_mock_user_tenants', mockUserTenants);
+        return { user_id: targetUserId, role: targetRole, success: true };
       }
       if (method === 'POST' && path === '/v1/test/expire') {
         throw { code: "IAM_ERR_INVALID_CREDENTIALS", message: "invalid credentials" };

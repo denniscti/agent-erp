@@ -354,6 +354,12 @@ iframe {
   color: rgb(var(--accent-cyan));
 }
 
+.badge-slate {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
 .font-bold {
   font-weight: 600;
 }
