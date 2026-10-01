@@ -119,6 +119,10 @@ export const appState = $state({
   /** @type {any[]} */
   departments: [],
 
+  // Tenant members cache
+  /** @type {any[]} */
+  members: [],
+
   // Lightweight task confirmation state
   /** @type {import('./workflow/types.js').PendingConfirmation | null} */
   pendingTaskConfirmation: null
@@ -126,9 +130,11 @@ export const appState = $state({
 
 export function showToast(message) {
   appState.toastMessage = message;
-  setTimeout(() => {
-    appState.toastMessage = null;
-  }, 3500);
+  if (typeof window !== 'undefined') {
+    setTimeout(() => {
+      appState.toastMessage = null;
+    }, 3500);
+  }
 }
 
 export function navigate(path) {
@@ -171,6 +177,7 @@ export async function fetchInstalledModules() {
     
     // Automatically register components for Svelte mounting
     for (const mod of list) {
+      const { loadModule } = await import('./registry.js');
       await loadModule(mod.id);
     }
     
@@ -584,6 +591,7 @@ export async function logoutAction() {
   appState.authUser = null;
   appState.authTenants = [];
   appState.activeTenant = null;
+  appState.members = [];
   navigate('/login');
 }
 
@@ -782,6 +790,78 @@ export async function createDepartmentAction(name, parentId = null) {
     return dept;
   } catch (err) {
     console.error("Failed to create department:", err);
+    throw err;
+  }
+}
+
+/**
+ * Fetch tenant members from Mock / Backend
+ * @returns {Promise<any[]>}
+ */
+export async function fetchMembers() {
+  try {
+    const res = await apiCall('GET', '/v1/tenant-admin/members');
+    appState.members = res?.members || (Array.isArray(res) ? res : []);
+    return appState.members;
+  } catch (err) {
+    console.error("Failed to fetch members:", err);
+    return [];
+  }
+}
+
+/**
+ * Onboard a new member to the active tenant
+ * @param {{ name: string, email: string, role?: string }} payload
+ * @returns {Promise<any>}
+ */
+export async function onboardMemberAction({ name, email, role = 'member' }) {
+  try {
+    const trimmedName = (name || '').trim();
+    const trimmedEmail = (email || '').trim();
+    const trimmedRole = (role || 'member').trim().toLowerCase();
+
+    if (!trimmedName || !trimmedEmail) {
+      throw new Error('姓名與電子郵件為必填項目');
+    }
+
+    const res = await apiCall('POST', '/v1/tenant-admin/members/onboard', {
+      name: trimmedName,
+      email: trimmedEmail,
+      role: trimmedRole
+    });
+    await fetchMembers();
+    showToast(`已成功新增成員「${trimmedName}」`);
+    return res;
+  } catch (err) {
+    console.error("Failed to onboard member:", err);
+    throw err;
+  }
+}
+
+/**
+ * Assign / update member role
+ * @param {string} userId
+ * @param {string} role
+ * @returns {Promise<any>}
+ */
+export async function assignMemberRoleAction(userId, role) {
+  try {
+    const trimmedUserId = (userId || '').trim();
+    const trimmedRole = (role || '').trim().toLowerCase();
+
+    if (!trimmedUserId || !trimmedRole) {
+      throw new Error('使用者 ID 與角色為必填項目');
+    }
+
+    const res = await apiCall('POST', '/v1/tenant-admin/members/assign-role', {
+      user_id: trimmedUserId,
+      role: trimmedRole
+    });
+    await fetchMembers();
+    showToast(`成員角色已更新為 ${trimmedRole.toUpperCase()}`);
+    return res;
+  } catch (err) {
+    console.error("Failed to assign member role:", err);
     throw err;
   }
 }

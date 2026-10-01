@@ -908,6 +908,227 @@ async fn mock_dispatch<R: tauri::Runtime, S: TokenStore>(
             }))
         }
 
+        ("GET", "/v1/tenant-admin/members") | ("POST", "/v1/tenant-admin/members/list") => {
+            let pair = token_store.load()?.ok_or(ApiError::InvalidCredentials)?;
+            let token = pair.access_token;
+
+            let mut stmt = conn
+                .prepare("SELECT user_id, active_tenant_id FROM sessions WHERE token = ?1")
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let (_, active_tenant_id): (String, Option<String>) = stmt
+                .query_row([&token], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|_| ApiError::InvalidCredentials)?;
+
+            let active_tenant_id = active_tenant_id.ok_or(ApiError::InvalidCredentials)?;
+
+            let mut stmt_members = conn
+                .prepare(
+                    "SELECT ut.user_id, u.email, u.name, ut.role
+                     FROM user_tenants ut
+                     JOIN users u ON ut.user_id = u.id
+                     WHERE ut.tenant_id = ?1
+                     ORDER BY ut.rowid ASC",
+                )
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+
+            let member_rows = stmt_members
+                .query_map([&active_tenant_id], |row| {
+                    Ok(json!({
+                        "id": row.get::<_, String>(0)?,
+                        "user_id": row.get::<_, String>(0)?,
+                        "email": row.get::<_, String>(1)?,
+                        "name": row.get::<_, String>(2)?,
+                        "role": row.get::<_, String>(3)?,
+                    }))
+                })
+                .map_err(|e| ApiError::DatabaseError(format!("Query execute failed: {}", e)))?;
+
+            let mut members = Vec::new();
+            for m in member_rows.flatten() {
+                members.push(m);
+            }
+
+            Ok(json!({ "members": members }))
+        }
+
+        ("POST", "/v1/tenant-admin/members/onboard")
+        | ("POST", "/v1/tenant-admin/employees/onboard") => {
+            let pair = token_store.load()?.ok_or(ApiError::InvalidCredentials)?;
+            let token = pair.access_token;
+
+            let mut stmt = conn
+                .prepare("SELECT user_id, active_tenant_id FROM sessions WHERE token = ?1")
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let (_, active_tenant_id): (String, Option<String>) = stmt
+                .query_row([&token], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|_| ApiError::InvalidCredentials)?;
+
+            let active_tenant_id = active_tenant_id.ok_or(ApiError::InvalidCredentials)?;
+
+            let email = body
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    ApiError::InvalidArgument("Missing or empty email parameter".to_string())
+                })?;
+
+            let name = body
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    ApiError::InvalidArgument("Missing or empty name parameter".to_string())
+                })?;
+
+            let role_raw = body
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("member")
+                .trim()
+                .to_lowercase();
+
+            let role = match role_raw.as_str() {
+                "owner" | "admin" | "member" => role_raw,
+                _ => {
+                    return Err(ApiError::InvalidArgument(format!(
+                        "Invalid role: '{}'. Role must be owner, admin, or member",
+                        role_raw
+                    )))
+                }
+            };
+
+            // Check if user is already a member of this tenant
+            let mut stmt_check = conn
+                .prepare(
+                    "SELECT count(*) FROM user_tenants ut
+                     JOIN users u ON ut.user_id = u.id
+                     WHERE ut.tenant_id = ?1 AND LOWER(TRIM(u.email)) = LOWER(?2)",
+                )
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let count: i64 = stmt_check
+                .query_row((&active_tenant_id, &email), |row| row.get(0))
+                .unwrap_or(0);
+
+            if count > 0 {
+                return Err(ApiError::InvalidArgument(
+                    "Member already exists in this tenant".to_string(),
+                ));
+            }
+
+            // Find or create user
+            let mut stmt_user = conn
+                .prepare("SELECT id FROM users WHERE LOWER(TRIM(email)) = LOWER(?1)")
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let existing_user_id: Option<String> =
+                stmt_user.query_row([&email], |row| row.get(0)).ok();
+
+            let user_id = match existing_user_id {
+                Some(uid) => uid,
+                None => {
+                    let uid = format!("usr_{}", uuid_like_id());
+                    let default_pwd_hash = hash_password("password123");
+                    conn.execute(
+                        "INSERT INTO users (id, email, password, name) VALUES (?1, ?2, ?3, ?4)",
+                        (&uid, &email, &default_pwd_hash, &name),
+                    )
+                    .map_err(|e| {
+                        ApiError::DatabaseError(format!("Failed to create user: {}", e))
+                    })?;
+                    uid
+                }
+            };
+
+            // Insert user_tenant relationship
+            conn.execute(
+                "INSERT INTO user_tenants (user_id, tenant_id, role) VALUES (?1, ?2, ?3)",
+                (&user_id, &active_tenant_id, &role),
+            )
+            .map_err(|e| {
+                ApiError::DatabaseError(format!("Failed to add member to tenant: {}", e))
+            })?;
+
+            Ok(json!({
+                "id": user_id,
+                "user_id": user_id,
+                "email": email,
+                "name": name,
+                "role": role,
+            }))
+        }
+
+        ("POST", "/v1/tenant-admin/members/assign-role")
+        | ("POST", "/v1/tenant-admin/employees/assign-role") => {
+            let pair = token_store.load()?.ok_or(ApiError::InvalidCredentials)?;
+            let token = pair.access_token;
+
+            let mut stmt = conn
+                .prepare("SELECT user_id, active_tenant_id FROM sessions WHERE token = ?1")
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let (_, active_tenant_id): (String, Option<String>) = stmt
+                .query_row([&token], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|_| ApiError::InvalidCredentials)?;
+
+            let active_tenant_id = active_tenant_id.ok_or(ApiError::InvalidCredentials)?;
+
+            let target_user_id = body
+                .get("user_id")
+                .or_else(|| body.get("member_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    ApiError::InvalidArgument("Missing user_id parameter".to_string())
+                })?;
+
+            let role_raw = body
+                .get("role")
+                .or_else(|| body.get("role_name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| ApiError::InvalidArgument("Missing role parameter".to_string()))?;
+
+            let role = match role_raw.as_str() {
+                "owner" | "admin" | "member" => role_raw,
+                _ => {
+                    return Err(ApiError::InvalidArgument(format!(
+                        "Invalid role: '{}'. Role must be owner, admin, or member",
+                        role_raw
+                    )))
+                }
+            };
+
+            // Check if member exists in tenant
+            let mut stmt_check = conn
+                .prepare("SELECT count(*) FROM user_tenants WHERE user_id = ?1 AND tenant_id = ?2")
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let count: i64 = stmt_check
+                .query_row((target_user_id, &active_tenant_id), |row| row.get(0))
+                .unwrap_or(0);
+
+            if count == 0 {
+                return Err(ApiError::InvalidArgument(
+                    "Member not found in this tenant".to_string(),
+                ));
+            }
+
+            // Update role
+            conn.execute(
+                "UPDATE user_tenants SET role = ?1 WHERE user_id = ?2 AND tenant_id = ?3",
+                (&role, target_user_id, &active_tenant_id),
+            )
+            .map_err(|e| ApiError::DatabaseError(format!("Failed to update member role: {}", e)))?;
+
+            Ok(json!({
+                "user_id": target_user_id,
+                "role": role,
+                "success": true
+            }))
+        }
+
         ("POST", "/v1/auth/logout") => {
             if let Ok(Some(pair)) = token_store.load() {
                 let _ = conn.execute(
@@ -2565,6 +2786,254 @@ mod tests {
         // Then: returns unauthenticated
         assert!(res.is_ok());
         assert_eq!(res.unwrap().status, "unauthenticated");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_member_management_normal_flow_and_role_assignment() {
+        // Given: authenticated session with active tenant created via register-tenant
+        let handle = setup_test_db();
+        let token_store = InMemoryTokenStore::new();
+
+        let reg_res = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/auth/register-tenant",
+            &json!({
+                "admin_name": "Admin User",
+                "tenant_name": "Test Tenant",
+                "company_name": "Test Company",
+                "admin_email": "admin@example.com",
+                "admin_password": "password123",
+                "tenant_code": "test_tnt"
+            }),
+        )
+        .await
+        .expect("register tenant should succeed");
+        assert!(reg_res.get("user").is_some());
+
+        // When: listing members for active tenant
+        let list_res = execute_api_call(
+            &handle,
+            &token_store,
+            "GET",
+            "/v1/tenant-admin/members",
+            &json!({}),
+        )
+        .await
+        .expect("list members should succeed");
+
+        // Then: initial admin user is listed
+        let members = list_res.get("members").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(
+            members[0].get("email").and_then(|v| v.as_str()),
+            Some("admin@example.com")
+        );
+        assert_eq!(
+            members[0].get("role").and_then(|v| v.as_str()),
+            Some("admin")
+        );
+
+        // When: onboarding new member (Alice)
+        let onboard_res = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/onboard",
+            &json!({
+                "name": "  王小明 (Alice)  ",
+                "email": "  alice@example.com  ",
+                "role": "member"
+            }),
+        )
+        .await
+        .expect("onboard Alice should succeed");
+
+        // Then: Alice is created and returned with trimmed values
+        let alice_user_id = onboard_res.get("user_id").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            onboard_res.get("email").and_then(|v| v.as_str()),
+            Some("alice@example.com")
+        );
+        assert_eq!(
+            onboard_res.get("name").and_then(|v| v.as_str()),
+            Some("王小明 (Alice)")
+        );
+        assert_eq!(
+            onboard_res.get("role").and_then(|v| v.as_str()),
+            Some("member")
+        );
+
+        // When: updating Alice's role to owner
+        let assign_res = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/assign-role",
+            &json!({
+                "user_id": alice_user_id,
+                "role": "owner"
+            }),
+        )
+        .await
+        .expect("assign role should succeed");
+
+        // Then: role is updated to owner
+        assert_eq!(
+            assign_res.get("role").and_then(|v| v.as_str()),
+            Some("owner")
+        );
+        assert_eq!(
+            assign_res.get("success").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        // When: listing members again
+        let list_after = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/list",
+            &json!({}),
+        )
+        .await
+        .expect("list members post-update should succeed");
+
+        // Then: members count is 2 and Alice has role owner
+        let members_after = list_after
+            .get("members")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(members_after.len(), 2);
+        let alice_entry = members_after
+            .iter()
+            .find(|m| m.get("email").and_then(|v| v.as_str()) == Some("alice@example.com"))
+            .unwrap();
+        assert_eq!(
+            alice_entry.get("role").and_then(|v| v.as_str()),
+            Some("owner")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_member_management_boundary_validation_and_errors() {
+        // Given: authenticated session with active tenant created via register-tenant
+        let handle = setup_test_db();
+        let token_store = InMemoryTokenStore::new();
+
+        execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/auth/register-tenant",
+            &json!({
+                "admin_name": "Admin User",
+                "tenant_name": "Test Tenant",
+                "company_name": "Test Company",
+                "admin_email": "admin@example.com",
+                "admin_password": "password123",
+                "tenant_code": "test_tnt"
+            }),
+        )
+        .await
+        .expect("register tenant should succeed");
+
+        // When: onboarding with empty email (Boundary: empty string)
+        let res_empty_email = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/onboard",
+            &json!({ "name": "測試人員", "email": "   ", "role": "member" }),
+        )
+        .await;
+
+        // Then: returns InvalidArgument error
+        assert!(matches!(
+            res_empty_email.unwrap_err(),
+            ApiError::InvalidArgument(_)
+        ));
+
+        // When: onboarding with empty name (Boundary: empty string)
+        let res_empty_name = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/onboard",
+            &json!({ "name": "   ", "email": "test@example.com", "role": "member" }),
+        )
+        .await;
+
+        // Then: returns InvalidArgument error
+        assert!(matches!(
+            res_empty_name.unwrap_err(),
+            ApiError::InvalidArgument(_)
+        ));
+
+        // When: onboarding with invalid role (Error case)
+        let res_invalid_role = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/onboard",
+            &json!({ "name": "測試人員", "email": "test@example.com", "role": "superadmin" }),
+        )
+        .await;
+
+        // Then: returns InvalidArgument error
+        assert!(matches!(
+            res_invalid_role.unwrap_err(),
+            ApiError::InvalidArgument(_)
+        ));
+
+        // When: onboarding duplicate member (admin@example.com is already in tenant)
+        let res_duplicate = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/onboard",
+            &json!({ "name": "Admin Clone", "email": "admin@example.com", "role": "admin" }),
+        )
+        .await;
+
+        // Then: returns InvalidArgument duplicate error
+        assert!(matches!(
+            res_duplicate.unwrap_err(),
+            ApiError::InvalidArgument(_)
+        ));
+
+        // When: assigning role to non-existent user_id
+        let res_nonexistent_user = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/assign-role",
+            &json!({ "user_id": "usr_non_existent", "role": "admin" }),
+        )
+        .await;
+
+        // Then: returns InvalidArgument member not found error
+        assert!(matches!(
+            res_nonexistent_user.unwrap_err(),
+            ApiError::InvalidArgument(_)
+        ));
+
+        // When: assigning invalid role
+        let res_assign_invalid_role = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/assign-role",
+            &json!({ "user_id": "usr_mock_admin", "role": "guest" }),
+        )
+        .await;
+
+        // Then: returns InvalidArgument error
+        assert!(matches!(
+            res_assign_invalid_role.unwrap_err(),
+            ApiError::InvalidArgument(_)
+        ));
     }
 
     #[test]
