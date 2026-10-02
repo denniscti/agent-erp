@@ -66,7 +66,7 @@
             <span class="tenant-code">代碼: {tenant.code}</span>
           </div>
           <div class="tenant-role-badge">
-            {tenant.role === 'admin' ? '管理者' : '成員'}
+            {tenant.role === 'owner' ? '擁有者' : tenant.role === 'admin' ? '管理者' : '成員'}
           </div>
         </button>
       {/each}

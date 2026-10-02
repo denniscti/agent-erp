@@ -867,6 +867,16 @@ export async function assignMemberRoleAction(userId, role) {
 }
 
 /**
+ * Check if the active tenant role has member management permissions (admin or owner)
+ * @param {AuthTenant | null} [tenant]
+ * @returns {boolean}
+ */
+export function canManageMembers(tenant = appState.activeTenant) {
+  const role = (tenant?.role || '').trim().toLowerCase();
+  return role === 'admin' || role === 'owner';
+}
+
+/**
  * Set pending task confirmation
  * @param {import('./workflow/types.js').PendingConfirmation | any} confirmation
  */

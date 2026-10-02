@@ -31,6 +31,9 @@ const serveMockCdn = () => ({
 export default defineConfig({
   plugins: [svelte(), serveMockCdn()],
   clearScreen: false,
+  css: {
+    postcss: {}
+  },
   server: {
     port: 5173,
     strictPort: true,

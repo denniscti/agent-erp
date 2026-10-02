@@ -21,7 +21,8 @@
     switchActiveTask,
     fetchMembers,
     onboardMemberAction,
-    assignMemberRoleAction
+    assignMemberRoleAction,
+    canManageMembers
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -84,7 +85,9 @@
     await fetchInstalledModules();
     await fetchModulesGallery();
     await fetchTasks();
-    await fetchMembers();
+    if (canManageMembers(appState.activeTenant)) {
+      await fetchMembers();
+    }
     await initMainChatGreeting();
     isInitialized = true;
   }
@@ -489,7 +492,8 @@
                   </div>
                 </div>
 
-                <!-- Member & Role Management -->
+                <!-- Member & Role Management (Admin/Owner only) -->
+                {#if canManageMembers(appState.activeTenant)}
                 <div class="settings-group glass-panel">
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                     <h3>成員與角色管理 (Member & Role Management)</h3>
@@ -588,6 +592,7 @@
                     {/if}
                   </div>
                 </div>
+                {/if}
               </div>
             </div>
           {:else if activeTab === 'sales' && !appState.activeTaskId}

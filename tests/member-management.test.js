@@ -11,6 +11,7 @@ const {
   fetchMembers,
   onboardMemberAction,
   assignMemberRoleAction,
+  canManageMembers,
   apiCall
 } = await import('../src/lib/store.svelte.js');
 
@@ -237,3 +238,133 @@ test('TC-MBR-E-03: Error - Assign role to non-existent user is rejected', async 
     (err) => err?.code === 'IAM_ERR_INVALID_ARGUMENT' || String(err?.message).includes('not found')
   );
 });
+
+// ==========================================
+// Issue 105: Role-based dynamic permissions
+// ==========================================
+
+test('TC-ROLE-N-01: Owner role has member management permission', () => {
+  // Given: Preconditions - Tenant with role 'owner'
+  const ownerTenant = { id: 'tnt_1', code: 'TNT1', name: 'Test Tenant', role: 'owner' };
+  appState.activeTenant = ownerTenant;
+
+  // When: Operation to execute - Check member management permission
+  const allowedDirect = canManageMembers(ownerTenant);
+  const allowedDefault = canManageMembers();
+
+  // Then: Expected result - Both return true for owner
+  assert.equal(allowedDirect, true, 'canManageMembers with owner tenant should be true');
+  assert.equal(allowedDefault, true, 'canManageMembers with default activeTenant owner should be true');
+});
+
+test('TC-ROLE-N-02: Admin role has member management permission', () => {
+  // Given: Preconditions - Tenant with role 'admin'
+  const adminTenant = { id: 'tnt_2', code: 'TNT2', name: 'Test Tenant', role: 'admin' };
+  appState.activeTenant = adminTenant;
+
+  // When: Operation to execute - Check member management permission
+  const allowed = canManageMembers();
+
+  // Then: Expected result - Returns true for admin
+  assert.equal(allowed, true, 'canManageMembers with admin role should be true');
+});
+
+test('TC-ROLE-N-03: Member role is forbidden from member management', () => {
+  // Given: Preconditions - Tenant with role 'member'
+  const memberTenant = { id: 'tnt_3', code: 'TNT3', name: 'Test Tenant', role: 'member' };
+  appState.activeTenant = memberTenant;
+
+  // When: Operation to execute - Check member management permission
+  const allowed = canManageMembers();
+
+  // Then: Expected result - Returns false for member role (card will not be rendered)
+  assert.equal(allowed, false, 'canManageMembers with member role should be false');
+});
+
+test('TC-ROLE-N-04: Role badge formatting for owner, admin, and member', () => {
+  // Given: Preconditions - Different role names
+  const getBadgeLabel = (role) => (role === 'owner' ? '擁有者' : role === 'admin' ? '管理者' : '成員');
+
+  // When & Then: Verify expected badge mappings
+  assert.equal(getBadgeLabel('owner'), '擁有者');
+  assert.equal(getBadgeLabel('admin'), '管理者');
+  assert.equal(getBadgeLabel('member'), '成員');
+  assert.equal(getBadgeLabel('other'), '成員');
+});
+
+test('TC-ROLE-B-01: Boundary - NULL activeTenant safely returns false', () => {
+  // Given: Preconditions - NULL activeTenant
+  appState.activeTenant = null;
+
+  // When: Operation to execute - Check permission
+  const allowedDirect = canManageMembers(null);
+  const allowedDefault = canManageMembers();
+
+  // Then: Expected result - Safely returns false without throwing TypeError
+  assert.equal(allowedDirect, false);
+  assert.equal(allowedDefault, false);
+});
+
+test('TC-ROLE-B-02: Boundary - Empty string role returns false', () => {
+  // Given: Preconditions - Tenant with empty string role
+  const emptyRoleTenant = { id: 'tnt_empty', code: 'TNT_EMPTY', name: 'Empty Role', role: '' };
+
+  // When: Operation to execute - Check permission
+  const allowed = canManageMembers(emptyRoleTenant);
+
+  // Then: Expected result - Returns false
+  assert.equal(allowed, false);
+});
+
+test('TC-ROLE-B-03: Boundary - Case insensitivity and whitespace tolerance', () => {
+  // Given: Preconditions - Roles with uppercase and extra whitespace
+  const upperAdmin = { id: 'tnt_up1', code: 'T1', name: 'T1', role: '  ADMIN  ' };
+  const upperOwner = { id: 'tnt_up2', code: 'T2', name: 'T2', role: ' Owner ' };
+  const upperMember = { id: 'tnt_up3', code: 'T3', name: 'T3', role: ' MEMBER ' };
+
+  // When: Operation to execute - Check permissions
+  const isAdmin = canManageMembers(upperAdmin);
+  const isOwner = canManageMembers(upperOwner);
+  const isMember = canManageMembers(upperMember);
+
+  // Then: Expected result - Properly trimmed and lowercased
+  assert.equal(isAdmin, true);
+  assert.equal(isOwner, true);
+  assert.equal(isMember, false);
+});
+
+test('TC-ROLE-B-04: Boundary - Undefined role attribute safely returns false', () => {
+  // Given: Preconditions - Tenant object without role property
+  /** @type {any} */
+  const undefinedRoleTenant = { id: 'tnt_undef', code: 'T_UNDEF', name: 'Undef' };
+
+  // When: Operation to execute - Check permission
+  const allowed = canManageMembers(undefinedRoleTenant);
+
+  // Then: Expected result - Safely returns false
+  assert.equal(allowed, false);
+});
+
+test('TC-ROLE-E-01: Error/Unknown - Unauthorized roles (operator, guest, etc.) return false', () => {
+  // Given: Preconditions - Non-standard or unauthorized roles
+  const operatorTenant = { id: 'tnt_op', code: 'TOP', name: 'Op Tenant', role: 'operator' };
+  const guestTenant = { id: 'tnt_guest', code: 'TGUEST', name: 'Guest Tenant', role: 'guest' };
+
+  // When: Operation to execute - Check permissions
+  // Then: Expected result - Rejected
+  assert.equal(canManageMembers(operatorTenant), false);
+  assert.equal(canManageMembers(guestTenant), false);
+});
+
+test('TC-ROLE-E-02: Flow Guard - Member role should be prevented from member management actions', async () => {
+  // Given: Preconditions - Tenant state configured as member
+  const memberTenant = { id: 'tnt_mbr', code: 'TMBR', name: 'Mbr Tenant', role: 'member' };
+  appState.activeTenant = memberTenant;
+
+  // When: Guard logic evaluation
+  const shouldFetch = canManageMembers(appState.activeTenant);
+
+  // Then: Member is not allowed to trigger member management fetch
+  assert.equal(shouldFetch, false);
+});
+
