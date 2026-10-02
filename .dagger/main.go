@@ -39,6 +39,8 @@ func (m *AgentErp) getNodeContainer(src *dagger.Directory) *dagger.Container {
 // - cargo clippy -- -D warnings
 // - cargo test
 // - npm run build
+// - npm run check
+// - npm test
 // - gitleaks secret scan (full git history)
 func (m *AgentErp) RunAllChecks(ctx context.Context, src *dagger.Directory) error {
 	g, ctx := errgroup.WithContext(ctx)
@@ -59,14 +61,16 @@ func (m *AgentErp) RunAllChecks(ctx context.Context, src *dagger.Directory) erro
 		return nil
 	})
 
-	// 2. Frontend checks (npm ci, npm run build in node container)
+	// 2. Frontend checks (npm ci, npm run build, npm run check, npm test in node container)
 	safeGo(g, func() error {
 		_, err := nodeBase.
 			WithExec([]string{"npm", "ci"}).
 			WithExec([]string{"npm", "run", "build"}).
+			WithExec([]string{"npm", "run", "check"}).
+			WithExec([]string{"npm", "test"}).
 			Sync(ctx)
 		if err != nil {
-			return fmt.Errorf("npm_build: build failed: %w", err)
+			return fmt.Errorf("frontend_checks: build, check or test failed: %w", err)
 		}
 		return nil
 	})
