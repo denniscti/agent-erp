@@ -22,6 +22,9 @@
     fetchMembers,
     onboardMemberAction,
     assignMemberRoleAction,
+    assignMemberDepartmentsAction,
+    getEffectiveSkills,
+    computeSkillDiff,
     canManageMembers,
     fetchDepartments,
     createDepartmentAction
@@ -45,6 +48,8 @@
   let newMemberName = $state('');
   let newMemberEmail = $state('');
   let newMemberRole = $state('member');
+  let newMemberDepartmentIds = $state([]);
+  let newMemberEffectiveSkills = $derived(getEffectiveSkills(newMemberDepartmentIds, appState.departments));
   let isAddingMember = $state(false);
   let memberError = $state('');
 
@@ -52,6 +57,64 @@
   let newDepartmentParentId = $state('');
   let isAddingDepartment = $state(false);
   let departmentError = $state('');
+
+  // Existing member department editing state
+  let editingMemberId = $state(null);
+  let editingDepartmentIds = $state([]);
+  let isSavingMemberDepartments = $state(false);
+  let editingMemberDeptError = $state('');
+
+  function toggleNewMemberDepartment(deptId) {
+    if (newMemberDepartmentIds.includes(deptId)) {
+      newMemberDepartmentIds = newMemberDepartmentIds.filter(id => id !== deptId);
+    } else {
+      newMemberDepartmentIds = [...newMemberDepartmentIds, deptId];
+    }
+  }
+
+  function startEditingMemberDepartments(member) {
+    editingMemberId = member.user_id || member.id;
+    editingDepartmentIds = [...(member.department_ids || [])];
+    editingMemberDeptError = '';
+  }
+
+  function cancelEditingMemberDepartments() {
+    editingMemberId = null;
+    editingDepartmentIds = [];
+    editingMemberDeptError = '';
+  }
+
+  function toggleEditingDepartment(deptId) {
+    if (editingDepartmentIds.includes(deptId)) {
+      editingDepartmentIds = editingDepartmentIds.filter(id => id !== deptId);
+    } else {
+      editingDepartmentIds = [...editingDepartmentIds, deptId];
+    }
+  }
+
+  async function handleSaveMemberDepartments(userId) {
+    isSavingMemberDepartments = true;
+    editingMemberDeptError = '';
+    try {
+      await assignMemberDepartmentsAction(userId, editingDepartmentIds);
+      editingMemberId = null;
+      editingDepartmentIds = [];
+    } catch (err) {
+      editingMemberDeptError = err?.message || '更新成員部門失敗';
+    } finally {
+      isSavingMemberDepartments = false;
+    }
+  }
+
+  function getDepartmentNames(deptIds) {
+    if (!deptIds || deptIds.length === 0) return [];
+    return deptIds
+      .map(id => {
+        const d = appState.departments.find(dep => dep.id === id);
+        return d ? d.name : id;
+      })
+      .filter(Boolean);
+  }
 
   async function handleOnboardMember(e) {
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
@@ -65,11 +128,13 @@
       await onboardMemberAction({
         name: newMemberName.trim(),
         email: newMemberEmail.trim(),
-        role: newMemberRole
+        role: newMemberRole,
+        department_ids: newMemberDepartmentIds
       });
       newMemberName = '';
       newMemberEmail = '';
       newMemberRole = 'member';
+      newMemberDepartmentIds = [];
     } catch (err) {
       memberError = err?.message || '新增成員失敗';
     } finally {
@@ -520,7 +585,7 @@
                       模擬 Token 過期
                     </button>
                     <button 
-                      class="btn"
+                      class="btn" 
                       onclick={triggerWebhookSimulation}
                     >
                       模擬 PO Webhook 送入
@@ -537,52 +602,96 @@
                       重新整理成員
                     </button>
                   </div>
-                  <p class="settings-desc">管理當前租戶下的組織成員與權限角色（Owner / Admin / Member）。點擊即可即時指派或收回角色。</p>
+                  <p class="settings-desc">管理當前租戶下的組織成員、權限角色與所屬部門（支援一人掛多部門與有效 Skill 聯集提權檢視）。</p>
 
                   <!-- Add Member Form -->
-                  <form onsubmit={handleOnboardMember} class="member-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
-                    <div style="flex: 1; min-width: 140px;">
-                      <label for="member-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">成員姓名</label>
-                      <input 
-                        id="member-name-input"
-                        type="text" 
-                        class="form-input" 
-                        placeholder="例：王小明" 
-                        bind:value={newMemberName}
-                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
-                      />
-                    </div>
-                    <div style="flex: 1.5; min-width: 180px;">
-                      <label for="member-email-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">電子郵件</label>
-                      <input 
-                        id="member-email-input"
-                        type="email" 
-                        class="form-input" 
-                        placeholder="例：user@company.com" 
-                        bind:value={newMemberEmail}
-                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
-                      />
-                    </div>
-                    <div style="width: 150px;">
-                      <label for="member-role-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">指派角色</label>
-                      <select 
-                        id="member-role-select"
-                        bind:value={newMemberRole}
-                        style="width: 100%; padding: 7px 8px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                  <form onsubmit={handleOnboardMember} class="member-add-form" style="display: flex; flex-direction: column; gap: 12px; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
+                    <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
+                      <div style="flex: 1; min-width: 140px;">
+                        <label for="member-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">成員姓名</label>
+                        <input 
+                          id="member-name-input"
+                          type="text" 
+                          class="form-input" 
+                          placeholder="例：王小明" 
+                          bind:value={newMemberName}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                        />
+                      </div>
+                      <div style="flex: 1.5; min-width: 180px;">
+                        <label for="member-email-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">電子郵件</label>
+                        <input 
+                          id="member-email-input"
+                          type="email" 
+                          class="form-input" 
+                          placeholder="例：user@company.com" 
+                          bind:value={newMemberEmail}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                        />
+                      </div>
+                      <div style="width: 150px;">
+                        <label for="member-role-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">指派角色</label>
+                        <select 
+                          id="member-role-select"
+                          bind:value={newMemberRole}
+                          style="width: 100%; padding: 7px 8px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                        >
+                          <option value="member">Member (一般成員)</option>
+                          <option value="admin">Admin (管理員)</option>
+                          <option value="owner">Owner (擁有者)</option>
+                        </select>
+                      </div>
+                      <button 
+                        type="submit" 
+                        class="btn btn-primary btn-sm" 
+                        disabled={isAddingMember}
+                        style="height: 35px; white-space: nowrap; padding: 0 16px;"
                       >
-                        <option value="member">Member (一般成員)</option>
-                        <option value="admin">Admin (管理員)</option>
-                        <option value="owner">Owner (擁有者)</option>
-                      </select>
+                        {#if isAddingMember}新增中...{:else}+ 新增成員{/if}
+                      </button>
                     </div>
-                    <button 
-                      type="submit" 
-                      class="btn btn-primary btn-sm" 
-                      disabled={isAddingMember}
-                      style="height: 35px; white-space: nowrap; padding: 0 16px;"
-                    >
-                      {#if isAddingMember}新增中...{:else}+ 新增成員{/if}
-                    </button>
+
+                    <!-- Department Multi-selection for new member -->
+                    <div style="padding: 10px; background: rgba(0, 0, 0, 0.2); border-radius: 6px; border: 1px dashed var(--border-color);">
+                      <div style="font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between;">
+                        <span>指派所屬部門（可複選，非必填）：</span>
+                        {#if appState.departments.length === 0}
+                          <span style="font-size: 0.72rem; color: var(--text-muted);">尚未建立任何部門（可於下方部門管理設定）</span>
+                        {/if}
+                      </div>
+
+                      {#if appState.departments.length > 0}
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;">
+                          {#each appState.departments as dept (dept.id)}
+                            {@const isSelected = newMemberDepartmentIds.includes(dept.id)}
+                            <button 
+                              type="button"
+                              class="badge-chip"
+                              onclick={() => toggleNewMemberDepartment(dept.id)}
+                              style="cursor: pointer; padding: 4px 10px; border-radius: 14px; font-size: 0.78rem; border: 1px solid {isSelected ? 'rgba(var(--accent-cyan), 0.6)' : 'var(--border-color)'}; background: {isSelected ? 'rgba(var(--accent-cyan), 0.15)' : 'rgba(255, 255, 255, 0.03)'}; color: {isSelected ? 'rgb(var(--accent-cyan))' : 'var(--text-secondary)'}; display: flex; align-items: center; gap: 5px; transition: all 0.15s ease;"
+                            >
+                              <span>{isSelected ? '✓ ' : '+ '}{dept.name}</span>
+                            </button>
+                          {/each}
+                        </div>
+                      {/if}
+
+                      <!-- Security / Effective Skill Union Preview -->
+                      <div style="font-size: 0.75rem; background: rgba(255, 255, 255, 0.02); padding: 8px 10px; border-radius: 4px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;">
+                        <span style="color: var(--text-muted); font-weight: 500;">🛡️ 預期取得之有效 Skills（部門權限聯集）：</span>
+                        {#if newMemberEffectiveSkills.length > 0}
+                          <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                            {#each newMemberEffectiveSkills as skill}
+                              <span class="badge badge-cyan" style="font-size: 0.7rem; padding: 2px 6px;">{skill}</span>
+                            {/each}
+                          </div>
+                        {:else if newMemberDepartmentIds.length > 0}
+                          <span style="color: var(--text-muted); font-style: italic;">（所選部門尚未設定 Skill，無法評估權限影響）</span>
+                        {:else}
+                          <span style="color: var(--text-muted); font-style: italic;">（未選擇部門）</span>
+                        {/if}
+                      </div>
+                    </div>
                   </form>
                   
                   {#if memberError}
@@ -590,39 +699,174 @@
                   {/if}
 
                   <!-- Member List -->
-                  <div class="member-list" style="display: flex; flex-direction: column; gap: 8px;">
+                  <div class="member-list" style="display: flex; flex-direction: column; gap: 10px;">
                     {#if appState.members.length === 0}
                       <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無成員資料，請新增成員。</div>
                     {:else}
                       {#each appState.members as member (member.user_id || member.id)}
-                        <div class="member-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
-                          <div style="display: flex; align-items: center; gap: 12px;">
-                            <div style="width: 36px; height: 36px; border-radius: 50%; background: rgba(var(--accent-cyan), 0.1); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.9rem;">
-                              {(member.name || member.email || 'M').charAt(0).toUpperCase()}
-                            </div>
-                            <div>
-                              <div style="display: flex; align-items: center; gap: 8px;">
-                                <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{member.name || member.email}</span>
-                                <span class="badge {member.role === 'owner' ? 'badge-amber' : member.role === 'admin' ? 'badge-cyan' : 'badge-slate'}" style="font-size: 0.72rem; text-transform: uppercase;">
-                                  {member.role}
-                                </span>
+                        {@const isEditing = editingMemberId === (member.user_id || member.id)}
+                        {@const memberDeptNames = getDepartmentNames(member.department_ids)}
+                        {@const memberSkills = getEffectiveSkills(member.department_ids || [], appState.departments)}
+
+                        <div class="member-item" style="display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                            <div style="display: flex; align-items: center; gap: 12px;">
+                              <div style="width: 38px; height: 38px; border-radius: 50%; background: rgba(var(--accent-cyan), 0.1); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.9rem;">
+                                {(member.name || member.email || 'M').charAt(0).toUpperCase()}
                               </div>
-                              <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 2px;">{member.email}</div>
+                              <div>
+                                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                  <span style="font-weight: 600; color: var(--text-primary); font-size: 0.95rem;">{member.name || member.email}</span>
+                                  <span class="badge {member.role === 'owner' ? 'badge-amber' : member.role === 'admin' ? 'badge-cyan' : 'badge-slate'}" style="font-size: 0.72rem; text-transform: uppercase;">
+                                    {member.role}
+                                  </span>
+                                </div>
+                                <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 2px;">{member.email}</div>
+                              </div>
+                            </div>
+                            
+                            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                              <button 
+                                type="button" 
+                                class="btn btn-sm" 
+                                onclick={() => isEditing ? cancelEditingMemberDepartments() : startEditingMemberDepartments(member)}
+                                style="font-size: 0.78rem; padding: 4px 10px;"
+                              >
+                                {isEditing ? '收合部門編輯' : '編輯所屬部門'}
+                              </button>
+
+                              <div style="display: flex; align-items: center; gap: 6px;">
+                                <span style="font-size: 0.8rem; color: var(--text-muted);">角色：</span>
+                                <select 
+                                  value={member.role} 
+                                  onchange={(e) => handleRoleChange(member.user_id || member.id, e.target.value)}
+                                  style="padding: 4px 8px; font-size: 0.82rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                >
+                                  <option value="owner">Owner (擁有者)</option>
+                                  <option value="admin">Admin (管理員)</option>
+                                  <option value="member">Member (一般成員)</option>
+                                </select>
+                              </div>
                             </div>
                           </div>
-                          
-                          <div style="display: flex; align-items: center; gap: 10px;">
-                            <span style="font-size: 0.8rem; color: var(--text-muted);">切換角色：</span>
-                            <select 
-                              value={member.role} 
-                              onchange={(e) => handleRoleChange(member.user_id || member.id, e.target.value)}
-                              style="padding: 5px 8px; font-size: 0.82rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
-                            >
-                              <option value="owner">Owner (擁有者)</option>
-                              <option value="admin">Admin (管理員)</option>
-                              <option value="member">Member (一般成員)</option>
-                            </select>
+
+                          <!-- Member Department and Skills display (when not editing) -->
+                          <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, 0.05); font-size: 0.8rem;">
+                            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                              <span style="color: var(--text-muted);">所屬部門：</span>
+                              {#if memberDeptNames.length > 0}
+                                {#each memberDeptNames as deptName}
+                                  <span class="badge badge-slate" style="font-size: 0.72rem; padding: 2px 8px; background: rgba(255, 255, 255, 0.06); border: 1px solid var(--border-color);">{deptName}</span>
+                                {/each}
+                              {:else}
+                                <span style="color: var(--text-muted); font-size: 0.75rem; font-style: italic;">（未指派部門）</span>
+                              {/if}
+                            </div>
+
+                            <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                              <span style="color: var(--text-muted);">有效 Skills 聯集：</span>
+                              {#if memberSkills.length > 0}
+                                {#each memberSkills as sk}
+                                  <span class="badge badge-cyan" style="font-size: 0.7rem; padding: 1px 6px;">{sk}</span>
+                                {/each}
+                              {:else if (member.department_ids && member.department_ids.length > 0)}
+                                <span style="color: var(--text-muted); font-size: 0.75rem; font-style: italic;">（部門尚未設定 Skill，無法評估權限）</span>
+                              {:else}
+                                <span style="color: var(--text-muted); font-size: 0.75rem; font-style: italic;">（未指派部門）</span>
+                              {/if}
+                            </div>
                           </div>
+
+                          <!-- Inline Department Editor -->
+                          {#if isEditing}
+                            {@const skillDiff = computeSkillDiff(member.department_ids || [], editingDepartmentIds, appState.departments)}
+                            <div style="margin-top: 6px; padding: 12px; background: rgba(0, 0, 0, 0.3); border-radius: 6px; border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; flex-direction: column; gap: 10px;">
+                              <div style="font-size: 0.82rem; font-weight: 600; color: var(--text-primary); display: flex; justify-content: space-between; align-items: center;">
+                                <span>編輯「{member.name || member.email}」所屬部門：</span>
+                                <span style="font-size: 0.72rem; color: var(--text-muted);">點擊勾選或取消部門以調整權限</span>
+                              </div>
+
+                              {#if appState.departments.length > 0}
+                                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                  {#each appState.departments as dept (dept.id)}
+                                    {@const isSelected = editingDepartmentIds.includes(dept.id)}
+                                    <button 
+                                      type="button"
+                                      class="badge-chip"
+                                      onclick={() => toggleEditingDepartment(dept.id)}
+                                      style="cursor: pointer; padding: 5px 12px; border-radius: 14px; font-size: 0.8rem; border: 1px solid {isSelected ? 'rgba(var(--accent-cyan), 0.8)' : 'var(--border-color)'}; background: {isSelected ? 'rgba(var(--accent-cyan), 0.2)' : 'rgba(255, 255, 255, 0.03)'}; color: {isSelected ? 'rgb(var(--accent-cyan))' : 'var(--text-secondary)'}; display: flex; align-items: center; gap: 6px; transition: all 0.15s ease;"
+                                    >
+                                      <span>{isSelected ? '✓ ' : '+ '}{dept.name}</span>
+                                    </button>
+                                  {/each}
+                                </div>
+                              {:else}
+                                <div style="font-size: 0.78rem; color: var(--text-muted);">組織目前尚無任何部門資料。</div>
+                              {/if}
+
+                              <!-- Security & Privilege Impact Diff Box -->
+                              <div style="font-size: 0.78rem; background: rgba(255, 255, 255, 0.03); padding: 10px; border-radius: 6px; border: 1px dashed var(--border-color); display: flex; flex-direction: column; gap: 6px;">
+                                <div style="font-weight: 600; color: var(--text-secondary); display: flex; align-items: center; gap: 6px;">
+                                  <span>🛡️ 資安與權限影響預覽 (Security Privilege Impact)：</span>
+                                </div>
+
+                                <div style="display: flex; flex-direction: column; gap: 4px;">
+                                  {#if skillDiff.addedSkills.length > 0}
+                                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                                      <span style="color: #10b981; font-weight: 600;">➕ 額外取得 Skill（提權）：</span>
+                                      {#each skillDiff.addedSkills as sk}
+                                        <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); font-size: 0.72rem; padding: 2px 6px;">+{sk}</span>
+                                      {/each}
+                                    </div>
+                                  {/if}
+
+                                  {#if skillDiff.removedSkills.length > 0}
+                                    <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                                      <span style="color: #ef4444; font-weight: 600;">➖ 將失去 Skill（降權）：</span>
+                                      {#each skillDiff.removedSkills as sk}
+                                        <span class="badge" style="background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); font-size: 0.72rem; padding: 2px 6px;">-{sk}</span>
+                                      {/each}
+                                    </div>
+                                  {/if}
+
+                                  {#if skillDiff.addedSkills.length === 0 && skillDiff.removedSkills.length === 0}
+                                    <div style="color: var(--text-muted); font-style: italic;">
+                                      {#if skillDiff.currentSkills.length === 0 && skillDiff.nextSkills.length === 0}
+                                        {(editingDepartmentIds.length > 0 || (member.department_ids && member.department_ids.length > 0))
+                                          ? '（部門尚未設定 Skill，無法評估權限影響）'
+                                          : '（未指派任何部門）'}
+                                      {:else}
+                                        （本次調整未變動成員之有效 Skill 集合）
+                                      {/if}
+                                    </div>
+                                  {/if}
+                                </div>
+                              </div>
+
+                              {#if editingMemberDeptError}
+                                <div style="color: #ef4444; font-size: 0.78rem;">{editingMemberDeptError}</div>
+                              {/if}
+
+                              <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;">
+                                <button 
+                                  type="button" 
+                                  class="btn btn-sm" 
+                                  onclick={cancelEditingMemberDepartments}
+                                  disabled={isSavingMemberDepartments}
+                                >
+                                  取消
+                                </button>
+                                <button 
+                                  type="button" 
+                                  class="btn btn-primary btn-sm" 
+                                  onclick={() => handleSaveMemberDepartments(member.user_id || member.id)}
+                                  disabled={isSavingMemberDepartments}
+                                >
+                                  {#if isSavingMemberDepartments}儲存中...{:else}儲存部門設定{/if}
+                                </button>
+                              </div>
+                            </div>
+                          {/if}
                         </div>
                       {/each}
                     {/if}

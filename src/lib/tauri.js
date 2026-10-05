@@ -114,18 +114,29 @@ if (!mockTaskMessages || mockTaskMessages.length === 0) {
 }
 
 const defaultMockDepartments = [
-  { id: "dept_mock_1", name: "總經理室", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
-  { id: "dept_mock_2", name: "研發總處", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "dept_mock_3", name: "前端小組", parent_id: "dept_mock_2", created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "dept_mock_4", name: "後端架構組", parent_id: "dept_mock_2", created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-  { id: "dept_mock_5", name: "行銷業務部", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-  { id: "dept_mock_6", name: "財務會計處", parent_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
+  { id: "dept_mock_1", name: "總經理室", parent_id: null, skills: ["org.manage", "audit.trace_view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "dept_mock_2", name: "研發總處", parent_id: null, skills: ["dev.repo_write", "dev.agent_config"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "dept_mock_3", name: "前端小組", parent_id: "dept_mock_2", skills: ["ui.build", "ui.component_test"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "dept_mock_4", name: "後端架構組", parent_id: "dept_mock_2", skills: ["backend.api_build", "db.migrate"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+  { id: "dept_mock_5", name: "行銷業務部", parent_id: null, skills: ["sales.lead_manage", "crm.read"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+  { id: "dept_mock_6", name: "財務會計處", parent_id: null, skills: ["finance.view", "invoice.issue"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
 ];
 
 let mockDepartments = loadStorage('agent_erp_mock_departments', defaultMockDepartments);
 if (!mockDepartments || mockDepartments.length === 0) {
   mockDepartments = defaultMockDepartments;
   saveStorage('agent_erp_mock_departments', mockDepartments);
+}
+
+const defaultMockUserDepartments = [
+  { user_id: "usr_mock_admin", tenant_id: "tnt_mock_1", department_id: "dept_mock_1" },
+  { user_id: "usr_mock_admin", tenant_id: "tnt_mock_1", department_id: "dept_mock_2" }
+];
+
+let mockUserDepartments = loadStorage('agent_erp_mock_user_departments', defaultMockUserDepartments);
+if (!mockUserDepartments || !Array.isArray(mockUserDepartments)) {
+  mockUserDepartments = defaultMockUserDepartments;
+  saveStorage('agent_erp_mock_user_departments', mockUserDepartments);
 }
 
 let mockLlmProviders = [
@@ -516,12 +527,17 @@ export async function invoke(cmd, args = {}) {
         const userTnts = mockUserTenants.filter(ut => ut.tenant_id === mockSessions.active_tenant_id);
         const members = userTnts.map(ut => {
           const u = mockUsers.find(user => user.id === ut.user_id);
+          const userDeptLinks = mockUserDepartments.filter(ud => ud.user_id === ut.user_id && ud.tenant_id === mockSessions.active_tenant_id);
+          const department_ids = userDeptLinks.map(ud => ud.department_id);
+          const departments = department_ids.map(did => mockDepartments.find(d => d.id === did)).filter(Boolean);
           return {
             id: ut.user_id,
             user_id: ut.user_id,
             email: u ? u.email : 'unknown@example.com',
             name: u ? (u.name || u.email) : 'Unknown Member',
-            role: ut.role
+            role: ut.role,
+            department_ids,
+            departments
           };
         });
         return { members };
@@ -530,7 +546,7 @@ export async function invoke(cmd, args = {}) {
         if (!mockSessions || !mockSessions.active_tenant_id) {
           throw { code: "IAM_ERR_INVALID_CREDENTIALS", message: "auth: Session not found" };
         }
-        const { email, name, role } = body;
+        const { email, name, role, department_ids } = body;
         const trimmedEmail = (email || '').trim();
         const trimmedName = (name || '').trim();
         const trimmedRole = (role || 'member').trim().toLowerCase();
@@ -554,12 +570,25 @@ export async function invoke(cmd, args = {}) {
         }
         mockUserTenants.push({ user_id: userId, tenant_id: mockSessions.active_tenant_id, role: trimmedRole });
         saveStorage('agent_erp_mock_user_tenants', mockUserTenants);
+
+        const rawDeptIds = Array.isArray(department_ids) ? department_ids : [];
+        const uniqueDeptIds = [...new Set(rawDeptIds.map(d => String(d).trim()).filter(Boolean))];
+        for (const deptId of uniqueDeptIds) {
+          if (!mockUserDepartments.some(ud => ud.user_id === userId && ud.tenant_id === mockSessions.active_tenant_id && ud.department_id === deptId)) {
+            mockUserDepartments.push({ user_id: userId, tenant_id: mockSessions.active_tenant_id, department_id: deptId });
+          }
+        }
+        saveStorage('agent_erp_mock_user_departments', mockUserDepartments);
+        const assignedDepartments = uniqueDeptIds.map(did => mockDepartments.find(d => d.id === did)).filter(Boolean);
+
         return {
           id: userId,
           user_id: userId,
           email: trimmedEmail,
           name: trimmedName,
-          role: trimmedRole
+          role: trimmedRole,
+          department_ids: uniqueDeptIds,
+          departments: assignedDepartments
         };
       }
       if (method === 'POST' && (path === '/v1/tenant-admin/members/assign-role' || path === '/v1/tenant-admin/employees/assign-role')) {
@@ -581,6 +610,35 @@ export async function invoke(cmd, args = {}) {
         mockUserTenants[utIndex].role = targetRole;
         saveStorage('agent_erp_mock_user_tenants', mockUserTenants);
         return { user_id: targetUserId, role: targetRole, success: true };
+      }
+      if (method === 'POST' && (path === '/v1/tenant-admin/members/assign-departments' || path === '/v1/tenant-admin/employees/assign-departments')) {
+        if (!mockSessions || !mockSessions.active_tenant_id) {
+          throw { code: "IAM_ERR_INVALID_CREDENTIALS", message: "auth: Session not found" };
+        }
+        const targetUserId = (body.user_id || body.member_id || '').trim();
+        if (!targetUserId) {
+          throw { code: "IAM_ERR_INVALID_ARGUMENT", message: "missing user_id" };
+        }
+        const isMember = mockUserTenants.some(ut => ut.tenant_id === mockSessions.active_tenant_id && ut.user_id === targetUserId);
+        if (!isMember) {
+          throw { code: "IAM_ERR_INVALID_ARGUMENT", message: "member not found in this tenant" };
+        }
+        const rawDeptIds = Array.isArray(body.department_ids) ? body.department_ids : [];
+        const uniqueDeptIds = [...new Set(rawDeptIds.map(d => String(d).trim()).filter(Boolean))];
+
+        mockUserDepartments = mockUserDepartments.filter(ud => !(ud.tenant_id === mockSessions.active_tenant_id && ud.user_id === targetUserId));
+        for (const deptId of uniqueDeptIds) {
+          mockUserDepartments.push({ user_id: targetUserId, tenant_id: mockSessions.active_tenant_id, department_id: deptId });
+        }
+        saveStorage('agent_erp_mock_user_departments', mockUserDepartments);
+        const assignedDepartments = uniqueDeptIds.map(did => mockDepartments.find(d => d.id === did)).filter(Boolean);
+
+        return {
+          user_id: targetUserId,
+          department_ids: uniqueDeptIds,
+          departments: assignedDepartments,
+          success: true
+        };
       }
       if (method === 'POST' && path === '/v1/test/expire') {
         throw { code: "IAM_ERR_INVALID_CREDENTIALS", message: "invalid credentials" };

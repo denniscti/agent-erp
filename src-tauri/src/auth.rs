@@ -933,19 +933,38 @@ async fn mock_dispatch<R: tauri::Runtime, S: TokenStore>(
 
             let member_rows = stmt_members
                 .query_map([&active_tenant_id], |row| {
-                    Ok(json!({
-                        "id": row.get::<_, String>(0)?,
-                        "user_id": row.get::<_, String>(0)?,
-                        "email": row.get::<_, String>(1)?,
-                        "name": row.get::<_, String>(2)?,
-                        "role": row.get::<_, String>(3)?,
-                    }))
+                    let user_id: String = row.get(0)?;
+                    let email: String = row.get(1)?;
+                    let name: String = row.get(2)?;
+                    let role: String = row.get(3)?;
+                    Ok((user_id, email, name, role))
                 })
                 .map_err(|e| ApiError::DatabaseError(format!("Query execute failed: {}", e)))?;
 
             let mut members = Vec::new();
-            for m in member_rows.flatten() {
-                members.push(m);
+            for m_res in member_rows {
+                let (user_id, email, name, role) =
+                    m_res.map_err(|e| ApiError::DatabaseError(format!("Row read error: {}", e)))?;
+
+                let mut stmt_dept = conn
+                    .prepare("SELECT department_id FROM user_departments WHERE user_id = ?1 AND tenant_id = ?2")
+                    .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+                let dept_rows = stmt_dept
+                    .query_map([&user_id, &active_tenant_id], |row| row.get::<_, String>(0))
+                    .map_err(|e| ApiError::DatabaseError(format!("Query execute failed: {}", e)))?;
+                let mut department_ids = Vec::new();
+                for d in dept_rows.flatten() {
+                    department_ids.push(d);
+                }
+
+                members.push(json!({
+                    "id": user_id,
+                    "user_id": user_id,
+                    "email": email,
+                    "name": name,
+                    "role": role,
+                    "department_ids": department_ids,
+                }));
             }
 
             Ok(json!({ "members": members }))
@@ -1000,6 +1019,18 @@ async fn mock_dispatch<R: tauri::Runtime, S: TokenStore>(
                 }
             };
 
+            let department_ids: Vec<String> = body
+                .get("department_ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             // Check if user is already a member of this tenant
             let mut stmt_check = conn
                 .prepare(
@@ -1050,12 +1081,26 @@ async fn mock_dispatch<R: tauri::Runtime, S: TokenStore>(
                 ApiError::DatabaseError(format!("Failed to add member to tenant: {}", e))
             })?;
 
+            // Insert user_departments relationships
+            let mut unique_depts = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for dept_id in department_ids {
+                if seen.insert(dept_id.clone()) {
+                    let _ = conn.execute(
+                        "INSERT OR IGNORE INTO user_departments (user_id, tenant_id, department_id) VALUES (?1, ?2, ?3)",
+                        (&user_id, &active_tenant_id, &dept_id),
+                    );
+                    unique_depts.push(dept_id);
+                }
+            }
+
             Ok(json!({
                 "id": user_id,
                 "user_id": user_id,
                 "email": email,
                 "name": name,
                 "role": role,
+                "department_ids": unique_depts,
             }))
         }
 
@@ -1126,6 +1171,86 @@ async fn mock_dispatch<R: tauri::Runtime, S: TokenStore>(
                 "user_id": target_user_id,
                 "role": role,
                 "success": true
+            }))
+        }
+
+        ("POST", "/v1/tenant-admin/members/assign-departments")
+        | ("POST", "/v1/tenant-admin/employees/assign-departments") => {
+            let pair = token_store.load()?.ok_or(ApiError::InvalidCredentials)?;
+            let token = pair.access_token;
+
+            let mut stmt = conn
+                .prepare("SELECT user_id, active_tenant_id FROM sessions WHERE token = ?1")
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let (_, active_tenant_id): (String, Option<String>) = stmt
+                .query_row([&token], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|_| ApiError::InvalidCredentials)?;
+
+            let active_tenant_id = active_tenant_id.ok_or(ApiError::InvalidCredentials)?;
+
+            let target_user_id = body
+                .get("user_id")
+                .or_else(|| body.get("member_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    ApiError::InvalidArgument("Missing user_id parameter".to_string())
+                })?;
+
+            // Check if member exists in this tenant
+            let mut stmt_check = conn
+                .prepare("SELECT count(*) FROM user_tenants WHERE tenant_id = ?1 AND user_id = ?2")
+                .map_err(|e| ApiError::DatabaseError(format!("Query prep failed: {}", e)))?;
+            let count: i64 = stmt_check
+                .query_row((&active_tenant_id, target_user_id), |row| row.get(0))
+                .unwrap_or(0);
+
+            if count == 0 {
+                return Err(ApiError::InvalidArgument(
+                    "Member not found in this tenant".to_string(),
+                ));
+            }
+
+            let department_ids: Vec<String> = body
+                .get("department_ids")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Clear existing departments for this user in this tenant
+            conn.execute(
+                "DELETE FROM user_departments WHERE user_id = ?1 AND tenant_id = ?2",
+                (target_user_id, &active_tenant_id),
+            )
+            .map_err(|e| {
+                ApiError::DatabaseError(format!("Failed to clear user departments: {}", e))
+            })?;
+
+            // Insert new departments
+            let mut unique_depts = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for dept_id in department_ids {
+                if seen.insert(dept_id.clone()) {
+                    conn.execute(
+                        "INSERT INTO user_departments (user_id, tenant_id, department_id) VALUES (?1, ?2, ?3)",
+                        (target_user_id, &active_tenant_id, &dept_id),
+                    )
+                    .map_err(|e| ApiError::DatabaseError(format!("Failed to insert user department: {}", e)))?;
+                    unique_depts.push(dept_id);
+                }
+            }
+
+            Ok(json!({
+                "user_id": target_user_id,
+                "department_ids": unique_depts,
+                "success": true,
             }))
         }
 
@@ -1460,6 +1585,17 @@ mod tests {
                 tenant_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 PRIMARY KEY (user_id, tenant_id)
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS user_departments (
+                user_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                department_id TEXT NOT NULL,
+                PRIMARY KEY (user_id, tenant_id, department_id)
             )",
             [],
         )
@@ -3034,6 +3170,133 @@ mod tests {
             res_assign_invalid_role.unwrap_err(),
             ApiError::InvalidArgument(_)
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_member_management_multi_department_assignment() {
+        // Given: authenticated session with active tenant created via register-tenant
+        let handle = setup_test_db();
+        let token_store = InMemoryTokenStore::new();
+
+        execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/auth/register-tenant",
+            &json!({
+                "admin_name": "Admin User",
+                "tenant_name": "Test Tenant",
+                "company_name": "Test Company",
+                "admin_email": "admin@example.com",
+                "admin_password": "password123",
+                "tenant_code": "test_dept_tnt"
+            }),
+        )
+        .await
+        .expect("register tenant should succeed");
+
+        // When: onboarding new member with multiple departments (including duplicate and whitespace)
+        let onboard_res = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/onboard",
+            &json!({
+                "name": "李組長",
+                "email": "lee@example.com",
+                "role": "member",
+                "department_ids": ["  dept_mock_1  ", "dept_mock_2", "dept_mock_1"]
+            }),
+        )
+        .await
+        .expect("onboard member with departments should succeed");
+
+        let lee_user_id = onboard_res.get("user_id").and_then(|v| v.as_str()).unwrap();
+        let assigned_depts = onboard_res
+            .get("department_ids")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        // Then: deduplicated and trimmed (length 2: dept_mock_1, dept_mock_2)
+        assert_eq!(assigned_depts.len(), 2);
+
+        // When: listing members
+        let list_res = execute_api_call(
+            &handle,
+            &token_store,
+            "GET",
+            "/v1/tenant-admin/members",
+            &json!({}),
+        )
+        .await
+        .expect("list members should succeed");
+
+        let members = list_res.get("members").and_then(|v| v.as_array()).unwrap();
+        let lee_entry = members
+            .iter()
+            .find(|m| m.get("email").and_then(|v| v.as_str()) == Some("lee@example.com"))
+            .unwrap();
+        let lee_depts = lee_entry
+            .get("department_ids")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(lee_depts.len(), 2);
+
+        // When: updating departments via assign-departments (updating to single dept_mock_3)
+        let assign_dept_res = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/assign-departments",
+            &json!({
+                "user_id": lee_user_id,
+                "department_ids": ["dept_mock_3"]
+            }),
+        )
+        .await
+        .expect("assign-departments should succeed");
+
+        let updated_depts = assign_dept_res
+            .get("department_ids")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(updated_depts.len(), 1);
+        assert_eq!(updated_depts[0].as_str(), Some("dept_mock_3"));
+
+        // When: clearing departments (assign-departments with empty array)
+        let clear_dept_res = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/assign-departments",
+            &json!({
+                "user_id": lee_user_id,
+                "department_ids": []
+            }),
+        )
+        .await
+        .expect("clear departments should succeed");
+
+        let cleared_depts = clear_dept_res
+            .get("department_ids")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(cleared_depts.len(), 0);
+
+        // When: assign-departments with non-existent user
+        let err_res = execute_api_call(
+            &handle,
+            &token_store,
+            "POST",
+            "/v1/tenant-admin/members/assign-departments",
+            &json!({
+                "user_id": "usr_non_existent",
+                "department_ids": ["dept_mock_1"]
+            }),
+        )
+        .await;
+
+        // Then: returns InvalidArgument error
+        assert!(matches!(err_res.unwrap_err(), ApiError::InvalidArgument(_)));
     }
 
     #[test]

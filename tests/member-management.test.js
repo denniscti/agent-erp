@@ -11,6 +11,10 @@ const {
   fetchMembers,
   onboardMemberAction,
   assignMemberRoleAction,
+  assignMemberDepartmentsAction,
+  getEffectiveSkills,
+  computeSkillDiff,
+  fetchDepartments,
   canManageMembers,
   apiCall
 } = await import('../src/lib/store.svelte.js');
@@ -367,4 +371,273 @@ test('TC-ROLE-E-02: Flow Guard - Member role should be prevented from member man
   // Then: Member is not allowed to trigger member management fetch
   assert.equal(shouldFetch, false);
 });
+
+// =========================================================================
+// Issue 114: Multi-department assignment and skill union & diff calculation
+// =========================================================================
+
+test('TC-MDEP-N-01: Onboard member with zero departments (optional field)', async () => {
+  // Given: Authenticated tenant and member payload without departments
+  await setupTestTenant();
+  const testEmail = `nodept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+
+  // When: Onboarding member with empty department_ids
+  const res = await onboardMemberAction({
+    name: '無部門成員',
+    email: testEmail,
+    role: 'member',
+    department_ids: []
+  });
+
+  // Then: Member is created with empty department list and empty effective skills
+  assert.deepEqual(res.department_ids, []);
+  const members = await fetchMembers();
+  const found = members.find(m => m.email === testEmail);
+  assert.ok(found);
+  assert.deepEqual(found.department_ids, []);
+
+  const skills = getEffectiveSkills(found.department_ids, appState.departments);
+  assert.deepEqual(skills, []);
+});
+
+test('TC-MDEP-N-02: Onboard member with single department', async () => {
+  // Given: Authenticated tenant and departments cached in store
+  await setupTestTenant();
+  await fetchDepartments();
+  const testEmail = `singledept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+
+  // When: Onboarding member with single department 'dept_mock_1'
+  const res = await onboardMemberAction({
+    name: '總經理秘書',
+    email: testEmail,
+    role: 'member',
+    department_ids: ['dept_mock_1']
+  });
+
+  // Then: Member has dept_mock_1 and effective skills from dept_mock_1
+  assert.deepEqual(res.department_ids, ['dept_mock_1']);
+  const members = await fetchMembers();
+  const found = members.find(m => m.email === testEmail);
+  assert.ok(found);
+  assert.deepEqual(found.department_ids, ['dept_mock_1']);
+
+  const skills = getEffectiveSkills(found.department_ids, appState.departments);
+  assert.ok(skills.includes('org.manage'));
+  assert.ok(skills.includes('audit.trace_view'));
+});
+
+test('TC-MDEP-N-03: Onboard member with multiple departments (skill union)', async () => {
+  // Given: Authenticated tenant and department list
+  await setupTestTenant();
+  await fetchDepartments();
+  const testEmail = `multidept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+
+  // When: Onboarding member with dept_mock_1 and dept_mock_2
+  const res = await onboardMemberAction({
+    name: '跨部門協調者',
+    email: testEmail,
+    role: 'member',
+    department_ids: ['dept_mock_1', 'dept_mock_2']
+  });
+
+  // Then: Member belongs to both departments and skills are the union
+  assert.equal(res.department_ids.length, 2);
+  assert.ok(res.department_ids.includes('dept_mock_1'));
+  assert.ok(res.department_ids.includes('dept_mock_2'));
+
+  const skills = getEffectiveSkills(res.department_ids, appState.departments);
+  assert.ok(skills.includes('org.manage'), 'Contains dept 1 skill org.manage');
+  assert.ok(skills.includes('audit.trace_view'), 'Contains dept 1 skill audit.trace_view');
+  assert.ok(skills.includes('dev.repo_write'), 'Contains dept 2 skill dev.repo_write');
+  assert.ok(skills.includes('dev.agent_config'), 'Contains dept 2 skill dev.agent_config');
+});
+
+test('TC-MDEP-N-04: Update member departments (granting privilege / adding departments)', async () => {
+  // Given: An existing member with dept_mock_1
+  await setupTestTenant();
+  await fetchDepartments();
+  const testEmail = `grantdept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+  const created = await onboardMemberAction({
+    name: '工程主管',
+    email: testEmail,
+    role: 'member',
+    department_ids: ['dept_mock_1']
+  });
+  const userId = created.user_id || created.id;
+
+  // When: Calculating diff for adding dept_mock_3 ('前端小組')
+  const diff = computeSkillDiff(['dept_mock_1'], ['dept_mock_1', 'dept_mock_3'], appState.departments);
+  assert.ok(diff.addedSkills.includes('ui.build'));
+  assert.ok(diff.addedSkills.includes('ui.component_test'));
+  assert.equal(diff.removedSkills.length, 0);
+
+  // And: Updating departments in backend
+  const updateRes = await assignMemberDepartmentsAction(userId, ['dept_mock_1', 'dept_mock_3']);
+  assert.equal(updateRes.department_ids.length, 2);
+
+  // Then: Fetched members reflect updated departments
+  const members = await fetchMembers();
+  const found = members.find(m => m.user_id === userId || m.id === userId);
+  assert.deepEqual(found.department_ids.sort(), ['dept_mock_1', 'dept_mock_3'].sort());
+});
+
+test('TC-MDEP-N-05: Update member departments (revoking privilege / removing departments)', async () => {
+  // Given: An existing member with dept_mock_1 and dept_mock_2
+  await setupTestTenant();
+  await fetchDepartments();
+  const testEmail = `revokedept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+  const created = await onboardMemberAction({
+    name: '離職交接成員',
+    email: testEmail,
+    role: 'member',
+    department_ids: ['dept_mock_1', 'dept_mock_2']
+  });
+  const userId = created.user_id || created.id;
+
+  // When: Calculating diff for removing dept_mock_1
+  const diff = computeSkillDiff(['dept_mock_1', 'dept_mock_2'], ['dept_mock_2'], appState.departments);
+  assert.ok(diff.removedSkills.includes('org.manage'));
+  assert.ok(diff.removedSkills.includes('audit.trace_view'));
+  assert.equal(diff.addedSkills.length, 0);
+
+  // And: Executing update
+  const updateRes = await assignMemberDepartmentsAction(userId, ['dept_mock_2']);
+  assert.deepEqual(updateRes.department_ids, ['dept_mock_2']);
+
+  // Then: Store reflects removal of dept_mock_1
+  const members = await fetchMembers();
+  const found = members.find(m => m.user_id === userId || m.id === userId);
+  assert.deepEqual(found.department_ids, ['dept_mock_2']);
+});
+
+test('TC-MDEP-N-06: List members contains department_ids and department objects', async () => {
+  // Given: Authenticated tenant with members in departments
+  await setupTestTenant();
+  await fetchDepartments();
+  const testEmail = `listdept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+  await onboardMemberAction({
+    name: '清單測試員',
+    email: testEmail,
+    role: 'member',
+    department_ids: ['dept_mock_5']
+  });
+
+  // When: Fetching members
+  const members = await fetchMembers();
+
+  // Then: Every member object has department_ids array
+  for (const m of members) {
+    assert.ok(Array.isArray(m.department_ids));
+  }
+  const found = members.find(m => m.email === testEmail);
+  assert.ok(found);
+  assert.deepEqual(found.department_ids, ['dept_mock_5']);
+});
+
+test('TC-MDEP-B-01: Boundary - NULL and undefined department_ids handled safely', async () => {
+  // Given: Authenticated tenant
+  await setupTestTenant();
+  const testEmail = `nulldept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+
+  // When: Onboarding with null department_ids
+  const resNull = await onboardMemberAction({
+    name: 'Null 部門',
+    email: testEmail,
+    role: 'member',
+    department_ids: null
+  });
+
+  // Then: Safely normalized to empty array
+  assert.deepEqual(resNull.department_ids, []);
+
+  // And: Diff calculation with null and undefined inputs safely returns empty arrays
+  const nullDiff = computeSkillDiff(null, undefined, appState.departments);
+  assert.deepEqual(nullDiff.currentSkills, []);
+  assert.deepEqual(nullDiff.nextSkills, []);
+  assert.deepEqual(nullDiff.addedSkills, []);
+  assert.deepEqual(nullDiff.removedSkills, []);
+});
+
+test('TC-MDEP-B-02: Boundary - Duplicate department_ids are deduplicated', async () => {
+  // Given: Authenticated tenant and member payload with duplicate department IDs
+  await setupTestTenant();
+  const testEmail = `dupdept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+
+  // When: Onboarding with ['dept_mock_1', 'dept_mock_1', 'dept_mock_2', 'dept_mock_2']
+  const res = await onboardMemberAction({
+    name: '重複部門',
+    email: testEmail,
+    role: 'member',
+    department_ids: ['dept_mock_1', 'dept_mock_1', 'dept_mock_2', 'dept_mock_2']
+  });
+
+  // Then: Deduplicated to 2 departments
+  assert.equal(res.department_ids.length, 2);
+  assert.deepEqual(res.department_ids.sort(), ['dept_mock_1', 'dept_mock_2'].sort());
+});
+
+test('TC-MDEP-B-03: Boundary - Whitespace in department IDs is trimmed and sanitized', async () => {
+  // Given: Authenticated tenant and department array with padded whitespace
+  await setupTestTenant();
+  const testEmail = `paddeddept_${Date.now()}_${Math.floor(Math.random() * 10000)}@example.com`;
+
+  // When: Onboarding with padded IDs
+  const res = await onboardMemberAction({
+    name: '空白部門',
+    email: testEmail,
+    role: 'member',
+    department_ids: ['  dept_mock_1  ', '   ', ' dept_mock_2 ']
+  });
+
+  // Then: Filtered empty strings and trimmed IDs
+  assert.deepEqual(res.department_ids.sort(), ['dept_mock_1', 'dept_mock_2'].sort());
+});
+
+test('TC-MDEP-B-04: Boundary - Department without skills returns empty skill list without error', () => {
+  // Given: Custom departments list where one department has no skills or undefined skills
+  const mockDeptList = [
+    { id: 'd_empty_1', name: '無技能部', skills: [] },
+    { id: 'd_empty_2', name: '未設定技能部' }
+  ];
+
+  // When: Getting effective skills for both departments
+  const skills = getEffectiveSkills(['d_empty_1', 'd_empty_2'], mockDeptList);
+
+  // Then: Safely returns empty array
+  assert.deepEqual(skills, []);
+
+  // And: Diff calculation returns empty diffs
+  const diff = computeSkillDiff([], ['d_empty_1', 'd_empty_2'], mockDeptList);
+  assert.deepEqual(diff.addedSkills, []);
+  assert.deepEqual(diff.removedSkills, []);
+});
+
+test('TC-MDEP-E-01: Error - Assign departments to non-existent user is rejected', async () => {
+  // Given: Authenticated tenant
+  await setupTestTenant();
+
+  // When: Attempting to assign departments to non-existent user
+  // Then: Throws member not found error
+  await assert.rejects(
+    async () => {
+      await assignMemberDepartmentsAction('usr_non_existent_8888', ['dept_mock_1']);
+    },
+    (err) => err?.code === 'IAM_ERR_INVALID_ARGUMENT' || String(err?.message).includes('not found')
+  );
+});
+
+test('TC-MDEP-E-02: Error - Assign departments with empty userId is rejected', async () => {
+  // Given: Authenticated tenant
+  await setupTestTenant();
+
+  // When: Attempting to assign departments with empty userId
+  // Then: Throws validation error
+  await assert.rejects(
+    async () => {
+      await assignMemberDepartmentsAction('   ', ['dept_mock_1']);
+    },
+    /使用者 ID 為必填項目/
+  );
+});
+
 

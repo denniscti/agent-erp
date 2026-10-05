@@ -815,15 +815,68 @@ export async function fetchMembers() {
 }
 
 /**
+ * Compute the union of skills for a list of department IDs
+ * @param {string[] | null | undefined} departmentIds
+ * @param {any[]} [departments]
+ * @returns {string[]} Deduplicated list of skills
+ */
+export function getEffectiveSkills(departmentIds, departments = appState.departments) {
+  if (!departmentIds || !Array.isArray(departmentIds) || departmentIds.length === 0) {
+    return [];
+  }
+  const depts = departments || [];
+  const skillSet = new Set();
+  for (const deptId of departmentIds) {
+    const dept = depts.find(d => d.id === deptId || d.name === deptId);
+    if (dept && Array.isArray(dept.skills)) {
+      for (const skill of dept.skills) {
+        if (typeof skill === 'string' && skill.trim()) {
+          skillSet.add(skill.trim());
+        }
+      }
+    }
+  }
+  return Array.from(skillSet).sort();
+}
+
+/**
+ * Compute difference in effective skills between current and next department selections
+ * @param {string[] | null | undefined} currentDeptIds
+ * @param {string[] | null | undefined} nextDeptIds
+ * @param {any[]} [departments]
+ * @returns {{ currentSkills: string[], nextSkills: string[], addedSkills: string[], removedSkills: string[] }}
+ */
+export function computeSkillDiff(currentDeptIds, nextDeptIds, departments = appState.departments) {
+  const currentSkills = getEffectiveSkills(currentDeptIds, departments);
+  const nextSkills = getEffectiveSkills(nextDeptIds, departments);
+
+  const currentSet = new Set(currentSkills);
+  const nextSet = new Set(nextSkills);
+
+  const addedSkills = nextSkills.filter(s => !currentSet.has(s));
+  const removedSkills = currentSkills.filter(s => !nextSet.has(s));
+
+  return {
+    currentSkills,
+    nextSkills,
+    addedSkills,
+    removedSkills
+  };
+}
+
+/**
  * Onboard a new member to the active tenant
- * @param {{ name: string, email: string, role?: string }} payload
+ * @param {{ name: string, email: string, role?: string, department_ids?: string[] }} payload
  * @returns {Promise<any>}
  */
-export async function onboardMemberAction({ name, email, role = 'member' }) {
+export async function onboardMemberAction({ name, email, role = 'member', department_ids = [] }) {
   try {
     const trimmedName = (name || '').trim();
     const trimmedEmail = (email || '').trim();
     const trimmedRole = (role || 'member').trim().toLowerCase();
+    const validDepartmentIds = Array.isArray(department_ids)
+      ? [...new Set(department_ids.map(d => String(d).trim()).filter(Boolean))]
+      : [];
 
     if (!trimmedName || !trimmedEmail) {
       throw new Error('姓名與電子郵件為必填項目');
@@ -832,7 +885,8 @@ export async function onboardMemberAction({ name, email, role = 'member' }) {
     const res = await apiCall('POST', '/v1/tenant-admin/members/onboard', {
       name: trimmedName,
       email: trimmedEmail,
-      role: trimmedRole
+      role: trimmedRole,
+      department_ids: validDepartmentIds
     });
     await fetchMembers();
     showToast(`已成功新增成員「${trimmedName}」`);
@@ -867,6 +921,35 @@ export async function assignMemberRoleAction(userId, role) {
     return res;
   } catch (err) {
     console.error("Failed to assign member role:", err);
+    throw err;
+  }
+}
+
+/**
+ * Assign / update member departments (multi-select)
+ * @param {string} userId
+ * @param {string[]} departmentIds
+ * @returns {Promise<any>}
+ */
+export async function assignMemberDepartmentsAction(userId, departmentIds) {
+  try {
+    const trimmedUserId = (userId || '').trim();
+    if (!trimmedUserId) {
+      throw new Error('使用者 ID 為必填項目');
+    }
+    const validDepartmentIds = Array.isArray(departmentIds)
+      ? [...new Set(departmentIds.map(d => String(d).trim()).filter(Boolean))]
+      : [];
+
+    const res = await apiCall('POST', '/v1/tenant-admin/members/assign-departments', {
+      user_id: trimmedUserId,
+      department_ids: validDepartmentIds
+    });
+    await fetchMembers();
+    showToast('成員部門已成功更新');
+    return res;
+  } catch (err) {
+    console.error("Failed to assign member departments:", err);
     throw err;
   }
 }

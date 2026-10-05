@@ -158,6 +158,17 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
     .map_err(|e| format!("Failed to create user_tenants table: {}", e))?;
 
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS user_departments (
+            user_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            department_id TEXT NOT NULL,
+            PRIMARY KEY (user_id, tenant_id, department_id)
+        )",
+        [],
+    )
+    .map_err(|e| format!("Failed to create user_departments table: {}", e))?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS sessions (
             token TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
