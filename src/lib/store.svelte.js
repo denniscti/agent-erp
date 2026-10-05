@@ -781,10 +781,15 @@ export async function fetchDepartments() {
  * @returns {Promise<any>}
  */
 export async function createDepartmentAction(name, parentId = null) {
+  const trimmedName = (name || '').trim();
+  if (!trimmedName) {
+    throw new Error('部門名稱為必填項目');
+  }
+  const normalizedParentId = parentId && typeof parentId === 'string' && parentId.trim() ? parentId.trim() : null;
   try {
     const dept = await invoke('create_department', {
-      name,
-      parentId: parentId || null
+      name: trimmedName,
+      parentId: normalizedParentId
     });
     await fetchDepartments();
     return dept;

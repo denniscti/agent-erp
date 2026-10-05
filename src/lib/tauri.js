@@ -669,11 +669,15 @@ export async function invoke(cmd, args = {}) {
       if (!trimmedName) {
         throw new Error('Department name cannot be empty');
       }
+      if (mockDepartments.some(d => d.name.trim().toLowerCase() === trimmedName.toLowerCase())) {
+        throw new Error(`部門「${trimmedName}」已存在，請使用不同名稱`);
+      }
       const now = Math.floor(Date.now() / 1000);
+      const normalizedParentId = targetParentId && typeof targetParentId === 'string' && targetParentId.trim() ? targetParentId.trim() : null;
       const newDept = {
         id: `dept_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
         name: trimmedName,
-        parent_id: targetParentId ? targetParentId.trim() || null : null,
+        parent_id: normalizedParentId,
         created_at: now
       };
       mockDepartments.push(newDept);

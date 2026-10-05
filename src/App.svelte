@@ -22,7 +22,9 @@
     fetchMembers,
     onboardMemberAction,
     assignMemberRoleAction,
-    canManageMembers
+    canManageMembers,
+    fetchDepartments,
+    createDepartmentAction
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -45,6 +47,11 @@
   let newMemberRole = $state('member');
   let isAddingMember = $state(false);
   let memberError = $state('');
+
+  let newDepartmentName = $state('');
+  let newDepartmentParentId = $state('');
+  let isAddingDepartment = $state(false);
+  let departmentError = $state('');
 
   async function handleOnboardMember(e) {
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
@@ -78,6 +85,34 @@
     }
   }
 
+  async function handleCreateDepartment(e) {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (!newDepartmentName.trim()) {
+      departmentError = '請填寫部門名稱';
+      return;
+    }
+    isAddingDepartment = true;
+    departmentError = '';
+    try {
+      await createDepartmentAction(
+        newDepartmentName.trim(),
+        newDepartmentParentId ? newDepartmentParentId.trim() : null
+      );
+      newDepartmentName = '';
+      newDepartmentParentId = '';
+    } catch (err) {
+      departmentError = err?.message || '新增部門失敗';
+    } finally {
+      isAddingDepartment = false;
+    }
+  }
+
+  function getParentDepartmentName(parentId) {
+    if (!parentId) return null;
+    const parent = appState.departments.find(d => d.id === parentId);
+    return parent ? parent.name : parentId;
+  }
+
   async function initializeAppData() {
     if (isInitialized) return;
     await fetchOrders();
@@ -87,6 +122,7 @@
     await fetchTasks();
     if (canManageMembers(appState.activeTenant)) {
       await fetchMembers();
+      await fetchDepartments();
     }
     await initMainChatGreeting();
     isInitialized = true;
@@ -586,6 +622,92 @@
                               <option value="admin">Admin (管理員)</option>
                               <option value="member">Member (一般成員)</option>
                             </select>
+                          </div>
+                        </div>
+                      {/each}
+                    {/if}
+                  </div>
+                </div>
+                {/if}
+
+                <!-- Department Management (Admin/Owner only) -->
+                {#if canManageMembers(appState.activeTenant)}
+                <div class="settings-group glass-panel">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <h3>部門管理 (Department Management)</h3>
+                    <button class="btn btn-sm" onclick={fetchDepartments}>
+                      重新整理部門
+                    </button>
+                  </div>
+                  <p class="settings-desc">管理當前組織架構與部門階層（支援上層部門 parent_id 關聯）。設定後將同步於組織治理與指派流程中。</p>
+
+                  <!-- Add Department Form -->
+                  <form onsubmit={handleCreateDepartment} class="department-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
+                    <div style="flex: 1.5; min-width: 180px;">
+                      <label for="dept-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">部門名稱</label>
+                      <input 
+                        id="dept-name-input"
+                        type="text" 
+                        class="form-input" 
+                        placeholder="例：研發部、行銷部、業務一部" 
+                        bind:value={newDepartmentName}
+                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                      />
+                    </div>
+                    <div style="flex: 1.5; min-width: 180px;">
+                      <label for="dept-parent-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">上層部門（可選）</label>
+                      <select 
+                        id="dept-parent-select"
+                        bind:value={newDepartmentParentId}
+                        style="width: 100%; padding: 7px 8px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                      >
+                        <option value="">無（頂層部門）</option>
+                        {#each appState.departments as dept (dept.id)}
+                          <option value={dept.id}>{dept.name}</option>
+                        {/each}
+                      </select>
+                    </div>
+                    <button 
+                      type="submit" 
+                      class="btn btn-primary btn-sm" 
+                      disabled={isAddingDepartment}
+                      style="height: 35px; white-space: nowrap; padding: 0 16px;"
+                    >
+                      {#if isAddingDepartment}新增中...{:else}+ 新增部門{/if}
+                    </button>
+                  </form>
+                  
+                  {#if departmentError}
+                    <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{departmentError}</div>
+                  {/if}
+
+                  <!-- Department List -->
+                  <div class="department-list" style="display: flex; flex-direction: column; gap: 8px;">
+                    {#if appState.departments.length === 0}
+                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無部門資料，請新增部門。</div>
+                    {:else}
+                      {#each appState.departments as dept (dept.id)}
+                        {@const parentName = getParentDepartmentName(dept.parent_id)}
+                        <div class="department-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                          <div style="display: flex; align-items: center; gap: 12px;">
+                            <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-purple), 0.12); border: 1px solid rgba(var(--accent-purple), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-purple)); font-size: 0.95rem;">
+                              🏢
+                            </div>
+                            <div>
+                              <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{dept.name}</span>
+                                {#if parentName}
+                                  <span class="badge badge-cyan" style="font-size: 0.72rem;">
+                                    上層：{parentName}
+                                  </span>
+                                {:else}
+                                  <span class="badge badge-slate" style="font-size: 0.72rem;">
+                                    頂層部門
+                                  </span>
+                                {/if}
+                              </div>
+                              <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{dept.id}</div>
+                            </div>
                           </div>
                         </div>
                       {/each}
