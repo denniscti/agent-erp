@@ -15,6 +15,9 @@ agent-erp 混合 Rust（Tauri 後端）與 Svelte（前端）開發，規劃或�
 - 動到 **`src-tauri`**（Tauri command、業務邏輯、對外部系統的存取）→ 讀 [`docs/standards/rust-backend.md`](docs/standards/rust-backend.md)
 - 動到 **`src`**（Svelte 元件、`store.svelte.js`、UI 流程）→ 讀 [`docs/standards/svelte-frontend.md`](docs/standards/svelte-frontend.md)
 - 要**寫 DoD、驗收功能、審查 PR** → 讀 [`docs/standards/testing-verification.md`](docs/standards/testing-verification.md)（四層驗證框架、已知錯誤碼邊界、驗收查核原則都在這份，不要每次重新在別的地方描述一次）
+- 要**規劃授權相關功能（Agent Skill 撰寫、資料權限擴充）** → 先讀 [`docs/standards/authoring/README.md`](docs/standards/authoring/README.md) 理解分層架構總覽，再依需要讀底下兩份：
+  - 新增一個使用者可透過對話驅動完成的任務情境（Agent Skill）→ [`docs/standards/authoring/agent-skill-authoring.md`](docs/standards/authoring/agent-skill-authoring.md)（`AgentProfile`/`ToolHandler` 之上的 `id`/`domain` 擴充規格、命名慣例、撰寫流程都在這份）
+  - 某個資料管理情境需要限制哪些部門/使用者能碰到哪些具體資料或欄位 → [`docs/standards/authoring/data-permission-extension.md`](docs/standards/authoring/data-permission-extension.md)（跟 skill 權限的界線、不集中管理的原則、擴充方式都在這份）
 - 一個功能通常兩邊都會動到（例如一張登入相關的 issue），架構/設計文件各自參考，驗收一律看 `testing-verification.md`。
 
 TPS2 是我們整合的外部後端（Go + Clean Architecture/DDD），分析／整合 TPS2 時套用它自己的分層去理解，但那是別人的 repo、別人的職責範圍——agent-erp 自身的架構、設計、測試規範一律以上面兩份文件為準，不要把 Go 的模式（interface、RepoErr 之類的命名）直接套到這個 repo 上。
