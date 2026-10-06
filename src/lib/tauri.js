@@ -139,6 +139,17 @@ if (!mockUserDepartments || !Array.isArray(mockUserDepartments)) {
   saveStorage('agent_erp_mock_user_departments', mockUserDepartments);
 }
 
+const defaultMockPartners = [
+  { id: "part_mock_1", name: "A 公司 (Customer A)", is_customer: true, is_vendor: false, tax_id: "12345678", created_at: Math.floor(Date.now() / 1000) - 86400 * 5 },
+  { id: "part_mock_2", name: "台積電 (TSMC)", is_customer: true, is_vendor: false, tax_id: "22099131", created_at: Math.floor(Date.now() / 1000) - 86400 * 2 }
+];
+
+let mockPartners = loadStorage('agent_erp_mock_partners', defaultMockPartners);
+if (!mockPartners || !Array.isArray(mockPartners)) {
+  mockPartners = defaultMockPartners;
+  saveStorage('agent_erp_mock_partners', mockPartners);
+}
+
 let mockLlmProviders = [
   { id: "openai", label: "OpenAI GPT-4o", base_url: "https://api.openai.com/v1", model_name: "gpt-4o", requires_key: true, has_key: false, active: true },
   { id: "deepseek", label: "DeepSeek V3 (BYOK)", base_url: "https://api.deepseek.com/v1", model_name: "deepseek-chat", requires_key: true, has_key: false, active: false },
@@ -767,6 +778,48 @@ export async function invoke(cmd, args = {}) {
 
     case 'detect_department_intent': {
       return { attempted: false, tool_call: null };
+    }
+
+    case 'create_partner': {
+      const { name, is_customer, isCustomer, is_vendor, isVendor, tax_id, taxId } = args;
+      const trimmedName = (name || '').trim();
+      if (!trimmedName) {
+        throw new Error('Partner name cannot be empty');
+      }
+      if (mockPartners.some(p => p.name.trim().toLowerCase() === trimmedName.toLowerCase())) {
+        throw new Error(`合作夥伴／客戶「${trimmedName}」已存在，請使用不同名稱`);
+      }
+      const rawTaxId = tax_id !== undefined ? tax_id : taxId;
+      const normalizedTaxId = rawTaxId && typeof rawTaxId === 'string' && rawTaxId.trim() ? rawTaxId.trim() : null;
+      const custFlag = is_customer !== undefined ? is_customer : (isCustomer !== undefined ? isCustomer : true);
+      const vendFlag = is_vendor !== undefined ? is_vendor : (isVendor !== undefined ? isVendor : false);
+
+      const now = Math.floor(Date.now() / 1000);
+      const newPartner = {
+        id: `part_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        name: trimmedName,
+        is_customer: !!custFlag,
+        is_vendor: !!vendFlag,
+        tax_id: normalizedTaxId,
+        created_at: now
+      };
+      mockPartners.push(newPartner);
+      saveStorage('agent_erp_mock_partners', mockPartners);
+      return newPartner;
+    }
+
+    case 'list_partners': {
+      const { filter_customer, filterCustomer, filter_vendor, filterVendor } = args;
+      const isCustFilter = filter_customer !== undefined ? filter_customer : filterCustomer;
+      const isVendFilter = filter_vendor !== undefined ? filter_vendor : filterVendor;
+      let list = [...mockPartners];
+      if (isCustFilter === true) {
+        list = list.filter(p => p.is_customer);
+      }
+      if (isVendFilter === true) {
+        list = list.filter(p => p.is_vendor);
+      }
+      return list;
     }
 
     case 'record_audit_log': {

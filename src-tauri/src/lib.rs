@@ -8,6 +8,7 @@ pub mod departments;
 mod downloader;
 pub mod llm;
 pub mod llm_traces;
+pub mod partners;
 pub mod tasks;
 pub mod tps2_types;
 
@@ -184,6 +185,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     departments::create_departments_table(&conn)
         .map_err(|e| format!("Failed to create departments table: {}", e))?;
+
+    partners::create_partners_table(&conn)
+        .map_err(|e| format!("Failed to create partners table: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -670,6 +674,8 @@ pub fn run() {
             departments::create_department,
             departments::list_departments,
             departments::update_department_skills,
+            partners::create_partner,
+            partners::list_partners,
             llm::detect_department_intent,
             llm_traces::record_llm_trace,
             llm_traces::update_llm_trace_decision,

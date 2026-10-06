@@ -4,11 +4,13 @@
  */
 
 import { departmentAgentProfile } from './departments.js';
+import { customerCreateBasicProfileAgentProfile } from './partners.js';
 import { isKnownDomain } from './domains.js';
 
 export * from './types.js';
 export * from './harness.js';
 export * from './departments.js';
+export * from './partners.js';
 export * from './domains.js';
 
 /**
@@ -18,8 +20,11 @@ export * from './domains.js';
 const taskProfileMap = new Map();
 
 // Register built-in profiles
-taskProfileMap.set('task_m2_dept', departmentAgentProfile);
-taskProfileMap.set('departments', departmentAgentProfile);
+registerAgentProfile('task_m2_dept', departmentAgentProfile);
+registerAgentProfile('departments', departmentAgentProfile);
+registerAgentProfile('customer.create_basic_profile', customerCreateBasicProfileAgentProfile);
+registerAgentProfile('task_m3_customer', customerCreateBasicProfileAgentProfile);
+registerAgentProfile('customers', customerCreateBasicProfileAgentProfile);
 
 /**
  * System declared skills registry
@@ -79,6 +84,11 @@ export function getAgentProfileForTask(task) {
   // 3. Fallback check for department subtask title
   if (task.title && task.title.includes('設定部門')) {
     return departmentAgentProfile;
+  }
+
+  // 4. Fallback check for customer subtask title
+  if (task.title && (task.title.includes('新增客戶') || task.title.includes('建立客戶') || task.title.includes('客戶'))) {
+    return customerCreateBasicProfileAgentProfile;
   }
 
   return null;

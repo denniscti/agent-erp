@@ -32,7 +32,9 @@
     filterDeclaredSkills,
     getDeclaredSkills,
     getSkillsByDomain,
-    KNOWN_DOMAINS
+    KNOWN_DOMAINS,
+    fetchPartners,
+    createPartnerAction
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -62,6 +64,12 @@
   let newDepartmentParentId = $state('');
   let isAddingDepartment = $state(false);
   let departmentError = $state('');
+
+  // Customer / Partner management state (Issue #117)
+  let newPartnerName = $state('');
+  let newPartnerTaxId = $state('');
+  let isAddingPartner = $state(false);
+  let partnerError = $state('');
 
   // Department Skill management state (Issue #115)
   let activeSkillDeptId = $state(null);
@@ -248,6 +256,30 @@
     }
   }
 
+  async function handleCreatePartner(e) {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (!newPartnerName.trim()) {
+      partnerError = '請填寫客戶名稱';
+      return;
+    }
+    isAddingPartner = true;
+    partnerError = '';
+    try {
+      await createPartnerAction({
+        name: newPartnerName.trim(),
+        taxId: newPartnerTaxId.trim() || null,
+        isCustomer: true,
+        isVendor: false
+      });
+      newPartnerName = '';
+      newPartnerTaxId = '';
+    } catch (err) {
+      partnerError = err?.message || '新增客戶失敗';
+    } finally {
+      isAddingPartner = false;
+    }
+  }
+
   function getParentDepartmentName(parentId) {
     if (!parentId) return null;
     const parent = appState.departments.find(d => d.id === parentId);
@@ -261,6 +293,7 @@
     await fetchInstalledModules();
     await fetchModulesGallery();
     await fetchTasks();
+    await fetchPartners();
     if (canManageMembers(appState.activeTenant)) {
       await fetchMembers();
       await fetchDepartments();
@@ -1178,6 +1211,99 @@
                   {/if}
                 </div>
                 {/if}
+
+                <!-- Customer & Partner Management (Issue #117) -->
+                <div class="settings-group glass-panel" style="margin-top: 24px;">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                      <h3 style="margin: 0;">客戶基本資料管理 (Customer Management)</h3>
+                      <span class="badge badge-cyan" style="font-size: 0.72rem;">Partner 聚合根</span>
+                    </div>
+                    <button class="btn btn-sm" onclick={() => fetchPartners()}>
+                      重新整理客戶
+                    </button>
+                  </div>
+                  <p class="settings-desc">登記與維護客戶基本檔案（名稱、統一編號／稅號）。作為後續採購受理、信用查詢與交易對象的基準資料庫。</p>
+
+                  <!-- Add Customer Form -->
+                  <form onsubmit={handleCreatePartner} class="customer-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
+                    <div style="flex: 2; min-width: 200px;">
+                      <label for="partner-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">客戶名稱（必填）</label>
+                      <input 
+                        id="partner-name-input"
+                        type="text" 
+                        class="form-input" 
+                        placeholder="例：台灣積體電路製造股份有限公司、聯發科技" 
+                        bind:value={newPartnerName}
+                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                      />
+                    </div>
+                    <div style="flex: 1.5; min-width: 160px;">
+                      <label for="partner-tax-id-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">統一編號 / 稅號（選填）</label>
+                      <input 
+                        id="partner-tax-id-input"
+                        type="text" 
+                        class="form-input" 
+                        placeholder="例：22099131" 
+                        bind:value={newPartnerTaxId}
+                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                      />
+                    </div>
+                    <button 
+                      type="submit" 
+                      class="btn btn-primary btn-sm" 
+                      disabled={isAddingPartner}
+                      style="height: 35px; white-space: nowrap; padding: 0 16px;"
+                    >
+                      {#if isAddingPartner}新增中...{:else}+ 新增客戶{/if}
+                    </button>
+                  </form>
+
+                  {#if partnerError}
+                    <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{partnerError}</div>
+                  {/if}
+
+                  <!-- Customer List -->
+                  <div class="customer-list" style="display: flex; flex-direction: column; gap: 8px;">
+                    {#if appState.partners.length === 0}
+                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無客戶資料，請透過上方表單或 AI 助理對話登記新客戶。</div>
+                    {:else}
+                      {#each appState.partners as partner (partner.id)}
+                        <div class="customer-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                          <div style="display: flex; align-items: center; gap: 12px;">
+                            <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-cyan), 0.12); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.95rem;">
+                              🏢
+                            </div>
+                            <div>
+                              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{partner.name}</span>
+                                {#if partner.tax_id}
+                                  <span class="badge badge-cyan" style="font-size: 0.72rem;">
+                                    統編：{partner.tax_id}
+                                  </span>
+                                {/if}
+                                {#if partner.is_customer}
+                                  <span class="badge badge-emerald" style="font-size: 0.7rem;">
+                                    客戶
+                                  </span>
+                                {/if}
+                                {#if partner.is_vendor}
+                                  <span class="badge badge-amber" style="font-size: 0.7rem;">
+                                    供應商
+                                  </span>
+                                {/if}
+                              </div>
+                              <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{partner.id}</div>
+                            </div>
+                          </div>
+                          <div style="font-size: 0.75rem; color: var(--text-muted);">
+                            {new Date(partner.created_at * 1000).toLocaleString()}
+                          </div>
+                        </div>
+                      {/each}
+                    {/if}
+                  </div>
+                </div>
               </div>
             </div>
           {:else if activeTab === 'sales' && !appState.activeTaskId}

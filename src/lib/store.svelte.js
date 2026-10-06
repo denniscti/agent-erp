@@ -124,6 +124,10 @@ export const appState = $state({
   /** @type {any[]} */
   members: [],
 
+  // Partners (Customers / Vendors) cache
+  /** @type {any[]} */
+  partners: [],
+
   // Lightweight task confirmation state
   /** @type {import('./workflow/types.js').PendingConfirmation | null} */
   pendingTaskConfirmation: null
@@ -798,6 +802,67 @@ export async function createDepartmentAction(name, parentId = null) {
     return dept;
   } catch (err) {
     console.error("Failed to create department:", err);
+    throw err;
+  }
+}
+
+/**
+ * Fetch partners list
+ * @param {any} [filter]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchPartners(filter = {}) {
+  try {
+    const list = await invoke('list_partners', filter);
+    appState.partners = list || [];
+    return appState.partners;
+  } catch (err) {
+    console.error("Failed to fetch partners:", err);
+    return [];
+  }
+}
+
+/**
+ * Create a partner / customer
+ * @param {string | { name: string, tax_id?: string, taxId?: string, is_customer?: boolean, isCustomer?: boolean, is_vendor?: boolean, isVendor?: boolean }} input
+ * @param {string | null} [taxId]
+ * @returns {Promise<any>}
+ */
+export async function createPartnerAction(input, taxId = null) {
+  let name = '';
+  let targetTaxId = null;
+  let is_customer = true;
+  let is_vendor = false;
+
+  if (typeof input === 'object' && input !== null) {
+    name = (input.name || '').trim();
+    targetTaxId = input.tax_id !== undefined ? input.tax_id : input.taxId;
+    if (input.is_customer !== undefined) is_customer = input.is_customer;
+    else if (input.isCustomer !== undefined) is_customer = input.isCustomer;
+    if (input.is_vendor !== undefined) is_vendor = input.is_vendor;
+    else if (input.isVendor !== undefined) is_vendor = input.isVendor;
+  } else if (typeof input === 'string') {
+    name = input.trim();
+    targetTaxId = taxId;
+  }
+
+  if (!name) {
+    throw new Error('客戶名稱為必填項目');
+  }
+  const normalizedTaxId = targetTaxId && typeof targetTaxId === 'string' && targetTaxId.trim() ? targetTaxId.trim() : null;
+
+  try {
+    const partner = await invoke('create_partner', {
+      name,
+      is_customer,
+      is_vendor,
+      tax_id: normalizedTaxId
+    });
+    await fetchPartners();
+    showToast(`已成功建立客戶「${name}」！`);
+    return partner;
+  } catch (err) {
+    console.error("Failed to create partner:", err);
     throw err;
   }
 }

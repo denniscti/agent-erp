@@ -15,6 +15,7 @@
     "test:members": "node --test tests/member-management.test.js",
     "test:departments": "node --test tests/department-management.test.js",
     "test:skills": "node --test tests/department-skills.test.js",
+    "test:customers": "node --test tests/customer-partner-management.test.js",
     "test:onboarding": "node --test tests/onboarding-greeting.test.js",
     "test:llm": "node ./scripts/test-nvidia-api.mjs",
     "seed:data": "node ./scripts/seed-test-data.mjs",
