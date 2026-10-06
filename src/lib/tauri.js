@@ -736,6 +736,7 @@ export async function invoke(cmd, args = {}) {
         id: `dept_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
         name: trimmedName,
         parent_id: normalizedParentId,
+        skills: [],
         created_at: now
       };
       mockDepartments.push(newDept);
@@ -745,6 +746,23 @@ export async function invoke(cmd, args = {}) {
 
     case 'list_departments': {
       return [...mockDepartments];
+    }
+
+    case 'update_department_skills': {
+      const { department_id, departmentId, skills } = args;
+      const targetId = (department_id || departmentId || '').trim();
+      if (!targetId) {
+        throw new Error('Department ID cannot be empty');
+      }
+      const dept = mockDepartments.find(d => d.id === targetId);
+      if (!dept) {
+        throw new Error(`Department not found: ${targetId}`);
+      }
+      const rawSkills = Array.isArray(skills) ? skills : [];
+      const cleanSkills = [...new Set(rawSkills.map(s => String(s).trim()).filter(Boolean))].sort();
+      dept.skills = cleanSkills;
+      saveStorage('agent_erp_mock_departments', mockDepartments);
+      return { ...dept };
     }
 
     case 'detect_department_intent': {

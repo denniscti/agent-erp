@@ -14,6 +14,7 @@
     "test:workflow": "node --test tests/workflow-harness.test.js",
     "test:members": "node --test tests/member-management.test.js",
     "test:departments": "node --test tests/department-management.test.js",
+    "test:skills": "node --test tests/department-skills.test.js",
     "test:onboarding": "node --test tests/onboarding-greeting.test.js",
     "test:llm": "node ./scripts/test-nvidia-api.mjs",
     "seed:data": "node ./scripts/seed-test-data.mjs",

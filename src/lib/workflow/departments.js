@@ -156,6 +156,8 @@ export const listDepartmentsToolHandler = {
 
 /** @type {import('./types.js').AgentProfile} */
 export const departmentAgentProfile = {
+  id: 'department.manage',
+  domain: 'department',
   systemPrompt: '你是一個組織架構助理。請根據使用者的意圖選擇合適的工具進行呼叫。如果使用者的意圖不符合任何工具，請直接回覆文字，不要呼叫任何工具。',
   tools: [
     listDepartmentsToolHandler.definition,

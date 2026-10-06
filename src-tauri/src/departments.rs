@@ -10,6 +10,8 @@ pub struct Department {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
     pub created_at: i64,
 }
 
@@ -26,10 +28,17 @@ pub fn create_departments_table(conn: &rusqlite::Connection) -> Result<(), rusql
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             parent_id TEXT,
+            skills TEXT DEFAULT '[]',
             created_at INTEGER NOT NULL
         )",
         [],
     )?;
+
+    // Backward compatibility migration for pre-existing tables
+    let _ = conn.execute(
+        "ALTER TABLE departments ADD COLUMN skills TEXT DEFAULT '[]'",
+        [],
+    );
 
     Ok(())
 }
@@ -68,8 +77,8 @@ pub fn create_department_impl(
     );
 
     conn.execute(
-        "INSERT INTO departments (id, name, parent_id, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO departments (id, name, parent_id, skills, created_at)
+         VALUES (?1, ?2, ?3, '[]', ?4)",
         params![id, trimmed_name, trimmed_parent_id, now],
     )
     .map_err(|e| format!("Failed to insert department: {}", e))?;
@@ -78,6 +87,7 @@ pub fn create_department_impl(
         id,
         name: trimmed_name.to_string(),
         parent_id: trimmed_parent_id,
+        skills: vec![],
         created_at: now,
     })
 }
@@ -85,16 +95,22 @@ pub fn create_department_impl(
 // Usecase: list_departments
 pub fn list_departments_impl(conn: &rusqlite::Connection) -> Result<Vec<Department>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id, created_at FROM departments ORDER BY created_at ASC")
+        .prepare("SELECT id, name, parent_id, skills, created_at FROM departments ORDER BY created_at ASC")
         .map_err(|e| format!("Failed to prepare list_departments query: {}", e))?;
 
     let rows = stmt
         .query_map([], |row| {
+            let skills_str: Option<String> = row.get(3).ok();
+            let skills: Vec<String> = skills_str
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
             Ok(Department {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 parent_id: row.get(2)?,
-                created_at: row.get(3)?,
+                skills,
+                created_at: row.get(4)?,
             })
         })
         .map_err(|e| format!("Failed to query departments: {}", e))?;
@@ -105,6 +121,61 @@ pub fn list_departments_impl(conn: &rusqlite::Connection) -> Result<Vec<Departme
     }
 
     Ok(departments)
+}
+
+// Usecase: update_department_skills
+pub fn update_department_skills_impl(
+    conn: &rusqlite::Connection,
+    department_id: &str,
+    skills: Vec<String>,
+) -> Result<Department, String> {
+    let trimmed_id = department_id.trim();
+    if trimmed_id.is_empty() {
+        return Err("Department ID cannot be empty".to_string());
+    }
+
+    let mut check_stmt = conn
+        .prepare("SELECT id, name, parent_id, created_at FROM departments WHERE id = ?1 LIMIT 1")
+        .map_err(|e| format!("Failed to prepare department check query: {}", e))?;
+
+    let dept_info = check_stmt
+        .query_row(params![trimmed_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|_| format!("Department not found: {}", trimmed_id))?;
+
+    let unique_skills: Vec<String> = {
+        let mut set = std::collections::BTreeSet::new();
+        for s in skills {
+            let trimmed = s.trim().to_string();
+            if !trimmed.is_empty() {
+                set.insert(trimmed);
+            }
+        }
+        set.into_iter().collect()
+    };
+
+    let skills_json = serde_json::to_string(&unique_skills)
+        .map_err(|e| format!("Failed to serialize skills: {}", e))?;
+
+    conn.execute(
+        "UPDATE departments SET skills = ?1 WHERE id = ?2",
+        params![skills_json, trimmed_id],
+    )
+    .map_err(|e| format!("Failed to update department skills: {}", e))?;
+
+    Ok(Department {
+        id: dept_info.0,
+        name: dept_info.1,
+        parent_id: dept_info.2,
+        skills: unique_skills,
+        created_at: dept_info.3,
+    })
 }
 
 // Delivery layer: Tauri Commands
@@ -132,6 +203,19 @@ pub async fn list_departments<R: tauri::Runtime>(
     list_departments_impl(&conn)
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn update_department_skills<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    department_id: String,
+    skills: Vec<String>,
+) -> Result<Department, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn =
+        rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
+    update_department_skills_impl(&conn, &department_id, skills)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,11 +236,12 @@ mod tests {
         // When: create_department_impl is executed
         let result = create_department_impl(&conn, name.clone(), parent_id);
 
-        // Then: The department is created successfully with no parent_id
+        // Then: The department is created successfully with no parent_id and empty skills
         assert!(result.is_ok());
         let dept = result.unwrap();
         assert_eq!(dept.name, name);
         assert_eq!(dept.parent_id, None);
+        assert_eq!(dept.skills, Vec::<String>::new());
         assert!(dept.created_at > 0);
         assert!(dept.id.starts_with("dept_"));
     }
@@ -328,5 +413,61 @@ mod tests {
         // Then: Duplicate check is global and rejects creation
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "部門「銷售部」已存在，請使用不同名稱");
+    }
+
+    #[test]
+    fn test_tc_dept_skills_01_update_department_skills_success() {
+        // Given: An existing department
+        let conn = setup_test_db();
+        let dept = create_department_impl(&conn, "資訊部".to_string(), None).unwrap();
+        assert_eq!(dept.skills, Vec::<String>::new());
+
+        // When: update_department_skills_impl is called with skills
+        let skills = vec!["department.manage".to_string(), "customer.view".to_string()];
+        let updated = update_department_skills_impl(&conn, &dept.id, skills.clone()).unwrap();
+
+        // Then: Department skills are updated and deduplicated
+        assert_eq!(
+            updated.skills,
+            vec!["customer.view".to_string(), "department.manage".to_string()]
+        );
+
+        // And: list_departments_impl returns the updated skills
+        let list = list_departments_impl(&conn).unwrap();
+        let found = list.into_iter().find(|d| d.id == dept.id).unwrap();
+        assert_eq!(
+            found.skills,
+            vec!["customer.view".to_string(), "department.manage".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_tc_dept_skills_02_update_department_skills_not_found() {
+        // Given: Empty database
+        let conn = setup_test_db();
+
+        // When: update_department_skills_impl is called with nonexistent department ID
+        let result = update_department_skills_impl(
+            &conn,
+            "nonexistent_id",
+            vec!["customer.view".to_string()],
+        );
+
+        // Then: Error is returned
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Department not found: nonexistent_id");
+    }
+
+    #[test]
+    fn test_tc_dept_skills_03_update_department_skills_empty_id() {
+        // Given: An initialized database
+        let conn = setup_test_db();
+
+        // When: update_department_skills_impl is called with empty department ID
+        let result = update_department_skills_impl(&conn, "   ", vec!["customer.view".to_string()]);
+
+        // Then: Validation error is returned
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Department ID cannot be empty");
     }
 }

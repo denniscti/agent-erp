@@ -11,6 +11,7 @@
 import { invoke, check, relaunch } from './tauri.js';
 import { loadModule } from './registry.js';
 import { executeConfirmation, executeCancellation } from './workflow/harness.js';
+import { getDeclaredSkills, getSkillsByDomain, KNOWN_DOMAINS } from './workflow/index.js';
 
 function loadTaskPanelCollapsed() {
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -162,9 +163,11 @@ pub_fn("fetchAuditLogs");
 export async function fetchAuditLogs() {
   try {
     const list = await invoke('get_audit_logs');
-    appState.auditLogs = list;
+    appState.auditLogs = list || [];
+    return appState.auditLogs;
   } catch (err) {
     console.error("Failed to fetch audit logs:", err);
+    return [];
   }
 }
 
@@ -798,6 +801,116 @@ export async function createDepartmentAction(name, parentId = null) {
     throw err;
   }
 }
+
+/**
+ * Filter declared skills list by search keyword (case-insensitive across name, id, domain, description)
+ * @param {import('./workflow/types.js').DeclaredSkill[]} skills
+ * @param {string} [keyword]
+ * @returns {import('./workflow/types.js').DeclaredSkill[]}
+ */
+export function filterDeclaredSkills(skills, keyword) {
+  if (!skills || !Array.isArray(skills)) return [];
+  if (!keyword || typeof keyword !== 'string' || !keyword.trim()) return skills;
+  const lower = keyword.trim().toLowerCase();
+  return skills.filter(s => {
+    const idMatch = s.id && s.id.toLowerCase().includes(lower);
+    const nameMatch = s.name && s.name.toLowerCase().includes(lower);
+    const domainMatch = s.domain && s.domain.toLowerCase().includes(lower);
+    const descMatch = s.description && s.description.toLowerCase().includes(lower);
+    return idMatch || nameMatch || domainMatch || descMatch;
+  });
+}
+
+/**
+ * Update department available skills and record sensitive audit logs.
+ * @param {string} departmentId
+ * @param {string[]} skillIds
+ * @param {string | null} [operator]
+ * @returns {Promise<any>}
+ */
+export async function updateDepartmentSkillsAction(departmentId, skillIds, operator = undefined) {
+  const trimmedId = (departmentId || '').trim();
+  if (!trimmedId) {
+    throw new Error('部門 ID 為必填項目');
+  }
+  const depts = appState.departments || [];
+  const targetDept = depts.find(d => d.id === trimmedId);
+  if (!targetDept) {
+    throw new Error(`找不到指定的部門：${trimmedId}`);
+  }
+
+  const rawSkills = Array.isArray(skillIds) ? skillIds : [];
+  const cleanSkills = [...new Set(rawSkills.map(s => String(s).trim()).filter(Boolean))].sort();
+
+  const prevSkills = new Set(targetDept.skills || []);
+  const nextSkills = new Set(cleanSkills);
+
+  const addedSkills = cleanSkills.filter(s => !prevSkills.has(s));
+  const removedSkills = (targetDept.skills || []).filter(s => !nextSkills.has(s));
+
+  const op = (operator || appState.authUser?.display_name || appState.authUser?.email || 'user').trim();
+
+  try {
+    const updated = await invoke('update_department_skills', {
+      department_id: trimmedId,
+      skills: cleanSkills
+    });
+
+    // Record audit log for each granted skill
+    for (const sk of addedSkills) {
+      await invoke('record_audit_log', {
+        action_type: 'grant_department_skill',
+        arguments: JSON.stringify({
+          department_id: trimmedId,
+          department_name: targetDept.name,
+          skill_id: sk,
+          action: 'grant'
+        }),
+        decision: 'approved',
+        operator: op
+      });
+    }
+
+    // Record audit log for each revoked skill
+    for (const sk of removedSkills) {
+      await invoke('record_audit_log', {
+        action_type: 'revoke_department_skill',
+        arguments: JSON.stringify({
+          department_id: trimmedId,
+          department_name: targetDept.name,
+          skill_id: sk,
+          action: 'revoke'
+        }),
+        decision: 'approved',
+        operator: op
+      });
+    }
+
+    // If no specific diff (e.g. batch same), still record audit update
+    if (addedSkills.length === 0 && removedSkills.length === 0) {
+      await invoke('record_audit_log', {
+        action_type: 'update_department_skills',
+        arguments: JSON.stringify({
+          department_id: trimmedId,
+          department_name: targetDept.name,
+          skills: cleanSkills
+        }),
+        decision: 'approved',
+        operator: op
+      });
+    }
+
+    await fetchDepartments();
+    await fetchAuditLogs();
+    showToast(`已成功更新「${targetDept.name}」的可用 Skill 清單`);
+    return updated;
+  } catch (err) {
+    console.error("Failed to update department skills:", err);
+    throw err;
+  }
+}
+
+export { getDeclaredSkills, getSkillsByDomain, KNOWN_DOMAINS };
 
 /**
  * Fetch tenant members from Mock / Backend

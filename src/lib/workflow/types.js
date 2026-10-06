@@ -34,6 +34,8 @@
 
 /**
  * @typedef {Object} AgentProfile
+ * @property {string} [id] - Unique skill identifier (e.g., 'customer.create_basic_profile', 'department.manage')
+ * @property {string} [domain] - Declared skill domain from KNOWN_DOMAINS (e.g., 'department', 'customer', 'vendor')
  * @property {string} systemPrompt - Prompt defining the role and boundary of the agent.
  * @property {ToolDefinition[]} tools - Array of allowed tool definitions.
  * @property {ToolHandler[]} toolHandlers - Array of corresponding tool handler instances.
@@ -43,6 +45,14 @@
  * @property {string} [quickAction.desc] - Description of quick action card.
  * @property {string} [quickAction.buttonText] - Text on the action button.
  * @property {(context?: any) => any} [quickAction.trigger] - Handler to trigger quick action.
+ */
+
+/**
+ * @typedef {Object} DeclaredSkill
+ * @property {string} id - Stable, unique skill identifier (e.g. 'department.manage')
+ * @property {string} name - Human readable skill name
+ * @property {string} domain - Domain classification from KNOWN_DOMAINS
+ * @property {string} [description] - Description of the skill capability
  */
 
 /**
@@ -70,4 +80,5 @@
  */
 
 export {};
+
 

@@ -669,6 +669,7 @@ pub fn run() {
             tasks::get_task_messages,
             departments::create_department,
             departments::list_departments,
+            departments::update_department_skills,
             llm::detect_department_intent,
             llm_traces::record_llm_trace,
             llm_traces::update_llm_trace_decision,

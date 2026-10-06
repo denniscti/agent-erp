@@ -27,7 +27,12 @@
     computeSkillDiff,
     canManageMembers,
     fetchDepartments,
-    createDepartmentAction
+    createDepartmentAction,
+    updateDepartmentSkillsAction,
+    filterDeclaredSkills,
+    getDeclaredSkills,
+    getSkillsByDomain,
+    KNOWN_DOMAINS
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -57,6 +62,77 @@
   let newDepartmentParentId = $state('');
   let isAddingDepartment = $state(false);
   let departmentError = $state('');
+
+  // Department Skill management state (Issue #115)
+  let activeSkillDeptId = $state(null);
+  let skillSearchKeyword = $state('');
+  let isUpdatingDeptSkill = $state(false);
+  let deptSkillError = $state('');
+
+  let effectiveSkillDeptId = $derived(
+    activeSkillDeptId || (appState.departments.length > 0 ? appState.departments[0].id : null)
+  );
+
+  let currentSkillDept = $derived(
+    appState.departments.find(d => d.id === effectiveSkillDeptId) || null
+  );
+
+  let allDeclaredSkills = $derived(getDeclaredSkills());
+  let filteredDeclaredSkills = $derived(filterDeclaredSkills(allDeclaredSkills, skillSearchKeyword));
+
+  let skillGroupsByDomain = $derived.by(() => {
+    const map = new Map();
+    // Pre-populate with known domains
+    for (const kd of KNOWN_DOMAINS) {
+      map.set(kd.id, {
+        domain: kd.id,
+        name: kd.name,
+        description: kd.description,
+        skills: []
+      });
+    }
+
+    // Populate skills
+    for (const sk of filteredDeclaredSkills) {
+      const dom = sk.domain || 'other';
+      if (!map.has(dom)) {
+        map.set(dom, {
+          domain: dom,
+          name: dom,
+          description: '',
+          skills: []
+        });
+      }
+      map.get(dom).skills.push(sk);
+    }
+
+    // Return groups that have at least one skill
+    return Array.from(map.values()).filter(g => g.skills.length > 0);
+  });
+
+  async function handleToggleDepartmentSkill(deptId, skillId, isCurrentlyEnabled) {
+    if (!deptId || !skillId) return;
+    const dept = appState.departments.find(d => d.id === deptId);
+    if (!dept) return;
+
+    const currentSkills = dept.skills || [];
+    let nextSkills;
+    if (isCurrentlyEnabled) {
+      nextSkills = currentSkills.filter(s => s !== skillId);
+    } else {
+      nextSkills = [...currentSkills, skillId];
+    }
+
+    isUpdatingDeptSkill = true;
+    deptSkillError = '';
+    try {
+      await updateDepartmentSkillsAction(deptId, nextSkills);
+    } catch (err) {
+      deptSkillError = err?.message || '更新部門 Skill 設定失敗';
+    } finally {
+      isUpdatingDeptSkill = false;
+    }
+  }
 
   // Existing member department editing state
   let editingMemberId = $state(null);
@@ -957,6 +1033,149 @@
                       {/each}
                     {/if}
                   </div>
+                </div>
+
+                <!-- Department Usable Skills Configuration (Issue #115) -->
+                <div class="settings-group glass-panel" style="margin-top: 24px;">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                      <h3 style="margin: 0;">可用 Skill 設定 (Department Usable Skills)</h3>
+                      <span class="badge badge-cyan" style="font-size: 0.72rem;">二元授權清單</span>
+                    </div>
+                    <button class="btn btn-sm" onclick={fetchDepartments}>
+                      重新整理
+                    </button>
+                  </div>
+                  <p class="settings-desc">為每個部門配置可呼叫之 Agent Skill 權限清單。依據最小授權原則管理各部門之任務能力。</p>
+
+                  <!-- Mandatory Security Disclaimer -->
+                  <div class="skill-disclaimer-banner" style="margin-bottom: 16px; padding: 12px 14px; border-radius: 6px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.35); color: #fbbf24; font-size: 0.82rem; display: flex; align-items: flex-start; gap: 10px; line-height: 1.5;">
+                    <span style="font-size: 1.15rem; line-height: 1;">⚠️</span>
+                    <div>
+                      <strong>僅供情境設計，尚未擋真實存取：</strong>目前 Rust 端的 Tauri command 尚未實作強制授權檢查，此設定介面為情境設計與二元授權清單宣告，設定完成不代表底層 API 已被強制阻斷。
+                    </div>
+                  </div>
+
+                  {#if appState.departments.length === 0}
+                    <div class="empty-audit" style="padding: 24px; text-align: center;">
+                      請先於上方「部門管理」建立組織部門，方可進行 Skill 授權配置。
+                    </div>
+                  {:else}
+                    <!-- Department Selector Tabs -->
+                    <div style="margin-bottom: 16px;">
+                      <div style="font-size: 0.78rem; font-weight: 600; color: var(--text-muted); margin-bottom: 8px;">
+                        選擇目標部門：
+                      </div>
+                      <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                        {#each appState.departments as dept (dept.id)}
+                          {@const isSelected = effectiveSkillDeptId === dept.id}
+                          {@const skillCount = (dept.skills || []).length}
+                          <button
+                            type="button"
+                            class="btn btn-sm"
+                            onclick={() => activeSkillDeptId = dept.id}
+                            style="padding: 6px 14px; border-radius: 6px; font-size: 0.82rem; border: 1px solid {isSelected ? 'rgba(var(--accent-cyan), 0.8)' : 'var(--border-color)'}; background: {isSelected ? 'rgba(var(--accent-cyan), 0.18)' : 'rgba(255, 255, 255, 0.03)'}; color: {isSelected ? 'rgb(var(--accent-cyan))' : 'var(--text-secondary)'}; font-weight: {isSelected ? '600' : 'normal'}; display: flex; align-items: center; gap: 6px;"
+                          >
+                            <span>🏢 {dept.name}</span>
+                            <span class="badge {isSelected ? 'badge-cyan' : 'badge-slate'}" style="font-size: 0.68rem; padding: 1px 5px;">
+                              {skillCount}
+                            </span>
+                          </button>
+                        {/each}
+                      </div>
+                    </div>
+
+                    <!-- Selected Department Active Header & Search Box -->
+                    {#if currentSkillDept}
+                      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; padding: 12px 14px; background: rgba(0, 0, 0, 0.25); border-radius: 6px; border: 1px solid var(--border-color);">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                          <span style="font-size: 0.95rem; font-weight: 600; color: var(--text-primary);">
+                            部門：<span style="color: rgb(var(--accent-cyan));">{currentSkillDept.name}</span>
+                          </span>
+                          <span class="badge badge-slate" style="font-size: 0.72rem; font-family: monospace;">
+                            {currentSkillDept.id}
+                          </span>
+                          <span style="font-size: 0.8rem; color: var(--text-muted);">
+                            （已啟用 {(currentSkillDept.skills || []).length} 個 Skills）
+                          </span>
+                        </div>
+
+                        <!-- Search Filter -->
+                        <div style="flex: 1; max-width: 320px; min-width: 200px; position: relative;">
+                          <input
+                            type="text"
+                            class="form-input"
+                            placeholder="🔍 搜尋 Skill 名稱、識別碼、領域..."
+                            bind:value={skillSearchKeyword}
+                            style="width: 100%; padding: 6px 10px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                          />
+                        </div>
+                      </div>
+
+                      {#if deptSkillError}
+                        <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{deptSkillError}</div>
+                      {/if}
+
+                      <!-- Skills Grouped by Domain -->
+                      <div class="skills-domain-list" style="display: flex; flex-direction: column; gap: 16px;">
+                        {#if skillGroupsByDomain.length === 0}
+                          <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 0.85rem;">
+                            未找到符合「{skillSearchKeyword}」的 Skill
+                          </div>
+                        {:else}
+                          {#each skillGroupsByDomain as group (group.domain)}
+                            <div class="skill-domain-card" style="padding: 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                              <!-- Domain Header -->
+                              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.06);">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                  <span style="font-size: 0.95rem;">📁</span>
+                                  <span style="font-weight: 600; color: var(--text-primary); font-size: 0.88rem;">{group.name}</span>
+                                  <span class="badge badge-slate" style="font-size: 0.7rem; font-family: monospace;">{group.domain}</span>
+                                </div>
+                                <span style="font-size: 0.75rem; color: var(--text-muted);">
+                                  {group.description || ''}
+                                </span>
+                              </div>
+
+                              <!-- Skills in Domain -->
+                              <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px;">
+                                {#each group.skills as skill (skill.id)}
+                                  {@const isEnabled = (currentSkillDept.skills || []).includes(skill.id)}
+                                  <label
+                                    class="skill-item-row"
+                                    style="display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border-radius: 6px; background: {isEnabled ? 'rgba(var(--accent-cyan), 0.07)' : 'rgba(0, 0, 0, 0.2)'}; border: 1px solid {isEnabled ? 'rgba(var(--accent-cyan), 0.4)' : 'rgba(255, 255, 255, 0.06)'}; cursor: pointer; transition: all 0.15s ease;"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isEnabled}
+                                      disabled={isUpdatingDeptSkill}
+                                      onchange={() => handleToggleDepartmentSkill(currentSkillDept.id, skill.id, isEnabled)}
+                                      style="margin-top: 3px; accent-color: rgb(var(--accent-cyan)); cursor: pointer; width: 16px; height: 16px;"
+                                    />
+                                    <div style="flex: 1; min-width: 0;">
+                                      <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+                                        <span style="font-weight: 600; color: {isEnabled ? 'var(--text-primary)' : 'var(--text-secondary)'}; font-size: 0.84rem;">
+                                          {skill.name}
+                                        </span>
+                                        <span class="badge {isEnabled ? 'badge-cyan' : 'badge-slate'}" style="font-size: 0.68rem; font-family: monospace;">
+                                          {skill.id}
+                                        </span>
+                                      </div>
+                                      {#if skill.description}
+                                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 3px; line-height: 1.35;">
+                                          {skill.description}
+                                        </div>
+                                      {/if}
+                                    </div>
+                                  </label>
+                                {/each}
+                              </div>
+                            </div>
+                          {/each}
+                        {/if}
+                      </div>
+                    {/if}
+                  {/if}
                 </div>
                 {/if}
               </div>
