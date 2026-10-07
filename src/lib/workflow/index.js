@@ -4,7 +4,10 @@
  */
 
 import { departmentAgentProfile } from './departments.js';
-import { customerCreateBasicProfileAgentProfile } from './partners.js';
+import {
+  customerCreateBasicProfileAgentProfile,
+  vendorCreateBasicProfileAgentProfile
+} from './partners.js';
 import { isKnownDomain } from './domains.js';
 
 export * from './types.js';
@@ -25,6 +28,9 @@ registerAgentProfile('departments', departmentAgentProfile);
 registerAgentProfile('customer.create_basic_profile', customerCreateBasicProfileAgentProfile);
 registerAgentProfile('task_m3_customer', customerCreateBasicProfileAgentProfile);
 registerAgentProfile('customers', customerCreateBasicProfileAgentProfile);
+registerAgentProfile('vendor.create_basic_profile', vendorCreateBasicProfileAgentProfile);
+registerAgentProfile('task_m4_vendor', vendorCreateBasicProfileAgentProfile);
+registerAgentProfile('vendors', vendorCreateBasicProfileAgentProfile);
 
 /**
  * System declared skills registry
@@ -86,7 +92,12 @@ export function getAgentProfileForTask(task) {
     return departmentAgentProfile;
   }
 
-  // 4. Fallback check for customer subtask title
+  // 4. Fallback check for vendor subtask title
+  if (task.title && (task.title.includes('新增供應商') || task.title.includes('建立供應商') || task.title.includes('供應商') || task.title.includes('廠商'))) {
+    return vendorCreateBasicProfileAgentProfile;
+  }
+
+  // 5. Fallback check for customer subtask title
   if (task.title && (task.title.includes('新增客戶') || task.title.includes('建立客戶') || task.title.includes('客戶'))) {
     return customerCreateBasicProfileAgentProfile;
   }

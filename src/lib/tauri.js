@@ -786,13 +786,30 @@ export async function invoke(cmd, args = {}) {
       if (!trimmedName) {
         throw new Error('Partner name cannot be empty');
       }
-      if (mockPartners.some(p => p.name.trim().toLowerCase() === trimmedName.toLowerCase())) {
-        throw new Error(`合作夥伴／客戶「${trimmedName}」已存在，請使用不同名稱`);
-      }
       const rawTaxId = tax_id !== undefined ? tax_id : taxId;
       const normalizedTaxId = rawTaxId && typeof rawTaxId === 'string' && rawTaxId.trim() ? rawTaxId.trim() : null;
-      const custFlag = is_customer !== undefined ? is_customer : (isCustomer !== undefined ? isCustomer : true);
       const vendFlag = is_vendor !== undefined ? is_vendor : (isVendor !== undefined ? isVendor : false);
+      const custFlag = is_customer !== undefined ? is_customer : (isCustomer !== undefined ? isCustomer : !vendFlag);
+
+      const existingIndex = mockPartners.findIndex(p => p.name.trim().toLowerCase() === trimmedName.toLowerCase());
+      if (existingIndex >= 0) {
+        const existing = mockPartners[existingIndex];
+        const needAddVendor = !!vendFlag && !existing.is_vendor;
+        const needAddCustomer = !!custFlag && !existing.is_customer;
+
+        if (needAddVendor || needAddCustomer) {
+          existing.is_customer = existing.is_customer || !!custFlag;
+          existing.is_vendor = existing.is_vendor || !!vendFlag;
+          if (normalizedTaxId) {
+            existing.tax_id = normalizedTaxId;
+          }
+          saveStorage('agent_erp_mock_partners', mockPartners);
+          return { ...existing };
+        }
+
+        const roleLabel = (vendFlag && !custFlag) ? '供應商' : '客戶';
+        throw new Error(`合作夥伴／${roleLabel}「${trimmedName}」已存在，請使用不同名稱`);
+      }
 
       const now = Math.floor(Date.now() / 1000);
       const newPartner = {

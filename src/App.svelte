@@ -65,11 +65,21 @@
   let isAddingDepartment = $state(false);
   let departmentError = $state('');
 
-  // Customer / Partner management state (Issue #117)
+  // Customer / Partner / Vendor management state (Issue #117, #119)
   let newPartnerName = $state('');
   let newPartnerTaxId = $state('');
+  let newPartnerRole = $state('customer'); // 'customer' | 'vendor' | 'both'
+  let partnerFilter = $state('all'); // 'all' | 'customer' | 'vendor'
   let isAddingPartner = $state(false);
   let partnerError = $state('');
+
+  let filteredPartners = $derived(
+    appState.partners.filter(p => {
+      if (partnerFilter === 'customer') return p.is_customer;
+      if (partnerFilter === 'vendor') return p.is_vendor;
+      return true;
+    })
+  );
 
   // Department Skill management state (Issue #115)
   let activeSkillDeptId = $state(null);
@@ -259,22 +269,24 @@
   async function handleCreatePartner(e) {
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
     if (!newPartnerName.trim()) {
-      partnerError = '請填寫客戶名稱';
+      partnerError = '請填寫夥伴／廠商名稱';
       return;
     }
     isAddingPartner = true;
     partnerError = '';
     try {
+      const isCustomer = newPartnerRole === 'customer' || newPartnerRole === 'both';
+      const isVendor = newPartnerRole === 'vendor' || newPartnerRole === 'both';
       await createPartnerAction({
         name: newPartnerName.trim(),
         taxId: newPartnerTaxId.trim() || null,
-        isCustomer: true,
-        isVendor: false
+        isCustomer,
+        isVendor
       });
       newPartnerName = '';
       newPartnerTaxId = '';
     } catch (err) {
-      partnerError = err?.message || '新增客戶失敗';
+      partnerError = err?.message || '新增夥伴失敗';
     } finally {
       isAddingPartner = false;
     }
@@ -1212,42 +1224,80 @@
                 </div>
                 {/if}
 
-                <!-- Customer & Partner Management (Issue #117) -->
+                <!-- Customer & Vendor Partner Management (Issue #117, #119) -->
                 <div class="settings-group glass-panel" style="margin-top: 24px;">
                   <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
                     <div style="display: flex; align-items: center; gap: 8px;">
-                      <h3 style="margin: 0;">客戶基本資料管理 (Customer Management)</h3>
+                      <h3 style="margin: 0;">合作夥伴基本資料管理 (Partner Management)</h3>
                       <span class="badge badge-cyan" style="font-size: 0.72rem;">Partner 聚合根</span>
                     </div>
-                    <button class="btn btn-sm" onclick={() => fetchPartners()}>
-                      重新整理客戶
-                    </button>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                      <div class="filter-row" style="display: flex; gap: 4px; background: rgba(0, 0, 0, 0.2); padding: 2px; border-radius: 6px;">
+                        <button 
+                          class="filter-btn {partnerFilter === 'all' ? 'active' : ''}" 
+                          onclick={() => partnerFilter = 'all'}
+                          style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'all' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'all' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'all' ? '600' : 'normal'};"
+                        >
+                          全部 ({appState.partners.length})
+                        </button>
+                        <button 
+                          class="filter-btn {partnerFilter === 'customer' ? 'active' : ''}" 
+                          onclick={() => partnerFilter = 'customer'}
+                          style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'customer' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'customer' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'customer' ? '600' : 'normal'};"
+                        >
+                          客戶 ({appState.partners.filter(p => p.is_customer).length})
+                        </button>
+                        <button 
+                          class="filter-btn {partnerFilter === 'vendor' ? 'active' : ''}" 
+                          onclick={() => partnerFilter = 'vendor'}
+                          style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'vendor' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'vendor' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'vendor' ? '600' : 'normal'};"
+                        >
+                          供應商 ({appState.partners.filter(p => p.is_vendor).length})
+                        </button>
+                      </div>
+                      <button class="btn btn-sm" onclick={() => fetchPartners()}>
+                        重新整理
+                      </button>
+                    </div>
                   </div>
-                  <p class="settings-desc">登記與維護客戶基本檔案（名稱、統一編號／稅號）。作為後續採購受理、信用查詢與交易對象的基準資料庫。</p>
+                  <p class="settings-desc">登記與維護合作夥伴基本檔案（名稱、統一編號／稅號、身份角色）。支援客戶與供應商身份疊加，作為後續銷售受理、採購與交易對象的基準資料庫。</p>
 
-                  <!-- Add Customer Form -->
+                  <!-- Add Partner Form -->
                   <form onsubmit={handleCreatePartner} class="customer-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
-                    <div style="flex: 2; min-width: 200px;">
-                      <label for="partner-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">客戶名稱（必填）</label>
+                    <div style="flex: 2; min-width: 180px;">
+                      <label for="partner-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">夥伴／廠商名稱（必填）</label>
                       <input 
                         id="partner-name-input"
                         type="text" 
                         class="form-input" 
-                        placeholder="例：台灣積體電路製造股份有限公司、聯發科技" 
+                        placeholder="例：欣興電子、台灣積體電路製造、聯發科技" 
                         bind:value={newPartnerName}
                         style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
                       />
                     </div>
-                    <div style="flex: 1.5; min-width: 160px;">
+                    <div style="flex: 1.2; min-width: 140px;">
                       <label for="partner-tax-id-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">統一編號 / 稅號（選填）</label>
                       <input 
                         id="partner-tax-id-input"
                         type="text" 
                         class="form-input" 
-                        placeholder="例：22099131" 
+                        placeholder="例：11223344" 
                         bind:value={newPartnerTaxId}
                         style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
                       />
+                    </div>
+                    <div style="flex: 1.2; min-width: 130px;">
+                      <label for="partner-role-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">登記身份</label>
+                      <select
+                        id="partner-role-select"
+                        class="form-input"
+                        bind:value={newPartnerRole}
+                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                      >
+                        <option value="customer">🏢 客戶 (Customer)</option>
+                        <option value="vendor">🏭 供應商 (Vendor)</option>
+                        <option value="both">🌐 雙重身份 (Both)</option>
+                      </select>
                     </div>
                     <button 
                       type="submit" 
@@ -1255,7 +1305,7 @@
                       disabled={isAddingPartner}
                       style="height: 35px; white-space: nowrap; padding: 0 16px;"
                     >
-                      {#if isAddingPartner}新增中...{:else}+ 新增客戶{/if}
+                      {#if isAddingPartner}登記中...{:else}+ 登記夥伴{/if}
                     </button>
                   </form>
 
@@ -1263,16 +1313,22 @@
                     <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{partnerError}</div>
                   {/if}
 
-                  <!-- Customer List -->
+                  <!-- Partner List -->
                   <div class="customer-list" style="display: flex; flex-direction: column; gap: 8px;">
-                    {#if appState.partners.length === 0}
-                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無客戶資料，請透過上方表單或 AI 助理對話登記新客戶。</div>
+                    {#if filteredPartners.length === 0}
+                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無符合篩選條件的夥伴資料，請透過上方表單或 AI 助理對話登記。</div>
                     {:else}
-                      {#each appState.partners as partner (partner.id)}
+                      {#each filteredPartners as partner (partner.id)}
                         <div class="customer-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
                           <div style="display: flex; align-items: center; gap: 12px;">
                             <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-cyan), 0.12); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.95rem;">
-                              🏢
+                              {#if partner.is_customer && partner.is_vendor}
+                                🌐
+                              {:else if partner.is_vendor}
+                                🏭
+                              {:else}
+                                🏢
+                              {/if}
                             </div>
                             <div>
                               <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">

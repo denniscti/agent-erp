@@ -813,7 +813,18 @@ export async function createDepartmentAction(name, parentId = null) {
  */
 export async function fetchPartners(filter = {}) {
   try {
-    const list = await invoke('list_partners', filter);
+    const filterCustomer = filter?.filterCustomer !== undefined ? filter.filterCustomer : filter?.filter_customer;
+    const filterVendor = filter?.filterVendor !== undefined ? filter.filterVendor : filter?.filter_vendor;
+    const payload = {};
+    if (filterCustomer !== undefined) {
+      payload.filterCustomer = filterCustomer;
+      payload.filter_customer = filterCustomer;
+    }
+    if (filterVendor !== undefined) {
+      payload.filterVendor = filterVendor;
+      payload.filter_vendor = filterVendor;
+    }
+    const list = await invoke('list_partners', payload);
     appState.partners = list || [];
     return appState.partners;
   } catch (err) {
@@ -833,20 +844,39 @@ export async function createPartnerAction(input, taxId = null) {
   let targetTaxId = null;
   let is_customer = true;
   let is_vendor = false;
+  let hasExplicitCustomer = false;
+  let hasExplicitVendor = false;
 
   if (typeof input === 'object' && input !== null) {
     name = (input.name || '').trim();
     targetTaxId = input.tax_id !== undefined ? input.tax_id : input.taxId;
-    if (input.is_customer !== undefined) is_customer = input.is_customer;
-    else if (input.isCustomer !== undefined) is_customer = input.isCustomer;
-    if (input.is_vendor !== undefined) is_vendor = input.is_vendor;
-    else if (input.isVendor !== undefined) is_vendor = input.isVendor;
+    if (input.is_customer !== undefined) {
+      is_customer = input.is_customer;
+      hasExplicitCustomer = true;
+    } else if (input.isCustomer !== undefined) {
+      is_customer = input.isCustomer;
+      hasExplicitCustomer = true;
+    }
+    if (input.is_vendor !== undefined) {
+      is_vendor = input.is_vendor;
+      hasExplicitVendor = true;
+    } else if (input.isVendor !== undefined) {
+      is_vendor = input.isVendor;
+      hasExplicitVendor = true;
+    }
+
+    if (hasExplicitVendor && !hasExplicitCustomer) {
+      is_customer = !is_vendor;
+    }
   } else if (typeof input === 'string') {
     name = input.trim();
     targetTaxId = taxId;
   }
 
   if (!name) {
+    if (is_vendor && !is_customer) {
+      throw new Error('供應商名稱為必填項目');
+    }
     throw new Error('客戶名稱為必填項目');
   }
   const normalizedTaxId = targetTaxId && typeof targetTaxId === 'string' && targetTaxId.trim() ? targetTaxId.trim() : null;
@@ -854,17 +884,56 @@ export async function createPartnerAction(input, taxId = null) {
   try {
     const partner = await invoke('create_partner', {
       name,
+      isCustomer: is_customer,
+      isVendor: is_vendor,
+      taxId: normalizedTaxId,
       is_customer,
       is_vendor,
       tax_id: normalizedTaxId
     });
     await fetchPartners();
-    showToast(`已成功建立客戶「${name}」！`);
+    if (is_vendor && !is_customer) {
+      showToast(`已成功建立供應商「${name}」！`);
+    } else if (is_vendor && is_customer) {
+      showToast(`已成功建立合作夥伴「${name}」！`);
+    } else {
+      showToast(`已成功建立客戶「${name}」！`);
+    }
     return partner;
   } catch (err) {
     console.error("Failed to create partner:", err);
     throw err;
   }
+}
+
+/**
+ * Create a vendor action helper
+ * @param {string | { name: string, tax_id?: string, taxId?: string }} input
+ * @param {string | null} [taxId]
+ * @returns {Promise<any>}
+ */
+export async function createVendorAction(input, taxId = null) {
+  if (typeof input === 'object' && input !== null) {
+    return createPartnerAction({
+      isCustomer: false,
+      isVendor: true,
+      ...input
+    });
+  }
+  return createPartnerAction({
+    name: input,
+    taxId: (taxId && typeof taxId === 'string') ? taxId : undefined,
+    isCustomer: false,
+    isVendor: true
+  });
+}
+
+/**
+ * Fetch vendors list only
+ * @returns {Promise<any[]>}
+ */
+export async function fetchVendors() {
+  return fetchPartners({ filterVendor: true, filter_vendor: true });
 }
 
 /**
