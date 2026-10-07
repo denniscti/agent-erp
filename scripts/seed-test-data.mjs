@@ -171,7 +171,7 @@ async function seedSqlite() {
       let sqlScript = `
 BEGIN TRANSACTION;
 CREATE TABLE IF NOT EXISTS departments (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, parent_task_id TEXT, module_id TEXT NOT NULL, assignee TEXT NOT NULL, created_at INTEGER NOT NULL, completed_at INTEGER);
+CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, parent_task_id TEXT, module_id TEXT NOT NULL, assignee TEXT NOT NULL, skill_id TEXT, created_at INTEGER NOT NULL, completed_at INTEGER);
 CREATE TABLE IF NOT EXISTS task_messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, timestamp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS mirrored_orders (so_id TEXT PRIMARY KEY, customer_name TEXT NOT NULL, po_reference TEXT NOT NULL, items_json TEXT NOT NULL, total_amount REAL NOT NULL, profit_margin REAL NOT NULL, capacity_usage REAL NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, action_type TEXT NOT NULL, arguments TEXT NOT NULL, decision TEXT NOT NULL, operator TEXT NOT NULL, timestamp INTEGER NOT NULL);
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, action_type TEXT NOT
       }
 
       for (const t of SEED_DATA.tasks) {
-        sqlScript += `INSERT OR REPLACE INTO tasks (id, title, status, parent_task_id, module_id, assignee, created_at, completed_at) VALUES ('${t.id.replace(/'/g, "''")}', '${t.title.replace(/'/g, "''")}', '${t.status.replace(/'/g, "''")}', ${t.parent_task_id ? `'${t.parent_task_id.replace(/'/g, "''")}'` : 'NULL'}, '${t.module_id.replace(/'/g, "''")}', '${t.assignee.replace(/'/g, "''")}', ${t.created_at}, ${t.completed_at || 'NULL'});\n`;
+        sqlScript += `INSERT OR REPLACE INTO tasks (id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at) VALUES ('${t.id.replace(/'/g, "''")}', '${t.title.replace(/'/g, "''")}', '${t.status.replace(/'/g, "''")}', ${t.parent_task_id ? `'${t.parent_task_id.replace(/'/g, "''")}'` : 'NULL'}, '${t.module_id.replace(/'/g, "''")}', '${t.assignee.replace(/'/g, "''")}', ${t.skill_id ? `'${t.skill_id.replace(/'/g, "''")}'` : 'NULL'}, ${t.created_at}, ${t.completed_at || 'NULL'});\n`;
       }
 
       for (const m of SEED_DATA.taskMessages) {

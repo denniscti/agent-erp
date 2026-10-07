@@ -23,6 +23,7 @@ export * from './domains.js';
 const taskProfileMap = new Map();
 
 // Register built-in profiles
+registerAgentProfile('department.manage', departmentAgentProfile);
 registerAgentProfile('task_m2_dept', departmentAgentProfile);
 registerAgentProfile('departments', departmentAgentProfile);
 registerAgentProfile('customer.create_basic_profile', customerCreateBasicProfileAgentProfile);
@@ -71,33 +72,44 @@ const declaredSkillsList = [
 
 /**
  * Resolves the appropriate AgentProfile for a given task.
+ * Prioritizes direct lookup via task.skillId (or task.skill_id),
+ * with backward-compatible fallback to title keyword matching.
  * @param {any} task
  * @returns {import('./types.js').AgentProfile | null}
  */
 export function getAgentProfileForTask(task) {
   if (!task) return null;
 
-  // 1. Check exact task id match
+  // 1. Priority: Check declared skillId in taskProfileMap
+  const rawSkillId = task.skillId || task.skill_id;
+  const skillId = rawSkillId ? String(rawSkillId).trim() : '';
+  if (skillId && taskProfileMap.has(skillId)) {
+    return taskProfileMap.get(skillId) || null;
+  }
+
+  // 2. Check exact task id match
   if (task.id && taskProfileMap.has(task.id)) {
     return taskProfileMap.get(task.id) || null;
   }
 
-  // 2. Check moduleId match
-  if (task.moduleId && taskProfileMap.has(task.moduleId)) {
-    return taskProfileMap.get(task.moduleId) || null;
+  // 3. Check moduleId match
+  const rawModuleId = task.moduleId || task.module_id;
+  const moduleId = rawModuleId ? String(rawModuleId).trim() : '';
+  if (moduleId && taskProfileMap.has(moduleId)) {
+    return taskProfileMap.get(moduleId) || null;
   }
 
-  // 3. Fallback check for department subtask title
+  // 4. Fallback check for department subtask title
   if (task.title && task.title.includes('設定部門')) {
     return departmentAgentProfile;
   }
 
-  // 4. Fallback check for vendor subtask title
+  // 5. Fallback check for vendor subtask title
   if (task.title && (task.title.includes('新增供應商') || task.title.includes('建立供應商') || task.title.includes('供應商') || task.title.includes('廠商'))) {
     return vendorCreateBasicProfileAgentProfile;
   }
 
-  // 5. Fallback check for customer subtask title
+  // 6. Fallback check for customer subtask title
   if (task.title && (task.title.includes('新增客戶') || task.title.includes('建立客戶') || task.title.includes('客戶'))) {
     return customerCreateBasicProfileAgentProfile;
   }

@@ -69,6 +69,8 @@ const defaultMockTasks = [
     parent_task_id: null,
     module_id: "sales",
     assignee: "主管",
+    skill_id: null,
+    skillId: null,
     created_at: Math.floor(Date.now() / 1000) - 3600,
     completed_at: null
   },
@@ -79,6 +81,8 @@ const defaultMockTasks = [
     parent_task_id: "task_parent_1",
     module_id: "sales",
     assignee: "主管",
+    skill_id: "department.manage",
+    skillId: "department.manage",
     created_at: Math.floor(Date.now() / 1000) - 3600,
     completed_at: null
   },
@@ -89,6 +93,8 @@ const defaultMockTasks = [
     parent_task_id: "task_parent_1",
     module_id: "sales",
     assignee: "主管",
+    skill_id: "customer.create_basic_profile",
+    skillId: "customer.create_basic_profile",
     created_at: Math.floor(Date.now() / 1000) - 3600,
     completed_at: null
   },
@@ -99,6 +105,8 @@ const defaultMockTasks = [
     parent_task_id: "task_parent_1",
     module_id: "sales",
     assignee: "主管",
+    skill_id: "vendor.create_basic_profile",
+    skillId: "vendor.create_basic_profile",
     created_at: Math.floor(Date.now() / 1000) - 3600,
     completed_at: null
   }
@@ -698,15 +706,21 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_task': {
-      const { title, moduleId, assignee, parentTaskId } = args;
+      const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id } = args;
       const now = Math.floor(Date.now() / 1000);
+      const finalModuleId = (moduleId || module_id || '').trim();
+      const finalParentTaskId = parentTaskId || parent_task_id || null;
+      const rawSkillId = skillId || skill_id || null;
+      const finalSkillId = rawSkillId ? String(rawSkillId).trim() || null : null;
       const newTask = {
         id: `task_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
         title: (title || '').trim(),
         status: 'pending',
-        parent_task_id: parentTaskId || null,
-        module_id: (moduleId || '').trim(),
+        parent_task_id: finalParentTaskId,
+        module_id: finalModuleId,
         assignee: (assignee || '').trim(),
+        skill_id: finalSkillId,
+        skillId: finalSkillId,
         created_at: now,
         completed_at: null
       };

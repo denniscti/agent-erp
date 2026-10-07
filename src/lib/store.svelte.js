@@ -543,23 +543,58 @@ export async function login(email, password) {
  * @returns {Promise<any>}
  */
 /**
+ * Declarative definition for initial tenant onboarding subtasks
+ */
+export const ONBOARDING_STEPS = [
+  {
+    title: '設定部門',
+    skillId: 'department.manage',
+    moduleId: 'sales',
+    assignee: '主管',
+    guidanceMessage: (tenantName) =>
+      `您好！我是部門設定助理。新租戶「${tenantName}」建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？`
+  },
+  {
+    title: '建立第一個客戶',
+    skillId: 'customer.create_basic_profile',
+    moduleId: 'sales',
+    assignee: '主管',
+    guidanceMessage: (tenantName) =>
+      `您好！我是客戶管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）`
+  },
+  {
+    title: '建立第一個供應商',
+    skillId: 'vendor.create_basic_profile',
+    moduleId: 'sales',
+    assignee: '主管',
+    guidanceMessage: (tenantName) =>
+      `您好！我是供應商管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）`
+  }
+];
+
+/**
  * Shared helper to seed onboarding parent and child tasks
  * @param {string} tenantName
  */
 export async function seedOnboardingTasks(tenantName) {
   try {
     const parentTask = await createTaskAction('新租戶起步', 'sales', '主管', null);
-    const deptSubTask = await createTaskAction('設定部門', 'sales', '主管', parentTask.id);
-    // Seed initial child task guidance message for departments
-    await appendTaskMessageAction(deptSubTask.id, 'assistant', `您好！我是部門設定助理。新租戶「${tenantName}」建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？`);
 
-    const customerSubTask = await createTaskAction('建立第一個客戶', 'sales', '主管', parentTask.id);
-    // Seed initial child task guidance message for customer
-    await appendTaskMessageAction(customerSubTask.id, 'assistant', `您好！我是客戶管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）`);
-
-    const vendorSubTask = await createTaskAction('建立第一個供應商', 'sales', '主管', parentTask.id);
-    // Seed initial child task guidance message for vendor
-    await appendTaskMessageAction(vendorSubTask.id, 'assistant', `您好！我是供應商管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）`);
+    for (const step of ONBOARDING_STEPS) {
+      const subTask = await createTaskAction(
+        step.title,
+        step.moduleId || 'sales',
+        step.assignee || '主管',
+        parentTask.id,
+        step.skillId
+      );
+      if (step.guidanceMessage) {
+        const msg = typeof step.guidanceMessage === 'function'
+          ? step.guidanceMessage(tenantName)
+          : step.guidanceMessage;
+        await appendTaskMessageAction(subTask.id, 'assistant', msg);
+      }
+    }
 
     // Seed ambient conversation custom onboarding greeting for the newly created tenant
     await appendTaskMessageAction('main', 'assistant', `歡迎建立「${tenantName}」！要開始使用，我可以先幫你新增部門或邀請團隊成員，需要嗎？`);
@@ -662,15 +697,19 @@ export async function fetchTasks(moduleId = null) {
  * @param {string} moduleId
  * @param {string} assignee
  * @param {string | null} [parentTaskId]
+ * @param {string | null} [skillId]
  * @returns {Promise<any>}
  */
-export async function createTaskAction(title, moduleId, assignee, parentTaskId = null) {
+export async function createTaskAction(title, moduleId, assignee, parentTaskId = null, skillId = null) {
   try {
     const task = await invoke('create_task', {
       title,
       moduleId,
       assignee,
-      parentTaskId: parentTaskId || null
+      parentTaskId: parentTaskId || null,
+      skillId: skillId || null,
+      parent_task_id: parentTaskId || null,
+      skill_id: skillId || null
     });
     await fetchTasks();
     return task;

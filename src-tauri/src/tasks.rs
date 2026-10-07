@@ -13,6 +13,7 @@ pub struct Task {
     pub parent_task_id: Option<String>,
     pub module_id: String,
     pub assignee: String,
+    pub skill_id: Option<String>,
     pub created_at: i64,
     pub completed_at: Option<i64>,
 }
@@ -42,11 +43,15 @@ pub fn create_tasks_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::
             parent_task_id TEXT,
             module_id TEXT NOT NULL,
             assignee TEXT NOT NULL,
+            skill_id TEXT,
             created_at INTEGER NOT NULL,
             completed_at INTEGER
         )",
         [],
     )?;
+
+    // Idempotent migration for existing tables created before skill_id column
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN skill_id TEXT", []);
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS task_messages (
@@ -69,6 +74,7 @@ pub fn create_task_impl(
     module_id: String,
     assignee: String,
     parent_task_id: Option<String>,
+    skill_id: Option<String>,
 ) -> Result<Task, String> {
     let trimmed_title = title.trim();
     if trimmed_title.is_empty() {
@@ -83,6 +89,15 @@ pub fn create_task_impl(
         return Err("Assignee cannot be empty".to_string());
     }
 
+    let trimmed_skill_id = skill_id.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
     let now = current_timestamp();
     let id = format!(
         "task_{}_{}",
@@ -92,8 +107,8 @@ pub fn create_task_impl(
     let status = "pending".to_string();
 
     conn.execute(
-        "INSERT INTO tasks (id, title, status, parent_task_id, module_id, assignee, created_at, completed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO tasks (id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id,
             trimmed_title,
@@ -101,6 +116,7 @@ pub fn create_task_impl(
             parent_task_id,
             trimmed_module_id,
             trimmed_assignee,
+            trimmed_skill_id,
             now,
             Option::<i64>::None,
         ],
@@ -114,6 +130,7 @@ pub fn create_task_impl(
         parent_task_id,
         module_id: trimmed_module_id.to_string(),
         assignee: trimmed_assignee.to_string(),
+        skill_id: trimmed_skill_id,
         created_at: now,
         completed_at: None,
     })
@@ -130,8 +147,9 @@ pub fn list_tasks_impl(conn: &rusqlite::Connection, module_id: &str) -> Result<V
             parent_task_id: row.get(3)?,
             module_id: row.get(4)?,
             assignee: row.get(5)?,
-            created_at: row.get(6)?,
-            completed_at: row.get(7)?,
+            skill_id: row.get(6)?,
+            created_at: row.get(7)?,
+            completed_at: row.get(8)?,
         })
     };
 
@@ -139,7 +157,7 @@ pub fn list_tasks_impl(conn: &rusqlite::Connection, module_id: &str) -> Result<V
     if trimmed_module.is_empty() {
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, status, parent_task_id, module_id, assignee, created_at, completed_at
+                "SELECT id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at
                  FROM tasks ORDER BY created_at ASC",
             )
             .map_err(|e| format!("Failed to prepare list_tasks query: {}", e))?;
@@ -152,7 +170,7 @@ pub fn list_tasks_impl(conn: &rusqlite::Connection, module_id: &str) -> Result<V
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, status, parent_task_id, module_id, assignee, created_at, completed_at
+                "SELECT id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at
                  FROM tasks WHERE module_id = ?1 ORDER BY created_at ASC",
             )
             .map_err(|e| format!("Failed to prepare list_tasks query: {}", e))?;
@@ -273,11 +291,12 @@ pub async fn create_task<R: tauri::Runtime>(
     module_id: String,
     assignee: String,
     parent_task_id: Option<String>,
+    skill_id: Option<String>,
 ) -> Result<Task, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    create_task_impl(&conn, title, module_id, assignee, parent_task_id)
+    create_task_impl(&conn, title, module_id, assignee, parent_task_id, skill_id)
 }
 
 #[tauri::command]
@@ -349,6 +368,7 @@ mod tests {
         let module_id = "sales".to_string();
         let assignee = "主管".to_string();
         let parent_task_id = None;
+        let skill_id = None;
 
         // When: create_task_impl is executed
         let result = create_task_impl(
@@ -357,6 +377,7 @@ mod tests {
             module_id.clone(),
             assignee.clone(),
             parent_task_id,
+            skill_id,
         );
 
         // Then: The task is successfully created with status "pending" and no parent
@@ -367,6 +388,7 @@ mod tests {
         assert_eq!(task.assignee, assignee);
         assert_eq!(task.status, "pending");
         assert_eq!(task.parent_task_id, None);
+        assert_eq!(task.skill_id, None);
         assert_eq!(task.completed_at, None);
         assert!(task.created_at > 0);
         assert!(!task.id.is_empty());
@@ -382,6 +404,7 @@ mod tests {
             "sales".to_string(),
             "主管".to_string(),
             None,
+            None,
         )
         .unwrap();
 
@@ -392,13 +415,75 @@ mod tests {
             "sales".to_string(),
             "主管".to_string(),
             Some(parent.id.clone()),
+            Some("department.manage".to_string()),
         )
         .unwrap();
 
-        // Then: The subtask is created and links to parent_task_id
+        // Then: The subtask is created and links to parent_task_id and has skill_id
         assert_eq!(subtask.title, "設定部門");
         assert_eq!(subtask.parent_task_id, Some(parent.id));
+        assert_eq!(subtask.skill_id, Some("department.manage".to_string()));
         assert_eq!(subtask.status, "pending");
+    }
+
+    #[test]
+    fn test_tc_task_skill_01_create_task_with_skill_id_and_query() {
+        // Given: An initialized database
+        let conn = setup_test_db();
+
+        // When: Creating a task with skill_id
+        let task = create_task_impl(
+            &conn,
+            "建立第一個客戶".to_string(),
+            "sales".to_string(),
+            "主管".to_string(),
+            None,
+            Some("customer.create_basic_profile".to_string()),
+        )
+        .unwrap();
+
+        // Then: Task is created with skill_id stored and queryable via list_tasks
+        assert_eq!(
+            task.skill_id,
+            Some("customer.create_basic_profile".to_string())
+        );
+
+        let tasks = list_tasks_impl(&conn, "sales").unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].skill_id,
+            Some("customer.create_basic_profile".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tc_task_skill_02_create_task_normalizes_empty_and_whitespace_skill_id() {
+        // Given: An initialized database
+        let conn = setup_test_db();
+
+        // When: Creating tasks with whitespace and empty skill_ids
+        let task_ws = create_task_impl(
+            &conn,
+            "任務 A".to_string(),
+            "sales".to_string(),
+            "主管".to_string(),
+            None,
+            Some("   ".to_string()),
+        )
+        .unwrap();
+        let task_empty = create_task_impl(
+            &conn,
+            "任務 B".to_string(),
+            "sales".to_string(),
+            "主管".to_string(),
+            None,
+            Some("".to_string()),
+        )
+        .unwrap();
+
+        // Then: Both skill_ids are normalized to None
+        assert_eq!(task_ws.skill_id, None);
+        assert_eq!(task_empty.skill_id, None);
     }
 
     #[test]
@@ -412,6 +497,7 @@ mod tests {
             "   ".to_string(),
             "sales".to_string(),
             "主管".to_string(),
+            None,
             None,
         );
 
@@ -432,6 +518,7 @@ mod tests {
             "".to_string(),
             "主管".to_string(),
             None,
+            None,
         );
         // And: create_task_impl is called with empty assignee
         let err_assignee = create_task_impl(
@@ -439,6 +526,7 @@ mod tests {
             "任務".to_string(),
             "sales".to_string(),
             "  ".to_string(),
+            None,
             None,
         );
 
@@ -451,9 +539,33 @@ mod tests {
     fn test_tc_task_05_and_06_list_tasks_by_module() {
         // Given: Tasks in "sales" and "crm" modules
         let conn = setup_test_db();
-        create_task_impl(&conn, "Sales 1".into(), "sales".into(), "User".into(), None).unwrap();
-        create_task_impl(&conn, "Sales 2".into(), "sales".into(), "User".into(), None).unwrap();
-        create_task_impl(&conn, "CRM 1".into(), "crm".into(), "User".into(), None).unwrap();
+        create_task_impl(
+            &conn,
+            "Sales 1".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        create_task_impl(
+            &conn,
+            "Sales 2".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        create_task_impl(
+            &conn,
+            "CRM 1".into(),
+            "crm".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
 
         // When: Querying "sales" module
         let sales_tasks = list_tasks_impl(&conn, "sales").unwrap();
@@ -471,8 +583,24 @@ mod tests {
     fn test_tc_task_07_list_tasks_all_modules() {
         // Given: Tasks across different modules
         let conn = setup_test_db();
-        create_task_impl(&conn, "Task A".into(), "sales".into(), "User".into(), None).unwrap();
-        create_task_impl(&conn, "Task B".into(), "crm".into(), "User".into(), None).unwrap();
+        create_task_impl(
+            &conn,
+            "Task A".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        create_task_impl(
+            &conn,
+            "Task B".into(),
+            "crm".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
 
         // When: Querying with empty module_id
         let all_tasks = list_tasks_impl(&conn, "").unwrap();
@@ -490,6 +618,7 @@ mod tests {
             "設定部門".into(),
             "sales".into(),
             "User".into(),
+            None,
             None,
         )
         .unwrap();
@@ -524,6 +653,7 @@ mod tests {
             "設定部門".into(),
             "sales".into(),
             "User".into(),
+            None,
             None,
         )
         .unwrap();
@@ -560,6 +690,7 @@ mod tests {
             "設定部門".into(),
             "sales".into(),
             "User".into(),
+            None,
             None,
         )
         .unwrap();
