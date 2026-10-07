@@ -549,9 +549,14 @@ export async function login(email, password) {
 export async function seedOnboardingTasks(tenantName) {
   try {
     const parentTask = await createTaskAction('新租戶起步', 'sales', '主管', null);
-    const subTask = await createTaskAction('設定部門', 'sales', '主管', parentTask.id);
-    // Seed initial child task guidance message
-    await appendTaskMessageAction(subTask.id, 'assistant', `您好！我是部門設定助理。新租戶「${tenantName}」建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？`);
+    const deptSubTask = await createTaskAction('設定部門', 'sales', '主管', parentTask.id);
+    // Seed initial child task guidance message for departments
+    await appendTaskMessageAction(deptSubTask.id, 'assistant', `您好！我是部門設定助理。新租戶「${tenantName}」建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？`);
+
+    const customerSubTask = await createTaskAction('建立第一個客戶', 'sales', '主管', parentTask.id);
+    // Seed initial child task guidance message for customer
+    await appendTaskMessageAction(customerSubTask.id, 'assistant', `您好！我是客戶管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）`);
+
     // Seed ambient conversation custom onboarding greeting for the newly created tenant
     await appendTaskMessageAction('main', 'assistant', `歡迎建立「${tenantName}」！要開始使用，我可以先幫你新增部門或邀請團隊成員，需要嗎？`);
     await fetchTasks();

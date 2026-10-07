@@ -81,6 +81,16 @@ const defaultMockTasks = [
     assignee: "主管",
     created_at: Math.floor(Date.now() / 1000) - 3600,
     completed_at: null
+  },
+  {
+    id: "task_sub_2",
+    title: "建立第一個客戶",
+    status: "pending",
+    parent_task_id: "task_parent_1",
+    module_id: "sales",
+    assignee: "主管",
+    created_at: Math.floor(Date.now() / 1000) - 3600,
+    completed_at: null
   }
 ];
 
@@ -97,6 +107,13 @@ const defaultMockTaskMessages = [
     task_id: "task_sub_1",
     role: "assistant",
     content: "您好！我是部門設定助理。新租戶建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？",
+    timestamp: Math.floor(Date.now() / 1000) - 3600
+  },
+  {
+    id: "msg_sub_2",
+    task_id: "task_sub_2",
+    role: "assistant",
+    content: "您好！我是客戶管理助理。新租戶建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）",
     timestamp: Math.floor(Date.now() / 1000) - 3600
   }
 ];
