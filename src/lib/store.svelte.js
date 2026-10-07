@@ -557,6 +557,10 @@ export async function seedOnboardingTasks(tenantName) {
     // Seed initial child task guidance message for customer
     await appendTaskMessageAction(customerSubTask.id, 'assistant', `您好！我是客戶管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）`);
 
+    const vendorSubTask = await createTaskAction('建立第一個供應商', 'sales', '主管', parentTask.id);
+    // Seed initial child task guidance message for vendor
+    await appendTaskMessageAction(vendorSubTask.id, 'assistant', `您好！我是供應商管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）`);
+
     // Seed ambient conversation custom onboarding greeting for the newly created tenant
     await appendTaskMessageAction('main', 'assistant', `歡迎建立「${tenantName}」！要開始使用，我可以先幫你新增部門或邀請團隊成員，需要嗎？`);
     await fetchTasks();

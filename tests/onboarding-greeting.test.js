@@ -1,16 +1,18 @@
 /**
  * @file onboarding-greeting.test.js
- * @description Test suite for Tenant Onboarding Tasks & Initial Greetings (Issue #118).
+ * @description Test suite for Tenant Onboarding Tasks & Initial Greetings (Issue #118, Issue #120).
  *
  * ## Test Perspective Table (Equivalence Partitioning & Boundary Values)
  * | Case ID | Input / Precondition | Perspective (Equivalence / Boundary) | Expected Result | Notes |
  * |---|---|---|---|---|
- * | TC-ONB-N-01 | tenantName = '台積電研發中心' | Equivalence – Normal tenant onboarding seed | Creates '新租戶起步' parent task and both '設定部門' & '建立第一個客戶' subtasks with respective guidance messages and main welcome greeting | Main flow |
+ * | TC-ONB-N-01 | tenantName = '台積電研發中心' | Equivalence – Normal tenant onboarding seed | Creates '新租戶起步' parent task and '設定部門', '建立第一個客戶', '建立第一個供應商' subtasks with respective guidance messages and main welcome greeting | Main flow |
  * | TC-ONB-N-02 | Call getAgentProfileForTask on '建立第一個客戶' task | Equivalence – Workflow AgentProfile resolution | Resolves to customer.create_basic_profile AgentProfile with customer domain & tools | Skill binding |
  * | TC-ONB-N-03 | Customer subtask execution with runAgentTurn & confirmation | Equivalence – End-to-end customer creation in onboarding task | Triggers create_partner confirmation card, confirmation creates partner and updates store | Workflow loop |
- * | TC-ONB-B-01 | tenantName = 'Acme-Corp 123_Special' | Equivalence – English and special characters in tenant name | Special tenant name is safely embedded in all subtasks and main welcome | Encoding safety |
- * | TC-ONB-B-02 | tenantName = '' (empty string) | Boundary – Empty tenant name | Executed safely without throwing unhandled exceptions | Empty boundary |
- * | TC-ONB-B-03 | tenantName = '   ' (whitespace string) | Boundary – Whitespace tenant name | Executed safely without throwing unhandled exceptions | Whitespace boundary |
+ * | TC-ONB-N-04 | Call getAgentProfileForTask on '建立第一個供應商' task | Equivalence – Workflow AgentProfile resolution | Resolves to vendor.create_basic_profile AgentProfile with vendor domain & tools | Vendor skill binding |
+ * | TC-ONB-N-05 | Vendor subtask execution with runAgentTurn & confirmation | Equivalence – End-to-end vendor creation in onboarding task | Triggers create_vendor confirmation card, confirmation creates partner (is_vendor: true) and updates store | Vendor workflow loop |
+ * | TC-ONB-B-01 | tenantName = 'Acme-Corp 123_Special' | Equivalence – English and special characters in tenant name | Special tenant name is safely embedded in all subtasks (dept, customer, vendor) and main welcome | Encoding safety |
+ * | TC-ONB-B-02 | tenantName = '' (empty string) | Boundary – Empty tenant name | Executed safely without throwing unhandled exceptions, all 3 subtasks created | Empty boundary |
+ * | TC-ONB-B-03 | tenantName = '   ' (whitespace string) | Boundary – Whitespace tenant name | Executed safely without throwing unhandled exceptions, all 3 subtasks created | Whitespace boundary |
  * | TC-ONB-E-01 | Internal error during onboarding task creation | Error – Exception handling & logging | Caught gracefully by try-catch and logged via console.warn | Error resilience |
  */
 
@@ -25,7 +27,8 @@ if (typeof globalThis.$state === 'undefined') {
 const {
   appState,
   seedOnboardingTasks,
-  fetchPartners
+  fetchPartners,
+  fetchVendors
 } = await import('../src/lib/store.svelte.js');
 
 const {
@@ -34,7 +37,7 @@ const {
   executeConfirmation
 } = await import('../src/lib/workflow/index.js');
 
-test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and both department & customer subtasks', async () => {
+test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and department, customer, vendor subtasks', async () => {
   // Given: Preconditions - Reset appState and mock store data
   appState.tasks = [];
   appState.taskMessages = {};
@@ -44,7 +47,7 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and both dep
   // When:  Operation to execute - Call seedOnboardingTasks with valid tenant name
   await seedOnboardingTasks(tenantName);
 
-  // Then:  Expected result - Parent task and both subtasks are created
+  // Then:  Expected result - Parent task and all three subtasks are created
   const parentTasks = appState.tasks.filter(t => t.title === '新租戶起步');
   assert.ok(parentTasks.length > 0, 'Parent task 新租戶起步 should be created');
   const parentTask = parentTasks[parentTasks.length - 1];
@@ -71,7 +74,22 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and both dep
     'Customer subtask message should contain customer setup guidance'
   );
 
-  // 3. Verify main ambient welcome message
+  // 3. Verify '建立第一個供應商' subtask (Issue #120)
+  const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商' && t.parent_task_id === parentTask.id);
+  assert.ok(vendorSubTasks.length > 0, 'Subtask 建立第一個供應商 should be created under parent task');
+  const vendorSubTask = vendorSubTasks[vendorSubTasks.length - 1];
+  const vendorMsgs = appState.taskMessages[vendorSubTask.id] || [];
+  assert.ok(vendorMsgs.length > 0, 'Vendor subtask should have initial guidance message');
+  assert.ok(
+    vendorMsgs[0].content.includes(`新租戶「${tenantName}」建立完成後，讓我們來建立第一筆供應商基本資料`),
+    'Vendor subtask message should contain vendor setup guidance'
+  );
+  assert.ok(
+    vendorMsgs[0].content.includes('例如：「我想新增欣興電子 統編 11223344」'),
+    'Vendor subtask message should include example guidance text'
+  );
+
+  // 4. Verify main ambient welcome message
   const mainMsgs = appState.taskMessages['main'] || [];
   assert.ok(mainMsgs.length > 0, 'Main ambient conversation should have messages');
   const mainGreeting = mainMsgs[mainMsgs.length - 1];
@@ -158,6 +176,75 @@ test('TC-ONB-N-03: Normal case - End-to-end customer creation in 建立第一個
   assert.equal(created.is_customer, true);
 });
 
+test('TC-ONB-N-04: Normal case - getAgentProfileForTask resolves vendorCreateBasicProfileAgentProfile for 建立第一個供應商', () => {
+  // Given: Preconditions - An onboarding subtask with title '建立第一個供應商'
+  const task = {
+    id: 'task_sub_vendor_1',
+    title: '建立第一個供應商',
+    parent_task_id: 'task_parent_1',
+    module_id: 'sales'
+  };
+
+  // When:  Operation to execute - Resolve AgentProfile for task
+  const resolvedProfile = getAgentProfileForTask(task);
+
+  // Then:  Expected result - Resolves to vendorCreateBasicProfileAgentProfile
+  assert.ok(resolvedProfile, 'AgentProfile must be resolved');
+  assert.equal(resolvedProfile.id, 'vendor.create_basic_profile');
+  assert.equal(resolvedProfile.domain, 'vendor');
+  assert.ok(
+    resolvedProfile.tools.some(t => t.function.name === 'create_vendor'),
+    'Profile must include create_vendor tool'
+  );
+  assert.ok(
+    resolvedProfile.tools.some(t => t.function.name === 'list_vendors'),
+    'Profile must include list_vendors tool'
+  );
+});
+
+test('TC-ONB-N-05: Normal case - End-to-end vendor creation in 建立第一個供應商 subtask context', async () => {
+  // Given: Preconditions - An active task for '建立第一個供應商'
+  const task = {
+    id: `task_sub_vnd_${Date.now()}`,
+    title: '建立第一個供應商',
+    status: 'pending'
+  };
+  const profile = getAgentProfileForTask(task);
+  assert.ok(profile, 'Profile for 建立第一個供應商 must exist');
+
+  const uniqueVendorName = `首位供應商_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const taxId = '11223344';
+
+  // When:  Operation to execute - Run agent turn to create vendor with natural language
+  const turnResult = await runAgentTurn(
+    `幫我新增供應商 ${uniqueVendorName} 統編 ${taxId}`,
+    profile,
+    { taskId: task.id, activeTask: task }
+  );
+
+  // Then:  Expected result - Confirmation card is generated for create_vendor
+  assert.ok(turnResult.confirmation, 'Should produce a pending confirmation');
+  assert.equal(turnResult.confirmation.toolName, 'create_vendor');
+  assert.equal(turnResult.confirmation.args.name, uniqueVendorName);
+  assert.equal(turnResult.confirmation.args.tax_id, taxId);
+
+  // When:  Execute confirmation
+  const confirmResult = await executeConfirmation(turnResult.confirmation, {
+    taskId: task.id,
+    activeTask: task
+  });
+
+  // Then:  Verification - Vendor created successfully
+  assert.ok(confirmResult.content.includes(uniqueVendorName), 'Confirmation content must include vendor name');
+  assert.ok(confirmResult.content.includes(taxId), 'Confirmation content must include tax ID');
+  assert.ok(confirmResult.toast.includes(uniqueVendorName), 'Toast must include vendor name');
+
+  const vendors = await fetchVendors();
+  const created = vendors.find(v => v.name === uniqueVendorName);
+  assert.ok(created, 'Created vendor must be in vendors list');
+  assert.equal(created.is_vendor, true, 'is_vendor flag must be true');
+});
+
 test('TC-ONB-B-01: Equivalence class - English and special characters in tenant name', async () => {
   // Given: Preconditions - Reset appState
   appState.tasks = [];
@@ -182,6 +269,13 @@ test('TC-ONB-B-01: Equivalence class - English and special characters in tenant 
   assert.ok(
     customerMsgs[0].content.includes(`新租戶「${specialTenantName}」建立完成後，讓我們來建立第一筆客戶基本資料`)
   );
+
+  const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商');
+  assert.ok(vendorSubTasks.length > 0);
+  const vendorMsgs = appState.taskMessages[vendorSubTasks[vendorSubTasks.length - 1].id] || [];
+  assert.ok(
+    vendorMsgs[0].content.includes(`新租戶「${specialTenantName}」建立完成後，讓我們來建立第一筆供應商基本資料`)
+  );
 });
 
 test('TC-ONB-B-02: Boundary value - Empty string tenant name handled safely', async () => {
@@ -202,8 +296,12 @@ test('TC-ONB-B-02: Boundary value - Empty string tenant name handled safely', as
     '歡迎建立「」！要開始使用，我可以先幫你新增部門或邀請團隊成員，需要嗎？'
   );
 
+  const deptSubTasks = appState.tasks.filter(t => t.title === '設定部門');
+  assert.ok(deptSubTasks.length > 0, 'Department subtask created');
   const customerSubTasks = appState.tasks.filter(t => t.title === '建立第一個客戶');
-  assert.ok(customerSubTasks.length > 0);
+  assert.ok(customerSubTasks.length > 0, 'Customer subtask created');
+  const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商');
+  assert.ok(vendorSubTasks.length > 0, 'Vendor subtask created');
 });
 
 test('TC-ONB-B-03: Boundary value - Whitespace string tenant name handled safely', async () => {
@@ -217,10 +315,14 @@ test('TC-ONB-B-03: Boundary value - Whitespace string tenant name handled safely
   await seedOnboardingTasks(whitespaceTenantName);
 
   // Then:  Expected result - Should execute safely without throwing exceptions
+  const deptSubTasks = appState.tasks.filter(t => t.title === '設定部門');
+  assert.ok(deptSubTasks.length > 0, 'Department subtask created');
   const customerSubTasks = appState.tasks.filter(t => t.title === '建立第一個客戶');
-  assert.ok(customerSubTasks.length > 0);
-  const customerMsgs = appState.taskMessages[customerSubTasks[customerSubTasks.length - 1].id] || [];
-  assert.ok(customerMsgs.length > 0);
+  assert.ok(customerSubTasks.length > 0, 'Customer subtask created');
+  const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商');
+  assert.ok(vendorSubTasks.length > 0, 'Vendor subtask created');
+  const vendorMsgs = appState.taskMessages[vendorSubTasks[vendorSubTasks.length - 1].id] || [];
+  assert.ok(vendorMsgs.length > 0);
 });
 
 test('TC-ONB-E-01: Error case - Failure during onboarding seeding is caught gracefully with warning logged', async () => {
