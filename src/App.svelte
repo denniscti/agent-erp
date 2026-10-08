@@ -45,6 +45,7 @@
   import RegisterWizard from './lib/components/auth/RegisterWizard.svelte';
   import TenantPicker from './lib/components/auth/TenantPicker.svelte';
   import OnboardingScreen from './lib/components/auth/OnboardingScreen.svelte';
+  import SettingsEntityCard from './lib/components/SettingsEntityCard.svelte';
 
   let activeTab = $derived(appState.activeWorkspace);
   let activeOrderFilter = $state('all');
@@ -716,16 +717,19 @@
 
                 <!-- Member & Role Management (Admin/Owner only) -->
                 {#if canManageMembers(appState.activeTenant)}
-                <div class="settings-group glass-panel">
-                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <h3>成員與角色管理 (Member & Role Management)</h3>
-                    <button class="btn btn-sm" onclick={fetchMembers}>
-                      重新整理成員
-                    </button>
-                  </div>
-                  <p class="settings-desc">管理當前租戶下的組織成員、權限角色與所屬部門（支援一人掛多部門與有效 Skill 聯集提權檢視）。</p>
-
-                  <!-- Add Member Form -->
+                <SettingsEntityCard
+                  title="成員與角色管理 (Member & Role Management)"
+                  description="管理當前租戶下的組織成員、權限角色與所屬部門（支援一人掛多部門與有效 Skill 聯集提權檢視）。"
+                  onRefresh={fetchMembers}
+                  refreshLabel="重新整理成員"
+                  errorMessage={memberError}
+                  isEmpty={appState.members.length === 0}
+                  emptyMessage="目前尚無成員資料，請新增成員。"
+                  listClass="member-list"
+                  listStyle="display: flex; flex-direction: column; gap: 10px;"
+                >
+                  {#snippet form()}
+                    <!-- Add Member Form -->
                   <form onsubmit={handleOnboardMember} class="member-add-form" style="display: flex; flex-direction: column; gap: 12px; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
                     <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
                       <div style="flex: 1; min-width: 140px;">
@@ -814,16 +818,7 @@
                       </div>
                     </div>
                   </form>
-                  
-                  {#if memberError}
-                    <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{memberError}</div>
-                  {/if}
-
-                  <!-- Member List -->
-                  <div class="member-list" style="display: flex; flex-direction: column; gap: 10px;">
-                    {#if appState.members.length === 0}
-                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無成員資料，請新增成員。</div>
-                    {:else}
+                  {/snippet}
                       {#each appState.members as member (member.user_id || member.id)}
                         {@const isEditing = editingMemberId === (member.user_id || member.id)}
                         {@const memberDeptNames = getDepartmentNames(member.department_ids)}
@@ -990,23 +985,24 @@
                           {/if}
                         </div>
                       {/each}
-                    {/if}
-                  </div>
-                </div>
+                </SettingsEntityCard>
                 {/if}
 
                 <!-- Department Management (Admin/Owner only) -->
                 {#if canManageMembers(appState.activeTenant)}
-                <div class="settings-group glass-panel">
-                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <h3>部門管理 (Department Management)</h3>
-                    <button class="btn btn-sm" onclick={fetchDepartments}>
-                      重新整理部門
-                    </button>
-                  </div>
-                  <p class="settings-desc">管理當前組織架構與部門階層（支援上層部門 parent_id 關聯）。設定後將同步於組織治理與指派流程中。</p>
-
-                  <!-- Add Department Form -->
+                <SettingsEntityCard
+                  title="部門管理 (Department Management)"
+                  description="管理當前組織架構與部門階層（支援上層部門 parent_id 關聯）。設定後將同步於組織治理與指派流程中。"
+                  onRefresh={fetchDepartments}
+                  refreshLabel="重新整理部門"
+                  errorMessage={departmentError}
+                  isEmpty={appState.departments.length === 0}
+                  emptyMessage="目前尚無部門資料，請新增部門。"
+                  listClass="department-list"
+                  listStyle="display: flex; flex-direction: column; gap: 8px;"
+                >
+                  {#snippet form()}
+                    <!-- Add Department Form -->
                   <form onsubmit={handleCreateDepartment} class="department-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
                     <div style="flex: 1.5; min-width: 180px;">
                       <label for="dept-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">部門名稱</label>
@@ -1041,16 +1037,7 @@
                       {#if isAddingDepartment}新增中...{:else}+ 新增部門{/if}
                     </button>
                   </form>
-                  
-                  {#if departmentError}
-                    <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{departmentError}</div>
-                  {/if}
-
-                  <!-- Department List -->
-                  <div class="department-list" style="display: flex; flex-direction: column; gap: 8px;">
-                    {#if appState.departments.length === 0}
-                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無部門資料，請新增部門。</div>
-                    {:else}
+                  {/snippet}
                       {#each appState.departments as dept (dept.id)}
                         {@const parentName = getParentDepartmentName(dept.parent_id)}
                         <div class="department-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
@@ -1076,9 +1063,7 @@
                           </div>
                         </div>
                       {/each}
-                    {/if}
-                  </div>
-                </div>
+                </SettingsEntityCard>
 
                 <!-- Department Usable Skills Configuration (Issue #115) -->
                 <div class="settings-group glass-panel" style="margin-top: 24px;">
@@ -1225,141 +1210,135 @@
                 {/if}
 
                 <!-- Customer & Vendor Partner Management (Issue #117, #119) -->
-                <div class="settings-group glass-panel" style="margin-top: 24px;">
-                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                      <h3 style="margin: 0;">合作夥伴基本資料管理 (Partner Management)</h3>
-                      <span class="badge badge-cyan" style="font-size: 0.72rem;">Partner 聚合根</span>
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                      <div class="filter-row" style="display: flex; gap: 4px; background: rgba(0, 0, 0, 0.2); padding: 2px; border-radius: 6px;">
-                        <button 
-                          class="filter-btn {partnerFilter === 'all' ? 'active' : ''}" 
-                          onclick={() => partnerFilter = 'all'}
-                          style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'all' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'all' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'all' ? '600' : 'normal'};"
-                        >
-                          全部 ({appState.partners.length})
-                        </button>
-                        <button 
-                          class="filter-btn {partnerFilter === 'customer' ? 'active' : ''}" 
-                          onclick={() => partnerFilter = 'customer'}
-                          style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'customer' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'customer' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'customer' ? '600' : 'normal'};"
-                        >
-                          客戶 ({appState.partners.filter(p => p.is_customer).length})
-                        </button>
-                        <button 
-                          class="filter-btn {partnerFilter === 'vendor' ? 'active' : ''}" 
-                          onclick={() => partnerFilter = 'vendor'}
-                          style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'vendor' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'vendor' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'vendor' ? '600' : 'normal'};"
-                        >
-                          供應商 ({appState.partners.filter(p => p.is_vendor).length})
-                        </button>
-                      </div>
-                      <button class="btn btn-sm" onclick={() => fetchPartners()}>
-                        重新整理
+                <SettingsEntityCard
+                  title="合作夥伴基本資料管理 (Partner Management)"
+                  badge="Partner 聚合根"
+                  badgeClass="badge-cyan"
+                  description="登記與維護合作夥伴基本檔案（名稱、統一編號／稅號、身份角色）。支援客戶與供應商身份疊加，作為後續銷售受理、採購與交易對象的基準資料庫。"
+                  onRefresh={() => fetchPartners()}
+                  refreshLabel="重新整理"
+                  containerStyle="margin-top: 24px;"
+                  errorMessage={partnerError}
+                  isEmpty={filteredPartners.length === 0}
+                  emptyMessage="目前尚無符合篩選條件的夥伴資料，請透過上方表單或 AI 助理對話登記。"
+                  listClass="customer-list"
+                  listStyle="display: flex; flex-direction: column; gap: 8px;"
+                >
+                  {#snippet headerExtra()}
+                    <div class="filter-row" style="display: flex; gap: 4px; background: rgba(0, 0, 0, 0.2); padding: 2px; border-radius: 6px;">
+                      <button 
+                        class="filter-btn {partnerFilter === 'all' ? 'active' : ''}" 
+                        onclick={() => partnerFilter = 'all'}
+                        style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'all' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'all' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'all' ? '600' : 'normal'};"
+                      >
+                        全部 ({appState.partners.length})
+                      </button>
+                      <button 
+                        class="filter-btn {partnerFilter === 'customer' ? 'active' : ''}" 
+                        onclick={() => partnerFilter = 'customer'}
+                        style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'customer' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'customer' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'customer' ? '600' : 'normal'};"
+                      >
+                        客戶 ({appState.partners.filter(p => p.is_customer).length})
+                      </button>
+                      <button 
+                        class="filter-btn {partnerFilter === 'vendor' ? 'active' : ''}" 
+                        onclick={() => partnerFilter = 'vendor'}
+                        style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {partnerFilter === 'vendor' ? 'var(--accent-cyan)' : 'transparent'}; color: {partnerFilter === 'vendor' ? '#000' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {partnerFilter === 'vendor' ? '600' : 'normal'};"
+                      >
+                        供應商 ({appState.partners.filter(p => p.is_vendor).length})
                       </button>
                     </div>
-                  </div>
-                  <p class="settings-desc">登記與維護合作夥伴基本檔案（名稱、統一編號／稅號、身份角色）。支援客戶與供應商身份疊加，作為後續銷售受理、採購與交易對象的基準資料庫。</p>
+                  {/snippet}
 
-                  <!-- Add Partner Form -->
-                  <form onsubmit={handleCreatePartner} class="customer-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
-                    <div style="flex: 2; min-width: 180px;">
-                      <label for="partner-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">夥伴／廠商名稱（必填）</label>
-                      <input 
-                        id="partner-name-input"
-                        type="text" 
-                        class="form-input" 
-                        placeholder="例：欣興電子、台灣積體電路製造、聯發科技" 
-                        bind:value={newPartnerName}
-                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
-                      />
-                    </div>
-                    <div style="flex: 1.2; min-width: 140px;">
-                      <label for="partner-tax-id-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">統一編號 / 稅號（選填）</label>
-                      <input 
-                        id="partner-tax-id-input"
-                        type="text" 
-                        class="form-input" 
-                        placeholder="例：11223344" 
-                        bind:value={newPartnerTaxId}
-                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
-                      />
-                    </div>
-                    <div style="flex: 1.2; min-width: 130px;">
-                      <label for="partner-role-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">登記身份</label>
-                      <select
-                        id="partner-role-select"
-                        class="form-input"
-                        bind:value={newPartnerRole}
-                        style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                  {#snippet form()}
+                    <!-- Add Partner Form -->
+                    <form onsubmit={handleCreatePartner} class="customer-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
+                      <div style="flex: 2; min-width: 180px;">
+                        <label for="partner-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">夥伴／廠商名稱（必填）</label>
+                        <input 
+                          id="partner-name-input"
+                          type="text" 
+                          class="form-input" 
+                          placeholder="例：欣興電子、台灣積體電路製造、聯發科技" 
+                          bind:value={newPartnerName}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                        />
+                      </div>
+                      <div style="flex: 1.2; min-width: 140px;">
+                        <label for="partner-tax-id-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">統一編號 / 稅號（選填）</label>
+                        <input 
+                          id="partner-tax-id-input"
+                          type="text" 
+                          class="form-input" 
+                          placeholder="例：11223344" 
+                          bind:value={newPartnerTaxId}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                        />
+                      </div>
+                      <div style="flex: 1.2; min-width: 130px;">
+                        <label for="partner-role-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">登記身份</label>
+                        <select
+                          id="partner-role-select"
+                          class="form-input"
+                          bind:value={newPartnerRole}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                        >
+                          <option value="customer">🏢 客戶 (Customer)</option>
+                          <option value="vendor">🏭 供應商 (Vendor)</option>
+                          <option value="both">🌐 雙重身份 (Both)</option>
+                        </select>
+                      </div>
+                      <button 
+                        type="submit" 
+                        class="btn btn-primary btn-sm" 
+                        disabled={isAddingPartner}
+                        style="height: 35px; white-space: nowrap; padding: 0 16px;"
                       >
-                        <option value="customer">🏢 客戶 (Customer)</option>
-                        <option value="vendor">🏭 供應商 (Vendor)</option>
-                        <option value="both">🌐 雙重身份 (Both)</option>
-                      </select>
-                    </div>
-                    <button 
-                      type="submit" 
-                      class="btn btn-primary btn-sm" 
-                      disabled={isAddingPartner}
-                      style="height: 35px; white-space: nowrap; padding: 0 16px;"
-                    >
-                      {#if isAddingPartner}登記中...{:else}+ 登記夥伴{/if}
-                    </button>
-                  </form>
+                        {#if isAddingPartner}登記中...{:else}+ 登記夥伴{/if}
+                      </button>
+                    </form>
+                  {/snippet}
 
-                  {#if partnerError}
-                    <div style="color: #ef4444; font-size: 0.8rem; margin-bottom: 12px;">{partnerError}</div>
-                  {/if}
-
-                  <!-- Partner List -->
-                  <div class="customer-list" style="display: flex; flex-direction: column; gap: 8px;">
-                    {#if filteredPartners.length === 0}
-                      <div class="empty-audit" style="padding: 20px; text-align: center;">目前尚無符合篩選條件的夥伴資料，請透過上方表單或 AI 助理對話登記。</div>
-                    {:else}
-                      {#each filteredPartners as partner (partner.id)}
-                        <div class="customer-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
-                          <div style="display: flex; align-items: center; gap: 12px;">
-                            <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-cyan), 0.12); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.95rem;">
-                              {#if partner.is_customer && partner.is_vendor}
-                                🌐
-                              {:else if partner.is_vendor}
-                                🏭
-                              {:else}
-                                🏢
-                              {/if}
-                            </div>
-                            <div>
-                              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                                <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{partner.name}</span>
-                                {#if partner.tax_id}
-                                  <span class="badge badge-cyan" style="font-size: 0.72rem;">
-                                    統編：{partner.tax_id}
-                                  </span>
-                                {/if}
-                                {#if partner.is_customer}
-                                  <span class="badge badge-emerald" style="font-size: 0.7rem;">
-                                    客戶
-                                  </span>
-                                {/if}
-                                {#if partner.is_vendor}
-                                  <span class="badge badge-amber" style="font-size: 0.7rem;">
-                                    供應商
-                                  </span>
-                                {/if}
-                              </div>
-                              <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{partner.id}</div>
-                            </div>
-                          </div>
-                          <div style="font-size: 0.75rem; color: var(--text-muted);">
-                            {new Date(partner.created_at * 1000).toLocaleString()}
-                          </div>
+                  {#each filteredPartners as partner (partner.id)}
+                    <div class="customer-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                      <div style="display: flex; align-items: center; gap: 12px;">
+                        <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-cyan), 0.12); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.95rem;">
+                          {#if partner.is_customer && partner.is_vendor}
+                            🌐
+                          {:else if partner.is_vendor}
+                            🏭
+                          {:else}
+                            🏢
+                          {/if}
                         </div>
-                      {/each}
-                    {/if}
-                  </div>
-                </div>
+                        <div>
+                          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                            <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{partner.name}</span>
+                            {#if partner.tax_id}
+                              <span class="badge badge-cyan" style="font-size: 0.72rem;">
+                                統編：{partner.tax_id}
+                              </span>
+                            {/if}
+                            {#if partner.is_customer}
+                              <span class="badge badge-emerald" style="font-size: 0.7rem;">
+                                客戶
+                              </span>
+                            {/if}
+                            {#if partner.is_vendor}
+                              <span class="badge badge-amber" style="font-size: 0.7rem;">
+                                供應商
+                              </span>
+                            {/if}
+                          </div>
+                          <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{partner.id}</div>
+                        </div>
+                      </div>
+                      <div style="font-size: 0.75rem; color: var(--text-muted);">
+                        {new Date(partner.created_at * 1000).toLocaleString()}
+                      </div>
+                    </div>
+                  {/each}
+                </SettingsEntityCard>
               </div>
             </div>
           {:else if activeTab === 'sales' && !appState.activeTaskId}
