@@ -1160,6 +1160,85 @@ export function computeSkillDiff(currentDeptIds, nextDeptIds, departments = appS
 }
 
 /**
+ * Get effective skills for the current logged-in user in appState
+ * Computes the union of skills across all assigned departments of the active user.
+ * @param {any} [state]
+ * @returns {string[]}
+ */
+export function getCurrentUserEffectiveSkills(state = appState) {
+  if (!state) return [];
+  if (Array.isArray(state.currentUserSkills)) {
+    return [...state.currentUserSkills];
+  }
+  if (state.currentUserSkills instanceof Set) {
+    return Array.from(state.currentUserSkills);
+  }
+
+  const authUser = state.authUser;
+  if (!authUser) {
+    return [];
+  }
+
+  // If authUser directly defines department_ids
+  if (Array.isArray(authUser.department_ids)) {
+    return getEffectiveSkills(authUser.department_ids, state.departments);
+  }
+
+  // Look up user in state.members
+  const members = Array.isArray(state.members) ? state.members : [];
+  const currentMember = members.find(m => 
+    (m.user_id && m.user_id === authUser.id) ||
+    (m.id && m.id === authUser.id) ||
+    (m.email && authUser.email && m.email.toLowerCase() === authUser.email.toLowerCase())
+  );
+
+  if (currentMember && Array.isArray(currentMember.department_ids)) {
+    return getEffectiveSkills(currentMember.department_ids, state.departments);
+  }
+
+  return [];
+}
+
+/**
+ * Filter task list based on user's effective skill set (Issue #132).
+ * Tasks declaring a skillId / skill_id must match one of user's effective skills.
+ * Tasks without skillId (unrestricted/parent tasks) are preserved.
+ *
+ * @param {any[]} tasks
+ * @param {string[] | Set<string> | null | undefined} [effectiveSkills]
+ * @returns {any[]}
+ */
+export function filterTasksBySkills(tasks, effectiveSkills = getCurrentUserEffectiveSkills()) {
+  if (!tasks || !Array.isArray(tasks)) {
+    return [];
+  }
+
+  let skillSet;
+  if (effectiveSkills instanceof Set) {
+    skillSet = new Set(Array.from(effectiveSkills).map(s => typeof s === 'string' ? s.trim() : String(s)));
+  } else if (Array.isArray(effectiveSkills)) {
+    skillSet = new Set(effectiveSkills.map(s => typeof s === 'string' ? s.trim() : String(s)));
+  } else {
+    skillSet = new Set();
+  }
+
+  return tasks.filter(task => {
+    if (!task || typeof task !== 'object') {
+      return false;
+    }
+
+    const rawSkillId = task.skillId || task.skill_id;
+    if (!rawSkillId || (typeof rawSkillId === 'string' && !rawSkillId.trim())) {
+      // Unrestricted task (e.g. parent task or general task without skill requirement)
+      return true;
+    }
+
+    const skillId = String(rawSkillId).trim();
+    return skillSet.has(skillId);
+  });
+}
+
+/**
  * Onboard a new member to the active tenant
  * @param {{ name: string, email: string, role?: string, department_ids?: string[] }} payload
  * @returns {Promise<any>}

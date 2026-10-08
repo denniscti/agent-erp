@@ -18,6 +18,7 @@
     "test:customers": "node --test tests/customer-partner-management.test.js",
     "test:vendors": "node --test tests/vendor-partner-management.test.js",
     "test:onboarding": "node --test tests/onboarding-greeting.test.js",
+    "test:task-filter": "node --test tests/task-skill-filter.test.js",
     "test:cards": "node --test tests/settings-entity-card.test.js",
     "test:llm": "node ./scripts/test-nvidia-api.mjs",
     "seed:data": "node ./scripts/seed-test-data.mjs",

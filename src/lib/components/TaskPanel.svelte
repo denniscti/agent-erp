@@ -1,24 +1,33 @@
 <script>
-  import { appState, switchActiveTask, setTaskPanelCollapsed } from '../store.svelte.js';
+  import { 
+    appState, 
+    switchActiveTask, 
+    setTaskPanelCollapsed,
+    filterTasksBySkills,
+    getCurrentUserEffectiveSkills
+  } from '../store.svelte.js';
 
   let isCollapsed = $derived(appState.taskPanelCollapsed);
 
+  let effectiveSkills = $derived(getCurrentUserEffectiveSkills(appState));
+  let visibleTasks = $derived(filterTasksBySkills(appState.tasks, effectiveSkills));
+
   let pendingCount = $derived(
-    appState.tasks.filter(t => t.status === 'pending' || t.status === 'in_progress').length
+    visibleTasks.filter(t => t.status === 'pending' || t.status === 'in_progress').length
   );
 
   // Group tasks into hierarchy: top-level parents and their children
   let parentTasks = $derived(
-    appState.tasks.filter(t => !t.parent_task_id)
+    visibleTasks.filter(t => !t.parent_task_id)
   );
 
   let getChildrenOf = $derived((parentId) => {
-    return appState.tasks.filter(t => t.parent_task_id === parentId);
+    return visibleTasks.filter(t => t.parent_task_id === parentId);
   });
 
   // Any orphaned child tasks whose parent is not in parentTasks
   let orphanTasks = $derived(
-    appState.tasks.filter(t => t.parent_task_id && !appState.tasks.some(p => p.id === t.parent_task_id))
+    visibleTasks.filter(t => t.parent_task_id && !visibleTasks.some(p => p.id === t.parent_task_id))
   );
 
   function handleSelectTask(taskId) {
@@ -82,7 +91,7 @@
     </div>
 
     <div class="task-list-scroll">
-      {#if appState.tasks.length === 0}
+      {#if visibleTasks.length === 0}
         <div class="empty-tasks-box">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="12" cy="12" r="10"></circle>
