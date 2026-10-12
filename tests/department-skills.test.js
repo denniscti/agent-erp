@@ -16,6 +16,7 @@
  * | TC-SKILL-B-02 | Search with empty string "" or whitespace "   " | Boundary – Empty search | Returns entire list without filtering out items | Search tolerance |
  * | TC-SKILL-B-03 | Input array containing duplicate skill IDs | Boundary – Duplicate skill IDs | Automatically sanitized and deduplicated | Normalization |
  * | TC-SKILL-B-04 | Department skills with leading/trailing spaces | Boundary – Whitespace skill IDs | Trimmed and sanitized properly | Normalization |
+ * | TC-SKILL-B-05 | updateDepartmentSkillsAction when appState.departments is empty | Boundary – Stale/Uninitialized store cache | Automatically triggers fallback fetchDepartments and updates successfully | Store cache resilience |
  * | TC-SKILL-E-01 | registerAgentProfile with domain not in KNOWN_DOMAINS | Error – Unknown domain registration | Throws Error with descriptive domain rejection message | Strict domain enforcement |
  * | TC-SKILL-E-02 | registerDeclaredSkill with domain not in KNOWN_DOMAINS | Error – Unknown skill domain | Throws Error rejecting unregistered domain | Strict domain enforcement |
  * | TC-SKILL-E-03 | updateDepartmentSkillsAction with nonexistent department ID | Error – Nonexistent department | Throws Error rejecting update on missing department | Target validation |
@@ -315,3 +316,22 @@ test('TC-SKILL-ROLE-02: Role authorization - member role or null cannot manage d
   assert.equal(canManageMembers(memberTenant), false);
   assert.equal(canManageMembers(null), false);
 });
+
+test('TC-SKILL-B-05: Boundary - updateDepartmentSkillsAction recovers via fetchDepartments fallback when cache is cleared', async () => {
+  // Given: Preconditions - Department exists in backend/mock, but appState.departments is empty
+  const deptName = `快取回復部_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+  const dept = await createDepartmentAction(deptName, null);
+  // Simulate stale or empty memory cache
+  appState.departments = [];
+
+  // When:  Operation to execute - Update department skills with empty in-memory cache
+  const updated = await updateDepartmentSkillsAction(dept.id, ['customer.create_basic_profile'], 'Recovery Admin');
+
+  // Then:  Expected result - Recovers via fetchDepartments fallback and updates skills
+  assert.ok(updated);
+  assert.deepEqual(updated.skills, ['customer.create_basic_profile']);
+  const inCache = appState.departments.find(d => d.id === dept.id);
+  assert.ok(inCache, 'Department must be populated into appState.departments');
+  assert.deepEqual(inCache.skills, ['customer.create_basic_profile']);
+});
+

@@ -20,6 +20,7 @@ import { invoke } from '../tauri.js';
 export async function logAuditEvent(actionType, args, decision, operator = 'user', customLogger = null) {
   const argsString = typeof args === 'string' ? args : JSON.stringify(args || {});
   const entry = {
+    actionType,
     action_type: actionType,
     arguments: argsString,
     decision,

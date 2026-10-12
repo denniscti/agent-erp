@@ -1016,9 +1016,13 @@ export async function updateDepartmentSkillsAction(departmentId, skillIds, opera
     throw new Error('部門 ID 為必填項目');
   }
   const depts = appState.departments || [];
-  const targetDept = depts.find(d => d.id === trimmedId);
+  let targetDept = depts.find(d => d.id === trimmedId);
   if (!targetDept) {
-    throw new Error(`找不到指定的部門：${trimmedId}`);
+    await fetchDepartments();
+    targetDept = (appState.departments || []).find(d => d.id === trimmedId);
+    if (!targetDept) {
+      throw new Error(`找不到指定的部門：${trimmedId}`);
+    }
   }
 
   const rawSkills = Array.isArray(skillIds) ? skillIds : [];
@@ -1034,6 +1038,7 @@ export async function updateDepartmentSkillsAction(departmentId, skillIds, opera
 
   try {
     const updated = await invoke('update_department_skills', {
+      departmentId: trimmedId,
       department_id: trimmedId,
       skills: cleanSkills
     });
@@ -1041,6 +1046,7 @@ export async function updateDepartmentSkillsAction(departmentId, skillIds, opera
     // Record audit log for each granted skill
     for (const sk of addedSkills) {
       await invoke('record_audit_log', {
+        actionType: 'grant_department_skill',
         action_type: 'grant_department_skill',
         arguments: JSON.stringify({
           department_id: trimmedId,
@@ -1056,6 +1062,7 @@ export async function updateDepartmentSkillsAction(departmentId, skillIds, opera
     // Record audit log for each revoked skill
     for (const sk of removedSkills) {
       await invoke('record_audit_log', {
+        actionType: 'revoke_department_skill',
         action_type: 'revoke_department_skill',
         arguments: JSON.stringify({
           department_id: trimmedId,
@@ -1071,6 +1078,7 @@ export async function updateDepartmentSkillsAction(departmentId, skillIds, opera
     // If no specific diff (e.g. batch same), still record audit update
     if (addedSkills.length === 0 && removedSkills.length === 0) {
       await invoke('record_audit_log', {
+        actionType: 'update_department_skills',
         action_type: 'update_department_skills',
         arguments: JSON.stringify({
           department_id: trimmedId,
@@ -1082,6 +1090,7 @@ export async function updateDepartmentSkillsAction(departmentId, skillIds, opera
       });
     }
 
+    targetDept.skills = cleanSkills;
     await fetchDepartments();
     await fetchAuditLogs();
     showToast(`已成功更新「${targetDept.name}」的可用 Skill 清單`);

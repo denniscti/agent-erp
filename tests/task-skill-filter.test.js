@@ -25,6 +25,7 @@
  * | TC-FLT-USR-04 | getCurrentUserEffectiveSkills: state has explicit currentUserSkills override | Equivalence – Explicit skill override | Returns exact override skills array | Override support |
  * | TC-PANEL-INT-01 | TaskPanel sidebar hierarchy logic with filtered tasks (customer skill only) | Integration – Sidebar rendering hierarchy | Parent card rendered, getChildrenOf returns only customer subtask, pendingCount updated | Component integration |
  * | TC-PANEL-INT-02 | TaskPanel sidebar empty state when all tasks are filtered out | Integration – Sidebar empty state | visibleTasks length is 0, empty-tasks-box triggers | UI empty state |
+ * | TC-PANEL-INT-03 | Parent task without skillId preserved while all subtasks filtered out (unmatched skills) | Boundary / Integration – Parent persistence with empty subtasks | visibleTasks.length is 1, parentTasks has parent, getChildrenOf returns [], no false empty state | Boundary coverage (#146) |
  */
 
 import test from 'node:test';
@@ -418,3 +419,57 @@ test('TC-PANEL-INT-02: Integration - TaskPanel empty state when all tasks are fi
   // Then:  Expected result - visibleTasks length is 0 (triggers empty-tasks-box in TaskPanel.svelte)
   assert.equal(visibleTasks.length, 0);
 });
+
+test('TC-PANEL-INT-03: Boundary / Integration - Parent task preserved while all subtasks filtered out by unmatched skills (Issue #146)', () => {
+  // Given: Preconditions - Onboarding parent task without skillId ('新租戶起步') and 3 subtasks requiring distinct skills
+  appState.tasks = createMockOnboardingTasks('task-parent-active');
+
+  const parentTask = appState.tasks.find(t => t.title === '新租戶起步');
+  assert.ok(parentTask, 'Parent task must exist in initial task list');
+
+  // User effective skills do not match any onboarding subtask (e.g. admin in depts without onboarding skills)
+  const userSkills = ['unrelated.skill'];
+
+  // When:  Operation to execute - Filter tasks and compute TaskPanel hierarchy
+  const visibleTasks = filterTasksBySkills(appState.tasks, userSkills);
+
+  const parentTasks = visibleTasks.filter(t => !t.parent_task_id);
+  const getChildrenOf = (parentId) => visibleTasks.filter(t => t.parent_task_id === parentId);
+  const orphanTasks = visibleTasks.filter(t => t.parent_task_id && !visibleTasks.some(p => p.id === t.parent_task_id));
+  const pendingCount = visibleTasks.filter(t => t.status === 'pending' || t.status === 'in_progress').length;
+  const isFalseEmptyStateTriggered = visibleTasks.length === 0;
+
+  // Then:  Expected result -
+  // 1. visibleTasks.length is 1 (contains only the parent task)
+  assert.equal(visibleTasks.length, 1, 'visibleTasks must contain exactly 1 task');
+  assert.equal(visibleTasks[0].id, parentTask.id, 'visibleTasks must be the parent task');
+
+  // 2. parentTasks retains the parent task
+  assert.equal(parentTasks.length, 1, 'parentTasks must still contain the parent task');
+  assert.equal(parentTasks[0].id, parentTask.id);
+  assert.equal(parentTasks[0].title, '新租戶起步');
+
+  // 3. getChildrenOf(parentId) returns an empty array []
+  const children = getChildrenOf(parentTask.id);
+  assert.ok(Array.isArray(children), 'getChildrenOf must return an array');
+  assert.equal(children.length, 0, 'getChildrenOf must return empty array when all subtasks are filtered');
+  assert.deepEqual(children, []);
+
+  // 4. No orphan tasks exist
+  assert.equal(orphanTasks.length, 0, 'orphanTasks must be empty');
+
+  // 5. Does not mistakenly trigger TaskPanel empty state (empty-tasks-box)
+  assert.equal(isFalseEmptyStateTriggered, false, 'Must not falsely trigger empty-tasks-box');
+
+  // 6. pendingCount equals 1 (parent task status is in_progress)
+  assert.equal(pendingCount, 1, 'pendingCount must reflect the remaining parent task');
+
+  // Additional boundary verification with empty array [] effective skills
+  const visibleTasksEmpty = filterTasksBySkills(appState.tasks, []);
+  const parentTasksEmpty = visibleTasksEmpty.filter(t => !t.parent_task_id);
+  const childrenEmpty = visibleTasksEmpty.filter(t => t.parent_task_id === parentTask.id);
+  assert.equal(visibleTasksEmpty.length, 1);
+  assert.equal(parentTasksEmpty.length, 1);
+  assert.deepEqual(childrenEmpty, []);
+});
+
