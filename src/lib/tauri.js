@@ -61,9 +61,20 @@ let mockTenants = loadStorage('agent_erp_mock_tenants', defaultMockTenants);
 let mockUserTenants = loadStorage('agent_erp_mock_user_tenants', defaultMockUserTenants);
 let mockSessions = loadStorage('agent_erp_mock_session', null);
 
+function resolveMockActiveTenantId(explicitTenantId) {
+  if (explicitTenantId && typeof explicitTenantId === 'string' && explicitTenantId.trim()) {
+    return explicitTenantId.trim();
+  }
+  if (mockSessions && mockSessions.active_tenant_id && typeof mockSessions.active_tenant_id === 'string' && mockSessions.active_tenant_id.trim()) {
+    return mockSessions.active_tenant_id.trim();
+  }
+  return 'tnt_mock_1';
+}
+
 const defaultMockTasks = [
   {
     id: "task_parent_1",
+    tenant_id: "tnt_mock_1",
     title: "新租戶起步",
     status: "in_progress",
     parent_task_id: null,
@@ -76,6 +87,7 @@ const defaultMockTasks = [
   },
   {
     id: "task_sub_1",
+    tenant_id: "tnt_mock_1",
     title: "設定部門",
     status: "pending",
     parent_task_id: "task_parent_1",
@@ -88,6 +100,7 @@ const defaultMockTasks = [
   },
   {
     id: "task_sub_2",
+    tenant_id: "tnt_mock_1",
     title: "建立第一個客戶",
     status: "pending",
     parent_task_id: "task_parent_1",
@@ -100,6 +113,7 @@ const defaultMockTasks = [
   },
   {
     id: "task_sub_3",
+    tenant_id: "tnt_mock_1",
     title: "建立第一個供應商",
     status: "pending",
     parent_task_id: "task_parent_1",
@@ -147,6 +161,16 @@ let mockTasks = loadStorage('agent_erp_mock_tasks', defaultMockTasks);
 if (!mockTasks || mockTasks.length === 0) {
   mockTasks = defaultMockTasks;
   saveStorage('agent_erp_mock_tasks', mockTasks);
+} else {
+  // Ensure backward compatibility migration
+  let migrated = false;
+  mockTasks.forEach(t => {
+    if (!t.tenant_id) {
+      t.tenant_id = 'tnt_mock_1';
+      migrated = true;
+    }
+  });
+  if (migrated) saveStorage('agent_erp_mock_tasks', mockTasks);
 }
 
 let mockTaskMessages = loadStorage('agent_erp_mock_task_messages', defaultMockTaskMessages);
@@ -156,18 +180,27 @@ if (!mockTaskMessages || mockTaskMessages.length === 0) {
 }
 
 const defaultMockDepartments = [
-  { id: "dept_mock_1", name: "總經理室", parent_id: null, skills: ["org.manage", "audit.trace_view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
-  { id: "dept_mock_2", name: "研發總處", parent_id: null, skills: ["dev.repo_write", "dev.agent_config"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "dept_mock_3", name: "前端小組", parent_id: "dept_mock_2", skills: ["ui.build", "ui.component_test"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "dept_mock_4", name: "後端架構組", parent_id: "dept_mock_2", skills: ["backend.api_build", "db.migrate"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-  { id: "dept_mock_5", name: "行銷業務部", parent_id: null, skills: ["sales.lead_manage", "crm.read"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-  { id: "dept_mock_6", name: "財務會計處", parent_id: null, skills: ["finance.view", "invoice.issue"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
+  { id: "dept_mock_1", tenant_id: "tnt_mock_1", name: "總經理室", parent_id: null, skills: ["org.manage", "audit.trace_view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "dept_mock_2", tenant_id: "tnt_mock_1", name: "研發總處", parent_id: null, skills: ["dev.repo_write", "dev.agent_config"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "dept_mock_3", tenant_id: "tnt_mock_1", name: "前端小組", parent_id: "dept_mock_2", skills: ["ui.build", "ui.component_test"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "dept_mock_4", tenant_id: "tnt_mock_1", name: "後端架構組", parent_id: "dept_mock_2", skills: ["backend.api_build", "db.migrate"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+  { id: "dept_mock_5", tenant_id: "tnt_mock_1", name: "行銷業務部", parent_id: null, skills: ["sales.lead_manage", "crm.read"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+  { id: "dept_mock_6", tenant_id: "tnt_mock_1", name: "財務會計處", parent_id: null, skills: ["finance.view", "invoice.issue"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
 ];
 
 let mockDepartments = loadStorage('agent_erp_mock_departments', defaultMockDepartments);
 if (!mockDepartments || mockDepartments.length === 0) {
   mockDepartments = defaultMockDepartments;
   saveStorage('agent_erp_mock_departments', mockDepartments);
+} else {
+  let migrated = false;
+  mockDepartments.forEach(d => {
+    if (!d.tenant_id) {
+      d.tenant_id = 'tnt_mock_1';
+      migrated = true;
+    }
+  });
+  if (migrated) saveStorage('agent_erp_mock_departments', mockDepartments);
 }
 
 const defaultMockUserDepartments = [
@@ -182,14 +215,23 @@ if (!mockUserDepartments || !Array.isArray(mockUserDepartments)) {
 }
 
 const defaultMockPartners = [
-  { id: "part_mock_1", name: "A 公司 (Customer A)", is_customer: true, is_vendor: false, tax_id: "12345678", created_at: Math.floor(Date.now() / 1000) - 86400 * 5 },
-  { id: "part_mock_2", name: "台積電 (TSMC)", is_customer: true, is_vendor: false, tax_id: "22099131", created_at: Math.floor(Date.now() / 1000) - 86400 * 2 }
+  { id: "part_mock_1", tenant_id: "tnt_mock_1", name: "A 公司 (Customer A)", is_customer: true, is_vendor: false, tax_id: "12345678", created_at: Math.floor(Date.now() / 1000) - 86400 * 5 },
+  { id: "part_mock_2", tenant_id: "tnt_mock_1", name: "台積電 (TSMC)", is_customer: true, is_vendor: false, tax_id: "22099131", created_at: Math.floor(Date.now() / 1000) - 86400 * 2 }
 ];
 
 let mockPartners = loadStorage('agent_erp_mock_partners', defaultMockPartners);
 if (!mockPartners || !Array.isArray(mockPartners)) {
   mockPartners = defaultMockPartners;
   saveStorage('agent_erp_mock_partners', mockPartners);
+} else {
+  let migrated = false;
+  mockPartners.forEach(p => {
+    if (!p.tenant_id) {
+      p.tenant_id = 'tnt_mock_1';
+      migrated = true;
+    }
+  });
+  if (migrated) saveStorage('agent_erp_mock_partners', mockPartners);
 }
 
 let mockLlmProviders = [
@@ -706,7 +748,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_task': {
-      const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id } = args;
+      const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id, tenantId, tenant_id } = args;
+      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
       const now = Math.floor(Date.now() / 1000);
       const finalModuleId = (moduleId || module_id || '').trim();
       const finalParentTaskId = parentTaskId || parent_task_id || null;
@@ -714,6 +757,7 @@ export async function invoke(cmd, args = {}) {
       const finalSkillId = rawSkillId ? String(rawSkillId).trim() || null : null;
       const newTask = {
         id: `task_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        tenant_id: targetTenantId,
         title: (title || '').trim(),
         status: 'pending',
         parent_task_id: finalParentTaskId,
@@ -730,12 +774,14 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_tasks': {
-      const { moduleId } = args;
+      const { moduleId, tenantId, tenant_id } = args || {};
+      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
       const trimmedModule = (moduleId || '').trim();
-      if (!trimmedModule) {
-        return [...mockTasks];
+      let list = mockTasks.filter(t => (t.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (trimmedModule) {
+        list = list.filter(t => t.module_id === trimmedModule);
       }
-      return mockTasks.filter(t => t.module_id === trimmedModule);
+      return list;
     }
 
     case 'update_task_status': {
@@ -780,19 +826,21 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_department': {
-      const { name, parentId, parent_id } = args;
+      const { name, parentId, parent_id, tenantId, tenant_id } = args;
+      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
       const targetParentId = parentId !== undefined ? parentId : parent_id;
       const trimmedName = (name || '').trim();
       if (!trimmedName) {
         throw new Error('Department name cannot be empty');
       }
-      if (mockDepartments.some(d => d.name.trim().toLowerCase() === trimmedName.toLowerCase())) {
+      if (mockDepartments.some(d => (d.tenant_id || 'tnt_mock_1') === targetTenantId && d.name.trim().toLowerCase() === trimmedName.toLowerCase())) {
         throw new Error(`部門「${trimmedName}」已存在，請使用不同名稱`);
       }
       const now = Math.floor(Date.now() / 1000);
       const normalizedParentId = targetParentId && typeof targetParentId === 'string' && targetParentId.trim() ? targetParentId.trim() : null;
       const newDept = {
         id: `dept_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        tenant_id: targetTenantId,
         name: trimmedName,
         parent_id: normalizedParentId,
         skills: [],
@@ -804,7 +852,9 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_departments': {
-      return [...mockDepartments];
+      const { tenantId, tenant_id } = args || {};
+      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
+      return mockDepartments.filter(d => (d.tenant_id || 'tnt_mock_1') === targetTenantId);
     }
 
     case 'update_department_skills': {
@@ -829,7 +879,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_partner': {
-      const { name, is_customer, isCustomer, is_vendor, isVendor, tax_id, taxId } = args;
+      const { name, is_customer, isCustomer, is_vendor, isVendor, tax_id, taxId, tenantId, tenant_id } = args;
+      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
       const trimmedName = (name || '').trim();
       if (!trimmedName) {
         throw new Error('Partner name cannot be empty');
@@ -839,7 +890,10 @@ export async function invoke(cmd, args = {}) {
       const vendFlag = is_vendor !== undefined ? is_vendor : (isVendor !== undefined ? isVendor : false);
       const custFlag = is_customer !== undefined ? is_customer : (isCustomer !== undefined ? isCustomer : !vendFlag);
 
-      const existingIndex = mockPartners.findIndex(p => p.name.trim().toLowerCase() === trimmedName.toLowerCase());
+      const existingIndex = mockPartners.findIndex(p =>
+        (p.tenant_id || 'tnt_mock_1') === targetTenantId &&
+        p.name.trim().toLowerCase() === trimmedName.toLowerCase()
+      );
       if (existingIndex >= 0) {
         const existing = mockPartners[existingIndex];
         const needAddVendor = !!vendFlag && !existing.is_vendor;
@@ -862,6 +916,7 @@ export async function invoke(cmd, args = {}) {
       const now = Math.floor(Date.now() / 1000);
       const newPartner = {
         id: `part_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        tenant_id: targetTenantId,
         name: trimmedName,
         is_customer: !!custFlag,
         is_vendor: !!vendFlag,
@@ -874,10 +929,11 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_partners': {
-      const { filter_customer, filterCustomer, filter_vendor, filterVendor } = args;
+      const { filter_customer, filterCustomer, filter_vendor, filterVendor, tenantId, tenant_id } = args || {};
+      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
       const isCustFilter = filter_customer !== undefined ? filter_customer : filterCustomer;
       const isVendFilter = filter_vendor !== undefined ? filter_vendor : filterVendor;
-      let list = [...mockPartners];
+      let list = mockPartners.filter(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (isCustFilter === true) {
         list = list.filter(p => p.is_customer);
       }

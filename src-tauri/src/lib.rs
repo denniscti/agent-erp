@@ -282,13 +282,13 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
                 .unwrap_or_default()
                 .as_secs() as i64;
             conn.execute(
-                "INSERT INTO departments (id, name, parent_id, created_at) VALUES
-                 ('dept_mock_1', '總經理室', NULL, ?1),
-                 ('dept_mock_2', '研發總處', NULL, ?1),
-                 ('dept_mock_3', '前端小組', 'dept_mock_2', ?1),
-                 ('dept_mock_4', '後端架構組', 'dept_mock_2', ?1),
-                 ('dept_mock_5', '行銷業務部', NULL, ?1),
-                 ('dept_mock_6', '財務會計處', NULL, ?1)",
+                "INSERT INTO departments (id, tenant_id, name, parent_id, created_at) VALUES
+                 ('dept_mock_1', 'tnt_mock_1', '總經理室', NULL, ?1),
+                 ('dept_mock_2', 'tnt_mock_1', '研發總處', NULL, ?1),
+                 ('dept_mock_3', 'tnt_mock_1', '前端小組', 'dept_mock_2', ?1),
+                 ('dept_mock_4', 'tnt_mock_1', '後端架構組', 'dept_mock_2', ?1),
+                 ('dept_mock_5', 'tnt_mock_1', '行銷業務部', NULL, ?1),
+                 ('dept_mock_6', 'tnt_mock_1', '財務會計處', NULL, ?1)",
                 [now],
             )
             .map_err(|e| format!("Failed to seed departments: {}", e))?;
@@ -305,10 +305,10 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
                 .unwrap_or_default()
                 .as_secs() as i64;
             conn.execute(
-                "INSERT INTO tasks (id, title, status, parent_task_id, module_id, assignee, created_at) VALUES
-                 ('task_parent_1', '新租戶起步', 'in_progress', NULL, 'sales', '主管', ?1),
-                 ('task_sub_1', '設定部門', 'pending', 'task_parent_1', 'sales', '主管', ?1),
-                 ('task_sub_2', '邀請團隊成員', 'pending', 'task_parent_1', 'sales', '主管', ?1)",
+                "INSERT INTO tasks (id, tenant_id, title, status, parent_task_id, module_id, assignee, created_at) VALUES
+                 ('task_parent_1', 'tnt_mock_1', '新租戶起步', 'in_progress', NULL, 'sales', '主管', ?1),
+                 ('task_sub_1', 'tnt_mock_1', '設定部門', 'pending', 'task_parent_1', 'sales', '主管', ?1),
+                 ('task_sub_2', 'tnt_mock_1', '邀請團隊成員', 'pending', 'task_parent_1', 'sales', '主管', ?1)",
                 [now],
             ).map_err(|e| format!("Failed to seed tasks: {}", e))?;
 
@@ -322,6 +322,47 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
     }
 
     Ok(())
+}
+
+/// Resolve the active tenant ID from the current session in SQLite or TokenStore.
+pub fn resolve_active_tenant_id(conn: &rusqlite::Connection) -> Result<String, String> {
+    // 1. Check KeyringTokenStore for active session token
+    let token_store = auth::KeyringTokenStore::new();
+    if let Ok(Some(pair)) = auth::TokenStore::load(&token_store) {
+        if let Ok(mut stmt) = conn.prepare("SELECT active_tenant_id FROM sessions WHERE token = ?1") {
+            if let Ok(Some(tid)) = stmt.query_row([&pair.access_token], |row| row.get::<_, Option<String>>(0)) {
+                let trimmed = tid.trim().to_string();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed);
+                }
+            }
+        }
+    }
+
+    // 2. Fallback to latest session in SQLite sessions table with non-empty active_tenant_id
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT active_tenant_id FROM sessions WHERE active_tenant_id IS NOT NULL AND TRIM(active_tenant_id) != '' ORDER BY created_at DESC LIMIT 1"
+    ) {
+        if let Ok(tid) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+            let trimmed = tid.trim().to_string();
+            if !trimmed.is_empty() {
+                return Ok(trimmed);
+            }
+        }
+    }
+
+    // 3. Fallback to first registered tenant in SQLite tenants table
+    if let Ok(mut stmt) = conn.prepare("SELECT id FROM tenants ORDER BY rowid ASC LIMIT 1") {
+        if let Ok(tid) = stmt.query_row([], |row| row.get::<_, String>(0)) {
+            let trimmed = tid.trim().to_string();
+            if !trimmed.is_empty() {
+                return Ok(trimmed);
+            }
+        }
+    }
+
+    // 4. Fallback to default mock tenant
+    Ok("tnt_mock_1".to_string())
 }
 
 // 2. Scoped SQLite Table Initializer Command for Decoupled Modules

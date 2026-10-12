@@ -530,6 +530,14 @@ export async function apiCall(method, path, body = {}) {
 export async function login(email, password) {
   const res = await apiCall('POST', '/v1/auth/login', { email, password, client_type: 'app' });
   await checkAuthStatus();
+  if (appState.authStatus === 'authenticated' && appState.activeTenant) {
+    await Promise.all([
+      fetchTasks(),
+      fetchDepartments(),
+      fetchPartners(),
+      fetchMembers()
+    ]);
+  }
   return res;
 }
 
@@ -643,6 +651,9 @@ export async function logoutAction() {
   appState.authTenants = [];
   appState.activeTenant = null;
   appState.members = [];
+  appState.tasks = [];
+  appState.departments = [];
+  appState.partners = [];
   navigate('/login');
 }
 
@@ -653,6 +664,12 @@ export async function logoutAction() {
 export async function selectTenantAction(tenantId) {
   const res = await apiCall('POST', '/v1/auth/select-tenant', { tenant_id: tenantId });
   await checkAuthStatus();
+  await Promise.all([
+    fetchTasks(),
+    fetchDepartments(),
+    fetchPartners(),
+    fetchMembers()
+  ]);
   return res;
 }
 
@@ -682,7 +699,12 @@ export async function createTenantAction(tenantName, companyName, tenantCode, ta
  */
 export async function fetchTasks(moduleId = null) {
   try {
-    const list = await invoke('list_tasks', { moduleId: moduleId ? moduleId.trim() : '' });
+    const activeTenantId = appState.activeTenant?.id || null;
+    const list = await invoke('list_tasks', {
+      moduleId: moduleId ? moduleId.trim() : '',
+      tenantId: activeTenantId,
+      tenant_id: activeTenantId
+    });
     appState.tasks = list || [];
     return appState.tasks;
   } catch (err) {
@@ -702,6 +724,7 @@ export async function fetchTasks(moduleId = null) {
  */
 export async function createTaskAction(title, moduleId, assignee, parentTaskId = null, skillId = null) {
   try {
+    const activeTenantId = appState.activeTenant?.id || null;
     const task = await invoke('create_task', {
       title,
       moduleId,
@@ -709,7 +732,9 @@ export async function createTaskAction(title, moduleId, assignee, parentTaskId =
       parentTaskId: parentTaskId || null,
       skillId: skillId || null,
       parent_task_id: parentTaskId || null,
-      skill_id: skillId || null
+      skill_id: skillId || null,
+      tenantId: activeTenantId,
+      tenant_id: activeTenantId
     });
     await fetchTasks();
     return task;
@@ -820,7 +845,11 @@ export async function updateTaskStatusAction(taskId, status) {
  */
 export async function fetchDepartments() {
   try {
-    const list = await invoke('list_departments');
+    const activeTenantId = appState.activeTenant?.id || null;
+    const list = await invoke('list_departments', {
+      tenantId: activeTenantId,
+      tenant_id: activeTenantId
+    });
     appState.departments = list || [];
     return appState.departments;
   } catch (err) {
@@ -842,9 +871,13 @@ export async function createDepartmentAction(name, parentId = null) {
   }
   const normalizedParentId = parentId && typeof parentId === 'string' && parentId.trim() ? parentId.trim() : null;
   try {
+    const activeTenantId = appState.activeTenant?.id || null;
     const dept = await invoke('create_department', {
       name: trimmedName,
-      parentId: normalizedParentId
+      parentId: normalizedParentId,
+      parent_id: normalizedParentId,
+      tenantId: activeTenantId,
+      tenant_id: activeTenantId
     });
     await fetchDepartments();
     return dept;
@@ -861,9 +894,13 @@ export async function createDepartmentAction(name, parentId = null) {
  */
 export async function fetchPartners(filter = {}) {
   try {
+    const activeTenantId = appState.activeTenant?.id || null;
     const filterCustomer = filter?.filterCustomer !== undefined ? filter.filterCustomer : filter?.filter_customer;
     const filterVendor = filter?.filterVendor !== undefined ? filter.filterVendor : filter?.filter_vendor;
-    const payload = {};
+    const payload = {
+      tenantId: activeTenantId,
+      tenant_id: activeTenantId
+    };
     if (filterCustomer !== undefined) {
       payload.filterCustomer = filterCustomer;
       payload.filter_customer = filterCustomer;
@@ -930,6 +967,7 @@ export async function createPartnerAction(input, taxId = null) {
   const normalizedTaxId = targetTaxId && typeof targetTaxId === 'string' && targetTaxId.trim() ? targetTaxId.trim() : null;
 
   try {
+    const activeTenantId = appState.activeTenant?.id || null;
     const partner = await invoke('create_partner', {
       name,
       isCustomer: is_customer,
@@ -937,7 +975,9 @@ export async function createPartnerAction(input, taxId = null) {
       taxId: normalizedTaxId,
       is_customer,
       is_vendor,
-      tax_id: normalizedTaxId
+      tax_id: normalizedTaxId,
+      tenantId: activeTenantId,
+      tenant_id: activeTenantId
     });
     await fetchPartners();
     if (is_vendor && !is_customer) {

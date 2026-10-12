@@ -51,7 +51,7 @@
   let activeOrderFilter = $state('all');
   let selectedOrderId = $state(null);
   let isNotificationOpen = $state(false);
-  let isInitialized = $state(false);
+  let initializedKey = $state('');
 
   let newMemberName = $state('');
   let newMemberEmail = $state('');
@@ -299,20 +299,20 @@
     return parent ? parent.name : parentId;
   }
 
-  async function initializeAppData() {
-    if (isInitialized) return;
+  async function initializeAppData(force = false) {
+    const currentKey = `${appState.authUser?.id || ''}_${appState.activeTenant?.id || ''}`;
+    if (!force && initializedKey === currentKey && currentKey !== '_') return;
+
     await fetchOrders();
     await fetchAuditLogs();
     await fetchInstalledModules();
     await fetchModulesGallery();
     await fetchTasks();
     await fetchPartners();
-    if (canManageMembers(appState.activeTenant)) {
-      await fetchMembers();
-      await fetchDepartments();
-    }
+    await fetchDepartments();
+    await fetchMembers();
     await initMainChatGreeting();
-    isInitialized = true;
+    initializedKey = currentKey;
   }
 
   // Initialize data on mount

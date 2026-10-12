@@ -8,6 +8,8 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(1000);
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq, Eq)]
 pub struct Task {
     pub id: String,
+    #[serde(default)]
+    pub tenant_id: String,
     pub title: String,
     pub status: String, // "pending" | "in_progress" | "done" | "cancelled"
     pub parent_task_id: Option<String>,
@@ -38,6 +40,7 @@ pub fn create_tasks_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL DEFAULT '',
             title TEXT NOT NULL,
             status TEXT NOT NULL,
             parent_task_id TEXT,
@@ -50,8 +53,47 @@ pub fn create_tasks_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::
         [],
     )?;
 
-    // Idempotent migration for existing tables created before skill_id column
+    // Idempotent migration for existing tables created before skill_id or tenant_id column
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN skill_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''", []);
+
+    // Backward compatibility: backfill empty tenant_id for pre-existing records
+    let has_sessions: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if has_sessions {
+        let _ = conn.execute(
+            "UPDATE tasks SET tenant_id = (
+                SELECT s.active_tenant_id FROM sessions s
+                WHERE s.active_tenant_id IS NOT NULL AND TRIM(s.active_tenant_id) != ''
+                ORDER BY ABS(s.created_at - tasks.created_at) ASC LIMIT 1
+            ) WHERE (tenant_id = '' OR tenant_id IS NULL)
+              AND EXISTS (SELECT 1 FROM sessions s WHERE s.active_tenant_id IS NOT NULL AND TRIM(s.active_tenant_id) != '')",
+            [],
+        );
+    }
+
+    let has_tenants: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tenants'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if has_tenants {
+        let _ = conn.execute(
+            "UPDATE tasks SET tenant_id = (
+                SELECT id FROM tenants ORDER BY rowid ASC LIMIT 1
+            ) WHERE (tenant_id = '' OR tenant_id IS NULL)",
+            [],
+        );
+    }
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS task_messages (
@@ -70,12 +112,18 @@ pub fn create_tasks_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::
 // Usecase: create_task
 pub fn create_task_impl(
     conn: &rusqlite::Connection,
+    tenant_id: &str,
     title: String,
     module_id: String,
     assignee: String,
     parent_task_id: Option<String>,
     skill_id: Option<String>,
 ) -> Result<Task, String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    if trimmed_tenant_id.is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+
     let trimmed_title = title.trim();
     if trimmed_title.is_empty() {
         return Err("Task title cannot be empty".to_string());
@@ -107,10 +155,11 @@ pub fn create_task_impl(
     let status = "pending".to_string();
 
     conn.execute(
-        "INSERT INTO tasks (id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO tasks (id, tenant_id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             id,
+            trimmed_tenant_id,
             trimmed_title,
             status,
             parent_task_id,
@@ -125,6 +174,7 @@ pub fn create_task_impl(
 
     Ok(Task {
         id,
+        tenant_id: trimmed_tenant_id.to_string(),
         title: trimmed_title.to_string(),
         status,
         parent_task_id,
@@ -137,19 +187,29 @@ pub fn create_task_impl(
 }
 
 // Usecase: list_tasks
-pub fn list_tasks_impl(conn: &rusqlite::Connection, module_id: &str) -> Result<Vec<Task>, String> {
+pub fn list_tasks_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    module_id: &str,
+) -> Result<Vec<Task>, String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    if trimmed_tenant_id.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let trimmed_module = module_id.trim();
     let map_row = |row: &rusqlite::Row| -> rusqlite::Result<Task> {
         Ok(Task {
             id: row.get(0)?,
-            title: row.get(1)?,
-            status: row.get(2)?,
-            parent_task_id: row.get(3)?,
-            module_id: row.get(4)?,
-            assignee: row.get(5)?,
-            skill_id: row.get(6)?,
-            created_at: row.get(7)?,
-            completed_at: row.get(8)?,
+            tenant_id: row.get(1)?,
+            title: row.get(2)?,
+            status: row.get(3)?,
+            parent_task_id: row.get(4)?,
+            module_id: row.get(5)?,
+            assignee: row.get(6)?,
+            skill_id: row.get(7)?,
+            created_at: row.get(8)?,
+            completed_at: row.get(9)?,
         })
     };
 
@@ -157,12 +217,12 @@ pub fn list_tasks_impl(conn: &rusqlite::Connection, module_id: &str) -> Result<V
     if trimmed_module.is_empty() {
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at
-                 FROM tasks ORDER BY created_at ASC",
+                "SELECT id, tenant_id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at
+                 FROM tasks WHERE tenant_id = ?1 ORDER BY created_at ASC",
             )
             .map_err(|e| format!("Failed to prepare list_tasks query: {}", e))?;
         let rows = stmt
-            .query_map([], map_row)
+            .query_map([trimmed_tenant_id], map_row)
             .map_err(|e| format!("Failed to query tasks: {}", e))?;
         for task_res in rows {
             tasks.push(task_res.map_err(|e| format!("Error reading task row: {}", e))?);
@@ -170,12 +230,12 @@ pub fn list_tasks_impl(conn: &rusqlite::Connection, module_id: &str) -> Result<V
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at
-                 FROM tasks WHERE module_id = ?1 ORDER BY created_at ASC",
+                "SELECT id, tenant_id, title, status, parent_task_id, module_id, assignee, skill_id, created_at, completed_at
+                 FROM tasks WHERE tenant_id = ?1 AND module_id = ?2 ORDER BY created_at ASC",
             )
             .map_err(|e| format!("Failed to prepare list_tasks query: {}", e))?;
         let rows = stmt
-            .query_map(params![trimmed_module], map_row)
+            .query_map(params![trimmed_tenant_id, trimmed_module], map_row)
             .map_err(|e| format!("Failed to query tasks: {}", e))?;
         for task_res in rows {
             tasks.push(task_res.map_err(|e| format!("Error reading task row: {}", e))?);
@@ -287,6 +347,7 @@ pub fn get_task_messages_impl(
 #[specta::specta]
 pub async fn create_task<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
+    tenant_id: Option<String>,
     title: String,
     module_id: String,
     assignee: String,
@@ -296,19 +357,28 @@ pub async fn create_task<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    create_task_impl(&conn, title, module_id, assignee, parent_task_id, skill_id)
+    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        Some(tid) => tid,
+        None => crate::resolve_active_tenant_id(&conn)?,
+    };
+    create_task_impl(&conn, &active_tid, title, module_id, assignee, parent_task_id, skill_id)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn list_tasks<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
+    tenant_id: Option<String>,
     module_id: String,
 ) -> Result<Vec<Task>, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    list_tasks_impl(&conn, &module_id)
+    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+        Some(tid) => tid,
+        None => crate::resolve_active_tenant_id(&conn)?,
+    };
+    list_tasks_impl(&conn, &active_tid, &module_id)
 }
 
 #[tauri::command]
@@ -351,10 +421,13 @@ pub async fn get_task_messages<R: tauri::Runtime>(
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
-    fn setup_test_db() -> rusqlite::Connection {
+    pub const TEST_TENANT: &str = "tnt_test";
+    pub const TEST_TENANT_B: &str = "tnt_other";
+
+    pub fn setup_test_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         create_tasks_tables(&conn).unwrap();
         conn
@@ -373,6 +446,7 @@ mod tests {
         // When: create_task_impl is executed
         let result = create_task_impl(
             &conn,
+            TEST_TENANT,
             title.clone(),
             module_id.clone(),
             assignee.clone(),
@@ -383,6 +457,7 @@ mod tests {
         // Then: The task is successfully created with status "pending" and no parent
         assert!(result.is_ok());
         let task = result.unwrap();
+        assert_eq!(task.tenant_id, TEST_TENANT);
         assert_eq!(task.title, title);
         assert_eq!(task.module_id, module_id);
         assert_eq!(task.assignee, assignee);
@@ -400,6 +475,7 @@ mod tests {
         let conn = setup_test_db();
         let parent = create_task_impl(
             &conn,
+            TEST_TENANT,
             "新租戶起步".to_string(),
             "sales".to_string(),
             "主管".to_string(),
@@ -411,6 +487,7 @@ mod tests {
         // When: create_task_impl is executed with parent_task_id
         let subtask = create_task_impl(
             &conn,
+            TEST_TENANT,
             "設定部門".to_string(),
             "sales".to_string(),
             "主管".to_string(),
@@ -420,6 +497,7 @@ mod tests {
         .unwrap();
 
         // Then: The subtask is created and links to parent_task_id and has skill_id
+        assert_eq!(subtask.tenant_id, TEST_TENANT);
         assert_eq!(subtask.title, "設定部門");
         assert_eq!(subtask.parent_task_id, Some(parent.id));
         assert_eq!(subtask.skill_id, Some("department.manage".to_string()));
@@ -434,6 +512,7 @@ mod tests {
         // When: Creating a task with skill_id
         let task = create_task_impl(
             &conn,
+            TEST_TENANT,
             "建立第一個客戶".to_string(),
             "sales".to_string(),
             "主管".to_string(),
@@ -443,12 +522,13 @@ mod tests {
         .unwrap();
 
         // Then: Task is created with skill_id stored and queryable via list_tasks
+        assert_eq!(task.tenant_id, TEST_TENANT);
         assert_eq!(
             task.skill_id,
             Some("customer.create_basic_profile".to_string())
         );
 
-        let tasks = list_tasks_impl(&conn, "sales").unwrap();
+        let tasks = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(
             tasks[0].skill_id,
@@ -464,6 +544,7 @@ mod tests {
         // When: Creating tasks with whitespace and empty skill_ids
         let task_ws = create_task_impl(
             &conn,
+            TEST_TENANT,
             "任務 A".to_string(),
             "sales".to_string(),
             "主管".to_string(),
@@ -473,6 +554,7 @@ mod tests {
         .unwrap();
         let task_empty = create_task_impl(
             &conn,
+            TEST_TENANT,
             "任務 B".to_string(),
             "sales".to_string(),
             "主管".to_string(),
@@ -494,6 +576,7 @@ mod tests {
         // When: create_task_impl is called with whitespace title
         let result = create_task_impl(
             &conn,
+            TEST_TENANT,
             "   ".to_string(),
             "sales".to_string(),
             "主管".to_string(),
@@ -514,6 +597,7 @@ mod tests {
         // When: create_task_impl is called with empty module
         let err_module = create_task_impl(
             &conn,
+            TEST_TENANT,
             "任務".to_string(),
             "".to_string(),
             "主管".to_string(),
@@ -523,6 +607,7 @@ mod tests {
         // And: create_task_impl is called with empty assignee
         let err_assignee = create_task_impl(
             &conn,
+            TEST_TENANT,
             "任務".to_string(),
             "sales".to_string(),
             "  ".to_string(),
@@ -541,6 +626,7 @@ mod tests {
         let conn = setup_test_db();
         create_task_impl(
             &conn,
+            TEST_TENANT,
             "Sales 1".into(),
             "sales".into(),
             "User".into(),
@@ -550,6 +636,7 @@ mod tests {
         .unwrap();
         create_task_impl(
             &conn,
+            TEST_TENANT,
             "Sales 2".into(),
             "sales".into(),
             "User".into(),
@@ -559,6 +646,7 @@ mod tests {
         .unwrap();
         create_task_impl(
             &conn,
+            TEST_TENANT,
             "CRM 1".into(),
             "crm".into(),
             "User".into(),
@@ -568,9 +656,9 @@ mod tests {
         .unwrap();
 
         // When: Querying "sales" module
-        let sales_tasks = list_tasks_impl(&conn, "sales").unwrap();
+        let sales_tasks = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
         // And: Querying "finance" module (no tasks)
-        let finance_tasks = list_tasks_impl(&conn, "finance").unwrap();
+        let finance_tasks = list_tasks_impl(&conn, TEST_TENANT, "finance").unwrap();
 
         // Then: Exactly 2 sales tasks are returned and 0 finance tasks are returned
         assert_eq!(sales_tasks.len(), 2);
@@ -585,6 +673,7 @@ mod tests {
         let conn = setup_test_db();
         create_task_impl(
             &conn,
+            TEST_TENANT,
             "Task A".into(),
             "sales".into(),
             "User".into(),
@@ -594,6 +683,7 @@ mod tests {
         .unwrap();
         create_task_impl(
             &conn,
+            TEST_TENANT,
             "Task B".into(),
             "crm".into(),
             "User".into(),
@@ -603,7 +693,7 @@ mod tests {
         .unwrap();
 
         // When: Querying with empty module_id
-        let all_tasks = list_tasks_impl(&conn, "").unwrap();
+        let all_tasks = list_tasks_impl(&conn, TEST_TENANT, "").unwrap();
 
         // Then: All tasks across all modules are returned
         assert_eq!(all_tasks.len(), 2);
@@ -615,6 +705,7 @@ mod tests {
         let conn = setup_test_db();
         let task = create_task_impl(
             &conn,
+            TEST_TENANT,
             "設定部門".into(),
             "sales".into(),
             "User".into(),
@@ -625,13 +716,13 @@ mod tests {
 
         // When: Updating to in_progress
         update_task_status_impl(&conn, &task.id, "in_progress").unwrap();
-        let list = list_tasks_impl(&conn, "sales").unwrap();
+        let list = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
         assert_eq!(list[0].status, "in_progress");
         assert_eq!(list[0].completed_at, None);
 
         // When: Updating to done
         update_task_status_impl(&conn, &task.id, "done").unwrap();
-        let list_done = list_tasks_impl(&conn, "sales").unwrap();
+        let list_done = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
 
         // Then: Status is done and completed_at is recorded
         assert_eq!(list_done[0].status, "done");
@@ -639,7 +730,7 @@ mod tests {
 
         // When: Updating to cancelled
         update_task_status_impl(&conn, &task.id, "cancelled").unwrap();
-        let list_cancelled = list_tasks_impl(&conn, "sales").unwrap();
+        let list_cancelled = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
         assert_eq!(list_cancelled[0].status, "cancelled");
         assert_eq!(list_cancelled[0].completed_at, None);
     }
@@ -650,6 +741,7 @@ mod tests {
         let conn = setup_test_db();
         let task = create_task_impl(
             &conn,
+            TEST_TENANT,
             "設定部門".into(),
             "sales".into(),
             "User".into(),
@@ -664,7 +756,7 @@ mod tests {
         // Then: Error is returned and status remains pending
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid task status"));
-        let list = list_tasks_impl(&conn, "sales").unwrap();
+        let list = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
         assert_eq!(list[0].status, "pending");
     }
 
@@ -687,6 +779,7 @@ mod tests {
         let conn = setup_test_db();
         let task = create_task_impl(
             &conn,
+            TEST_TENANT,
             "設定部門".into(),
             "sales".into(),
             "User".into(),
@@ -763,5 +856,101 @@ mod tests {
 
         // Then: An empty list is returned without error
         assert_eq!(msgs.len(), 0);
+    }
+
+    #[test]
+    fn test_tc_task_iso_01_list_tasks_isolated_by_tenant() {
+        // Given: Tasks in TEST_TENANT and TEST_TENANT_B
+        let conn = setup_test_db();
+        create_task_impl(
+            &conn,
+            TEST_TENANT,
+            "租戶 A 任務".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        create_task_impl(
+            &conn,
+            TEST_TENANT_B,
+            "租戶 B 任務".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: list_tasks_impl is queried for TEST_TENANT
+        let list_a = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
+        // And: list_tasks_impl is queried for TEST_TENANT_B
+        let list_b = list_tasks_impl(&conn, TEST_TENANT_B, "sales").unwrap();
+
+        // Then: TEST_TENANT only sees its own task, and TEST_TENANT_B sees its own
+        assert_eq!(list_a.len(), 1);
+        assert_eq!(list_a[0].title, "租戶 A 任務");
+        assert_eq!(list_a[0].tenant_id, TEST_TENANT);
+
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].title, "租戶 B 任務");
+        assert_eq!(list_b[0].tenant_id, TEST_TENANT_B);
+    }
+
+    #[test]
+    fn test_tc_task_iso_b01_empty_or_whitespace_tenant_id_error() {
+        // Given: An initialized database
+        let conn = setup_test_db();
+
+        // When: create_task_impl is called with empty or whitespace tenant_id
+        let err_empty = create_task_impl(
+            &conn,
+            "",
+            "無租戶任務".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        );
+        let err_whitespace = create_task_impl(
+            &conn,
+            "   ",
+            "無租戶任務".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        );
+
+        // Then: Both return validation errors
+        assert!(err_empty.is_err());
+        assert_eq!(err_empty.unwrap_err(), "Tenant ID cannot be empty");
+        assert!(err_whitespace.is_err());
+        assert_eq!(err_whitespace.unwrap_err(), "Tenant ID cannot be empty");
+    }
+
+    #[test]
+    fn test_tc_task_iso_b02_list_tasks_empty_or_unknown_tenant() {
+        // Given: Tasks in TEST_TENANT
+        let conn = setup_test_db();
+        create_task_impl(
+            &conn,
+            TEST_TENANT,
+            "任務".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: list_tasks_impl is queried with empty or nonexistent tenant_id
+        let list_empty = list_tasks_impl(&conn, "", "sales").unwrap();
+        let list_unknown = list_tasks_impl(&conn, "nonexistent", "sales").unwrap();
+
+        // Then: Both return empty lists
+        assert_eq!(list_empty.len(), 0);
+        assert_eq!(list_unknown.len(), 0);
     }
 }
