@@ -55,7 +55,10 @@ pub fn create_tasks_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::
 
     // Idempotent migration for existing tables created before skill_id or tenant_id column
     let _ = conn.execute("ALTER TABLE tasks ADD COLUMN skill_id TEXT", []);
-    let _ = conn.execute("ALTER TABLE tasks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''", []);
+    let _ = conn.execute(
+        "ALTER TABLE tasks ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
 
     // Backward compatibility: backfill empty tenant_id for pre-existing records
     let has_sessions: bool = conn
@@ -357,11 +360,22 @@ pub async fn create_task<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+    let active_tid = match tenant_id
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
         Some(tid) => tid,
         None => crate::resolve_active_tenant_id(&conn)?,
     };
-    create_task_impl(&conn, &active_tid, title, module_id, assignee, parent_task_id, skill_id)
+    create_task_impl(
+        &conn,
+        &active_tid,
+        title,
+        module_id,
+        assignee,
+        parent_task_id,
+        skill_id,
+    )
 }
 
 #[tauri::command]
@@ -374,7 +388,10 @@ pub async fn list_tasks<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+    let active_tid = match tenant_id
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
         Some(tid) => tid,
         None => crate::resolve_active_tenant_id(&conn)?,
     };

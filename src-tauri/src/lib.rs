@@ -329,8 +329,11 @@ pub fn resolve_active_tenant_id(conn: &rusqlite::Connection) -> Result<String, S
     // 1. Check KeyringTokenStore for active session token
     let token_store = auth::KeyringTokenStore::new();
     if let Ok(Some(pair)) = auth::TokenStore::load(&token_store) {
-        if let Ok(mut stmt) = conn.prepare("SELECT active_tenant_id FROM sessions WHERE token = ?1") {
-            if let Ok(Some(tid)) = stmt.query_row([&pair.access_token], |row| row.get::<_, Option<String>>(0)) {
+        if let Ok(mut stmt) = conn.prepare("SELECT active_tenant_id FROM sessions WHERE token = ?1")
+        {
+            if let Ok(Some(tid)) =
+                stmt.query_row([&pair.access_token], |row| row.get::<_, Option<String>>(0))
+            {
                 let trimmed = tid.trim().to_string();
                 if !trimmed.is_empty() {
                     return Ok(trimmed);

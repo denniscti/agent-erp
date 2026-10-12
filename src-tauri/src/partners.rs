@@ -281,7 +281,10 @@ pub async fn create_partner<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+    let active_tid = match tenant_id
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
         Some(tid) => tid,
         None => crate::resolve_active_tenant_id(&conn)?,
     };
@@ -299,7 +302,10 @@ pub async fn list_partners<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+    let active_tid = match tenant_id
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
         Some(tid) => tid,
         None => crate::resolve_active_tenant_id(&conn)?,
     };
@@ -348,7 +354,14 @@ pub mod tests {
         let tax_id = Some("12345678".to_string());
 
         // When: create_partner_impl is executed
-        let result = create_partner_impl(&conn, TEST_TENANT, name.clone(), Some(true), Some(false), tax_id);
+        let result = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            name.clone(),
+            Some(true),
+            Some(false),
+            tax_id,
+        );
 
         // Then: Partner is created with tax_id correctly stored
         assert!(result.is_ok());
@@ -364,10 +377,33 @@ pub mod tests {
     fn test_tc_ptr_n_03_list_partners_chronological_order() {
         // Given: Multiple partners created in sequence within TEST_TENANT
         let conn = setup_test_db();
-        let p1 = create_partner_impl(&conn, TEST_TENANT, "客戶甲".to_string(), Some(true), None, None).unwrap();
-        let p2 = create_partner_impl(&conn, TEST_TENANT, "客戶乙".to_string(), Some(true), None, None).unwrap();
-        let p3 = create_partner_impl(&conn, TEST_TENANT, "廠商丙".to_string(), Some(false), Some(true), None)
-            .unwrap();
+        let p1 = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶甲".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .unwrap();
+        let p2 = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶乙".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .unwrap();
+        let p3 = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商丙".to_string(),
+            Some(false),
+            Some(true),
+            None,
+        )
+        .unwrap();
 
         // When: list_partners_impl is called without filter
         let all = list_partners_impl(&conn, TEST_TENANT, None, None).unwrap();
@@ -431,9 +467,15 @@ pub mod tests {
         let conn = setup_test_db();
 
         // When: create_partner_impl is executed with whitespace tax_id
-        let res1 =
-            create_partner_impl(&conn, TEST_TENANT, "客戶A".to_string(), None, None, Some("".to_string()))
-                .unwrap();
+        let res1 = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶A".to_string(),
+            None,
+            None,
+            Some("".to_string()),
+        )
+        .unwrap();
         let res2 = create_partner_impl(
             &conn,
             TEST_TENANT,
@@ -456,7 +498,8 @@ pub mod tests {
 
         // When: create_partner_impl is called with empty string and whitespace-only string
         let err_empty = create_partner_impl(&conn, TEST_TENANT, "".to_string(), None, None, None);
-        let err_whitespace = create_partner_impl(&conn, TEST_TENANT, "    ".to_string(), None, None, None);
+        let err_whitespace =
+            create_partner_impl(&conn, TEST_TENANT, "    ".to_string(), None, None, None);
 
         // Then: Both return validation errors
         assert!(err_empty.is_err());
@@ -484,7 +527,8 @@ pub mod tests {
         create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None).unwrap();
 
         // When: Attempting to create another partner with identical name "台積電" in the same tenant
-        let result = create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None);
+        let result =
+            create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None);
 
         // Then: Duplicate error is returned
         assert!(result.is_err());
@@ -501,7 +545,8 @@ pub mod tests {
         create_partner_impl(&conn, TEST_TENANT, "TSMC".to_string(), None, None, None).unwrap();
 
         // When: Attempting to create partner with "  tsmc  " in the same tenant
-        let result = create_partner_impl(&conn, TEST_TENANT, "  tsmc  ".to_string(), None, None, None);
+        let result =
+            create_partner_impl(&conn, TEST_TENANT, "  tsmc  ".to_string(), None, None, None);
 
         // Then: Duplicate check detects match case-insensitively and returns error
         assert!(result.is_err());
@@ -537,7 +582,14 @@ pub mod tests {
         let tax_id = Some("11223344".to_string());
 
         // When: create_partner_impl is executed with vendor flag and tax_id
-        let result = create_partner_impl(&conn, TEST_TENANT, name.clone(), Some(false), Some(true), tax_id);
+        let result = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            name.clone(),
+            Some(false),
+            Some(true),
+            tax_id,
+        );
 
         // Then: Partner is created with is_vendor=true, tax_id stored
         assert!(result.is_ok());
@@ -552,15 +604,27 @@ pub mod tests {
     fn test_tc_vnd_n_03_existing_customer_overlay_vendor_identity() {
         // Given: Existing customer "台積電" (is_customer=true, is_vendor=false)
         let conn = setup_test_db();
-        let original =
-            create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), Some(true), Some(false), None)
-                .unwrap();
+        let original = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            Some(true),
+            Some(false),
+            None,
+        )
+        .unwrap();
         assert!(original.is_customer);
         assert!(!original.is_vendor);
 
         // When: Registering the same partner as a vendor
-        let overlay_result =
-            create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, Some(true), None);
+        let overlay_result = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            None,
+            Some(true),
+            None,
+        );
 
         // Then: The existing record is updated with is_vendor=true, retaining is_customer=true and original id
         assert!(overlay_result.is_ok());
@@ -590,8 +654,14 @@ pub mod tests {
         .unwrap();
 
         // When: Registering the same partner as a customer
-        let overlay_result =
-            create_partner_impl(&conn, TEST_TENANT, "穩懋半導體".to_string(), Some(true), None, None);
+        let overlay_result = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "穩懋半導體".to_string(),
+            Some(true),
+            None,
+            None,
+        );
 
         // Then: Existing record is updated with is_customer=true, retaining is_vendor=true
         assert!(overlay_result.is_ok());
@@ -609,7 +679,15 @@ pub mod tests {
     fn test_tc_vnd_n_05_overlay_identity_merges_tax_id() {
         // Given: Existing customer without tax_id
         let conn = setup_test_db();
-        let p = create_partner_impl(&conn, TEST_TENANT, "華邦電".to_string(), Some(true), None, None).unwrap();
+        let p = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "華邦電".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(p.tax_id, None);
 
         // When: Overlaying vendor identity with a new tax_id
@@ -633,9 +711,33 @@ pub mod tests {
     fn test_tc_vnd_n_06_list_partners_filter_vendor() {
         // Given: 1 pure customer, 1 pure vendor, 1 dual identity partner
         let conn = setup_test_db();
-        create_partner_impl(&conn, TEST_TENANT, "客戶A".to_string(), Some(true), Some(false), None).unwrap();
-        create_partner_impl(&conn, TEST_TENANT, "廠商B".to_string(), Some(false), Some(true), None).unwrap();
-        create_partner_impl(&conn, TEST_TENANT, "綜合C".to_string(), Some(true), Some(true), None).unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶A".to_string(),
+            Some(true),
+            Some(false),
+            None,
+        )
+        .unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商B".to_string(),
+            Some(false),
+            Some(true),
+            None,
+        )
+        .unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "綜合C".to_string(),
+            Some(true),
+            Some(true),
+            None,
+        )
+        .unwrap();
 
         // When: Querying with filter_vendor=Some(true)
         let vendors = list_partners_impl(&conn, TEST_TENANT, None, Some(true)).unwrap();
@@ -650,11 +752,25 @@ pub mod tests {
     fn test_tc_vnd_e_01_duplicate_vendor_error() {
         // Given: Existing vendor "日月光"
         let conn = setup_test_db();
-        create_partner_impl(&conn, TEST_TENANT, "日月光".to_string(), Some(false), Some(true), None).unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "日月光".to_string(),
+            Some(false),
+            Some(true),
+            None,
+        )
+        .unwrap();
 
         // When: Attempting to register "日月光" as vendor again
-        let result =
-            create_partner_impl(&conn, TEST_TENANT, "日月光".to_string(), Some(false), Some(true), None);
+        let result = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "日月光".to_string(),
+            Some(false),
+            Some(true),
+            None,
+        );
 
         // Then: Duplicate vendor error is returned
         assert!(result.is_err());
@@ -668,11 +784,25 @@ pub mod tests {
     fn test_tc_vnd_e_02_duplicate_vendor_case_insensitive_error() {
         // Given: Existing vendor "ASE"
         let conn = setup_test_db();
-        create_partner_impl(&conn, TEST_TENANT, "ASE".to_string(), Some(false), Some(true), None).unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "ASE".to_string(),
+            Some(false),
+            Some(true),
+            None,
+        )
+        .unwrap();
 
         // When: Attempting to register "  ase  " as vendor
-        let result =
-            create_partner_impl(&conn, TEST_TENANT, "  ase  ".to_string(), Some(false), Some(true), None);
+        let result = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "  ase  ".to_string(),
+            Some(false),
+            Some(true),
+            None,
+        );
 
         // Then: Duplicate vendor error is returned
         assert!(result.is_err());
@@ -686,11 +816,25 @@ pub mod tests {
     fn test_tc_ptr_iso_01_cross_tenant_same_name_success() {
         // Given: Partner "台積電" registered in TEST_TENANT
         let conn = setup_test_db();
-        let res_a = create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), Some(true), None, Some("22099131".to_string()));
+        let res_a = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            Some(true),
+            None,
+            Some("22099131".to_string()),
+        );
         assert!(res_a.is_ok());
 
         // When: Attempting to register the same partner name "台積電" in TEST_TENANT_B
-        let res_b = create_partner_impl(&conn, TEST_TENANT_B, "台積電".to_string(), Some(true), None, Some("22099131".to_string()));
+        let res_b = create_partner_impl(
+            &conn,
+            TEST_TENANT_B,
+            "台積電".to_string(),
+            Some(true),
+            None,
+            Some("22099131".to_string()),
+        );
 
         // Then: Registration succeeds independently without duplicate conflict
         assert!(res_b.is_ok());
@@ -704,9 +848,33 @@ pub mod tests {
     fn test_tc_ptr_iso_02_list_partners_tenant_isolation() {
         // Given: 2 partners in TEST_TENANT and 1 partner in TEST_TENANT_B
         let conn = setup_test_db();
-        create_partner_impl(&conn, TEST_TENANT, "租戶A客戶1".to_string(), Some(true), None, None).unwrap();
-        create_partner_impl(&conn, TEST_TENANT, "租戶A廠商2".to_string(), None, Some(true), None).unwrap();
-        create_partner_impl(&conn, TEST_TENANT_B, "租戶B客戶1".to_string(), Some(true), None, None).unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "租戶A客戶1".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "租戶A廠商2".to_string(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT_B,
+            "租戶B客戶1".to_string(),
+            Some(true),
+            None,
+            None,
+        )
+        .unwrap();
 
         // When: Querying partners for TEST_TENANT
         let list_a = list_partners_impl(&conn, TEST_TENANT, None, None).unwrap();
@@ -728,10 +896,26 @@ pub mod tests {
     fn test_tc_ptr_iso_03_cross_tenant_overlay_not_affected() {
         // Given: Customer "華碩" registered in TEST_TENANT
         let conn = setup_test_db();
-        create_partner_impl(&conn, TEST_TENANT, "華碩".to_string(), Some(true), Some(false), None).unwrap();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "華碩".to_string(),
+            Some(true),
+            Some(false),
+            None,
+        )
+        .unwrap();
 
         // When: Vendor "華碩" is registered in TEST_TENANT_B
-        let res_b = create_partner_impl(&conn, TEST_TENANT_B, "華碩".to_string(), Some(false), Some(true), None).unwrap();
+        let res_b = create_partner_impl(
+            &conn,
+            TEST_TENANT_B,
+            "華碩".to_string(),
+            Some(false),
+            Some(true),
+            None,
+        )
+        .unwrap();
 
         // Then: TEST_TENANT_B's record has vendor flag only
         assert!(!res_b.is_customer);

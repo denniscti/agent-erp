@@ -253,7 +253,10 @@ pub async fn create_department<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+    let active_tid = match tenant_id
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
         Some(tid) => tid,
         None => crate::resolve_active_tenant_id(&conn)?,
     };
@@ -269,7 +272,10 @@ pub async fn list_departments<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+    let active_tid = match tenant_id
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+    {
         Some(tid) => tid,
         None => crate::resolve_active_tenant_id(&conn)?,
     };
@@ -327,11 +333,16 @@ pub mod tests {
     fn test_tc_dept_02_create_nested_department_success() {
         // Given: An existing parent department
         let conn = setup_test_db();
-        let parent = create_department_impl(&conn, TEST_TENANT, "銷售部".to_string(), None).unwrap();
+        let parent =
+            create_department_impl(&conn, TEST_TENANT, "銷售部".to_string(), None).unwrap();
 
         // When: create_department_impl is executed with parent_id
-        let sub_result =
-            create_department_impl(&conn, TEST_TENANT, "銷售一組".to_string(), Some(parent.id.clone()));
+        let sub_result = create_department_impl(
+            &conn,
+            TEST_TENANT,
+            "銷售一組".to_string(),
+            Some(parent.id.clone()),
+        );
 
         // Then: The sub-department is created and correctly references the parent_id
         assert!(sub_result.is_ok());
@@ -380,8 +391,13 @@ pub mod tests {
         let conn = setup_test_db();
 
         // When: create_department_impl is executed with whitespace parent_id
-        let result =
-            create_department_impl(&conn, TEST_TENANT, "財務部".to_string(), Some("   ".to_string())).unwrap();
+        let result = create_department_impl(
+            &conn,
+            TEST_TENANT,
+            "財務部".to_string(),
+            Some("   ".to_string()),
+        )
+        .unwrap();
 
         // Then: parent_id is normalized to None
         assert_eq!(result.parent_id, None);
@@ -405,8 +421,13 @@ pub mod tests {
         let conn = setup_test_db();
         let dept1 = create_department_impl(&conn, TEST_TENANT, "人事部".to_string(), None).unwrap();
         let dept2 = create_department_impl(&conn, TEST_TENANT, "研發部".to_string(), None).unwrap();
-        let dept3 =
-            create_department_impl(&conn, TEST_TENANT, "前端小組".to_string(), Some(dept2.id.clone())).unwrap();
+        let dept3 = create_department_impl(
+            &conn,
+            TEST_TENANT,
+            "前端小組".to_string(),
+            Some(dept2.id.clone()),
+        )
+        .unwrap();
 
         // When: list_departments_impl is called
         let list = list_departments_impl(&conn, TEST_TENANT).unwrap();
@@ -483,10 +504,12 @@ pub mod tests {
     fn test_tc_dept_dup_05_duplicate_subdepartment_name_error() {
         // Given: An existing department "銷售部"
         let conn = setup_test_db();
-        let parent = create_department_impl(&conn, TEST_TENANT, "銷售部".to_string(), None).unwrap();
+        let parent =
+            create_department_impl(&conn, TEST_TENANT, "銷售部".to_string(), None).unwrap();
 
         // When: create_department_impl is called with same name "銷售部" even if under parent_id in same tenant
-        let result = create_department_impl(&conn, TEST_TENANT, "銷售部".to_string(), Some(parent.id));
+        let result =
+            create_department_impl(&conn, TEST_TENANT, "銷售部".to_string(), Some(parent.id));
 
         // Then: Duplicate check within the tenant rejects creation
         assert!(result.is_err());
@@ -497,10 +520,12 @@ pub mod tests {
     fn test_tc_dept_iso_01_same_department_name_different_tenants_success() {
         // Given: An initialized database with "研發部" in TEST_TENANT
         let conn = setup_test_db();
-        let dept_a = create_department_impl(&conn, TEST_TENANT, "研發部".to_string(), None).unwrap();
+        let dept_a =
+            create_department_impl(&conn, TEST_TENANT, "研發部".to_string(), None).unwrap();
 
         // When: create_department_impl creates "研發部" in TEST_TENANT_B
-        let dept_b = create_department_impl(&conn, TEST_TENANT_B, "研發部".to_string(), None).unwrap();
+        let dept_b =
+            create_department_impl(&conn, TEST_TENANT_B, "研發部".to_string(), None).unwrap();
 
         // Then: Both departments succeed with different IDs and tenant IDs
         assert_eq!(dept_a.name, "研發部");
