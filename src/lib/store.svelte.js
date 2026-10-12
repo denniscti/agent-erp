@@ -499,7 +499,12 @@ export async function checkAuthStatus() {
  */
 export async function apiCall(method, path, body = {}) {
   try {
-    return await invoke('api_call', { method, path, body });
+    const res = await invoke('api_call', { method, path, body });
+    if (path === '/v1/auth/register-tenant' && res?.tenants?.[0]) {
+      appState.activeTenant = res.tenants[0];
+      appState.departments = [];
+    }
+    return res;
   } catch (err) {
     const errorObj = /** @type {any} */ (err);
     const errCode = errorObj?.code || (typeof err === 'string' ? err : '');
@@ -1312,6 +1317,9 @@ export async function onboardMemberAction({ name, email, role = 'member', depart
       department_ids: validDepartmentIds
     });
     await fetchMembers();
+    if (appState.departments.length === 0) {
+      await fetchDepartments();
+    }
     showToast(`已成功新增成員「${trimmedName}」`);
     return res;
   } catch (err) {

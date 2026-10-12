@@ -179,18 +179,22 @@ if (!mockTaskMessages || mockTaskMessages.length === 0) {
   saveStorage('agent_erp_mock_task_messages', mockTaskMessages);
 }
 
-const defaultMockDepartments = [
-  { id: "dept_mock_1", tenant_id: "tnt_mock_1", name: "總經理室", parent_id: null, skills: ["org.manage", "audit.trace_view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
-  { id: "dept_mock_2", tenant_id: "tnt_mock_1", name: "研發總處", parent_id: null, skills: ["dev.repo_write", "dev.agent_config"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "dept_mock_3", tenant_id: "tnt_mock_1", name: "前端小組", parent_id: "dept_mock_2", skills: ["ui.build", "ui.component_test"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "dept_mock_4", tenant_id: "tnt_mock_1", name: "後端架構組", parent_id: "dept_mock_2", skills: ["backend.api_build", "db.migrate"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-  { id: "dept_mock_5", tenant_id: "tnt_mock_1", name: "行銷業務部", parent_id: null, skills: ["sales.lead_manage", "crm.read"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-  { id: "dept_mock_6", tenant_id: "tnt_mock_1", name: "財務會計處", parent_id: null, skills: ["finance.view", "invoice.issue"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
-];
+function createDefaultMockDepartments(tenantId = 'tnt_mock_1') {
+  return [
+    { id: "dept_mock_1", tenant_id: tenantId, name: "總經理室", parent_id: null, skills: ["org.manage", "audit.trace_view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+    { id: "dept_mock_2", tenant_id: tenantId, name: "研發總處", parent_id: null, skills: ["dev.repo_write", "dev.agent_config"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+    { id: "dept_mock_3", tenant_id: tenantId, name: "前端小組", parent_id: "dept_mock_2", skills: ["ui.build", "ui.component_test"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+    { id: "dept_mock_4", tenant_id: tenantId, name: "後端架構組", parent_id: "dept_mock_2", skills: ["backend.api_build", "db.migrate"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+    { id: "dept_mock_5", tenant_id: tenantId, name: "行銷業務部", parent_id: null, skills: ["sales.lead_manage", "crm.read"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+    { id: "dept_mock_6", tenant_id: tenantId, name: "財務會計處", parent_id: null, skills: ["finance.view", "invoice.issue"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
+  ];
+}
 
-let mockDepartments = loadStorage('agent_erp_mock_departments', defaultMockDepartments);
-if (!mockDepartments || mockDepartments.length === 0) {
-  mockDepartments = defaultMockDepartments;
+const defaultMockDepartments = createDefaultMockDepartments('tnt_mock_1');
+
+let mockDepartments = loadStorage('agent_erp_mock_departments', null);
+if (!mockDepartments || !Array.isArray(mockDepartments) || mockDepartments.length === 0) {
+  mockDepartments = createDefaultMockDepartments('tnt_mock_1');
   saveStorage('agent_erp_mock_departments', mockDepartments);
 } else {
   let migrated = false;
@@ -539,6 +543,11 @@ export async function invoke(cmd, args = {}) {
         };
         saveStorage('agent_erp_mock_session', mockSessions);
 
+        // Seed initial default departments for newly registered mock tenant
+        const initialDepts = createDefaultMockDepartments(tenant_id);
+        mockDepartments.push(...initialDepts);
+        saveStorage('agent_erp_mock_departments', mockDepartments);
+
         // Reset any stale mock tasks for clean onboarding experience
         mockTasks = [];
         saveStorage('agent_erp_mock_tasks', mockTasks);
@@ -593,6 +602,11 @@ export async function invoke(cmd, args = {}) {
         // Generate new mock scoped token
         const new_token = `mock-scoped-token-${mockSessions.user_id}`;
         mockSessions.token = new_token;
+
+        // Seed initial default departments for newly created mock tenant
+        const initialDepts = createDefaultMockDepartments(tenant_id);
+        mockDepartments.push(...initialDepts);
+        saveStorage('agent_erp_mock_departments', mockDepartments);
 
         // Reset any stale mock tasks for clean onboarding experience
         mockTasks = [];
