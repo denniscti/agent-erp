@@ -704,11 +704,8 @@ export async function createTenantAction(tenantName, companyName, tenantCode, ta
  */
 export async function fetchTasks(moduleId = null) {
   try {
-    const activeTenantId = appState.activeTenant?.id || null;
     const list = await invoke('list_tasks', {
-      moduleId: moduleId ? moduleId.trim() : '',
-      tenantId: activeTenantId,
-      tenant_id: activeTenantId
+      moduleId: moduleId ? moduleId.trim() : ''
     });
     appState.tasks = list || [];
     return appState.tasks;
@@ -729,7 +726,6 @@ export async function fetchTasks(moduleId = null) {
  */
 export async function createTaskAction(title, moduleId, assignee, parentTaskId = null, skillId = null) {
   try {
-    const activeTenantId = appState.activeTenant?.id || null;
     const task = await invoke('create_task', {
       title,
       moduleId,
@@ -737,9 +733,7 @@ export async function createTaskAction(title, moduleId, assignee, parentTaskId =
       parentTaskId: parentTaskId || null,
       skillId: skillId || null,
       parent_task_id: parentTaskId || null,
-      skill_id: skillId || null,
-      tenantId: activeTenantId,
-      tenant_id: activeTenantId
+      skill_id: skillId || null
     });
     await fetchTasks();
     return task;
@@ -850,11 +844,7 @@ export async function updateTaskStatusAction(taskId, status) {
  */
 export async function fetchDepartments() {
   try {
-    const activeTenantId = appState.activeTenant?.id || null;
-    const list = await invoke('list_departments', {
-      tenantId: activeTenantId,
-      tenant_id: activeTenantId
-    });
+    const list = await invoke('list_departments');
     appState.departments = list || [];
     return appState.departments;
   } catch (err) {
@@ -876,13 +866,10 @@ export async function createDepartmentAction(name, parentId = null) {
   }
   const normalizedParentId = parentId && typeof parentId === 'string' && parentId.trim() ? parentId.trim() : null;
   try {
-    const activeTenantId = appState.activeTenant?.id || null;
     const dept = await invoke('create_department', {
       name: trimmedName,
       parentId: normalizedParentId,
-      parent_id: normalizedParentId,
-      tenantId: activeTenantId,
-      tenant_id: activeTenantId
+      parent_id: normalizedParentId
     });
     await fetchDepartments();
     return dept;
@@ -899,13 +886,9 @@ export async function createDepartmentAction(name, parentId = null) {
  */
 export async function fetchPartners(filter = {}) {
   try {
-    const activeTenantId = appState.activeTenant?.id || null;
     const filterCustomer = filter?.filterCustomer !== undefined ? filter.filterCustomer : filter?.filter_customer;
     const filterVendor = filter?.filterVendor !== undefined ? filter.filterVendor : filter?.filter_vendor;
-    const payload = {
-      tenantId: activeTenantId,
-      tenant_id: activeTenantId
-    };
+    const payload = {};
     if (filterCustomer !== undefined) {
       payload.filterCustomer = filterCustomer;
       payload.filter_customer = filterCustomer;
@@ -972,7 +955,6 @@ export async function createPartnerAction(input, taxId = null) {
   const normalizedTaxId = targetTaxId && typeof targetTaxId === 'string' && targetTaxId.trim() ? targetTaxId.trim() : null;
 
   try {
-    const activeTenantId = appState.activeTenant?.id || null;
     const partner = await invoke('create_partner', {
       name,
       isCustomer: is_customer,
@@ -980,9 +962,7 @@ export async function createPartnerAction(input, taxId = null) {
       taxId: normalizedTaxId,
       is_customer,
       is_vendor,
-      tax_id: normalizedTaxId,
-      tenantId: activeTenantId,
-      tenant_id: activeTenantId
+      tax_id: normalizedTaxId
     });
     await fetchPartners();
     if (is_vendor && !is_customer) {

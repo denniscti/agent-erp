@@ -61,10 +61,7 @@ let mockTenants = loadStorage('agent_erp_mock_tenants', defaultMockTenants);
 let mockUserTenants = loadStorage('agent_erp_mock_user_tenants', defaultMockUserTenants);
 let mockSessions = loadStorage('agent_erp_mock_session', null);
 
-function resolveMockActiveTenantId(explicitTenantId) {
-  if (explicitTenantId && typeof explicitTenantId === 'string' && explicitTenantId.trim()) {
-    return explicitTenantId.trim();
-  }
+function resolveMockActiveTenantId() {
   if (mockSessions && mockSessions.active_tenant_id && typeof mockSessions.active_tenant_id === 'string' && mockSessions.active_tenant_id.trim()) {
     return mockSessions.active_tenant_id.trim();
   }
@@ -762,8 +759,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_task': {
-      const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id, tenantId, tenant_id } = args;
-      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
+      const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id } = args;
+      const targetTenantId = resolveMockActiveTenantId();
       const now = Math.floor(Date.now() / 1000);
       const finalModuleId = (moduleId || module_id || '').trim();
       const finalParentTaskId = parentTaskId || parent_task_id || null;
@@ -788,8 +785,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_tasks': {
-      const { moduleId, tenantId, tenant_id } = args || {};
-      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
+      const { moduleId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
       const trimmedModule = (moduleId || '').trim();
       let list = mockTasks.filter(t => (t.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (trimmedModule) {
@@ -800,11 +797,12 @@ export async function invoke(cmd, args = {}) {
 
     case 'update_task_status': {
       const { taskId, status } = args;
+      const targetTenantId = resolveMockActiveTenantId();
       const validStatuses = ['pending', 'in_progress', 'done', 'cancelled'];
       if (!validStatuses.includes(status)) {
         throw new Error(`Invalid task status: ${status}`);
       }
-      const task = mockTasks.find(t => t.id === taskId);
+      const task = mockTasks.find(t => t.id === taskId && (t.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (!task) {
         throw new Error(`Task not found: ${taskId}`);
       }
@@ -840,8 +838,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_department': {
-      const { name, parentId, parent_id, tenantId, tenant_id } = args;
-      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
+      const { name, parentId, parent_id } = args;
+      const targetTenantId = resolveMockActiveTenantId();
       const targetParentId = parentId !== undefined ? parentId : parent_id;
       const trimmedName = (name || '').trim();
       if (!trimmedName) {
@@ -866,18 +864,18 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_departments': {
-      const { tenantId, tenant_id } = args || {};
-      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
+      const targetTenantId = resolveMockActiveTenantId();
       return mockDepartments.filter(d => (d.tenant_id || 'tnt_mock_1') === targetTenantId);
     }
 
     case 'update_department_skills': {
       const { department_id, departmentId, skills } = args;
+      const targetTenantId = resolveMockActiveTenantId();
       const targetId = (department_id || departmentId || '').trim();
       if (!targetId) {
         throw new Error('Department ID cannot be empty');
       }
-      const dept = mockDepartments.find(d => d.id === targetId);
+      const dept = mockDepartments.find(d => d.id === targetId && (d.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (!dept) {
         throw new Error(`Department not found: ${targetId}`);
       }
@@ -893,8 +891,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_partner': {
-      const { name, is_customer, isCustomer, is_vendor, isVendor, tax_id, taxId, tenantId, tenant_id } = args;
-      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
+      const { name, is_customer, isCustomer, is_vendor, isVendor, tax_id, taxId } = args;
+      const targetTenantId = resolveMockActiveTenantId();
       const trimmedName = (name || '').trim();
       if (!trimmedName) {
         throw new Error('Partner name cannot be empty');
@@ -943,8 +941,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_partners': {
-      const { filter_customer, filterCustomer, filter_vendor, filterVendor, tenantId, tenant_id } = args || {};
-      const targetTenantId = resolveMockActiveTenantId(tenantId || tenant_id);
+      const { filter_customer, filterCustomer, filter_vendor, filterVendor } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
       const isCustFilter = filter_customer !== undefined ? filter_customer : filterCustomer;
       const isVendFilter = filter_vendor !== undefined ? filter_vendor : filterVendor;
       let list = mockPartners.filter(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId);

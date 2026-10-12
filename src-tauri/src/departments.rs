@@ -187,20 +187,26 @@ pub fn list_departments_impl(
 // Usecase: update_department_skills
 pub fn update_department_skills_impl(
     conn: &rusqlite::Connection,
+    tenant_id: &str,
     department_id: &str,
     skills: Vec<String>,
 ) -> Result<Department, String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    if trimmed_tenant_id.is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+
     let trimmed_id = department_id.trim();
     if trimmed_id.is_empty() {
         return Err("Department ID cannot be empty".to_string());
     }
 
     let mut check_stmt = conn
-        .prepare("SELECT id, tenant_id, name, parent_id, created_at FROM departments WHERE id = ?1 LIMIT 1")
+        .prepare("SELECT id, tenant_id, name, parent_id, created_at FROM departments WHERE id = ?1 AND tenant_id = ?2 LIMIT 1")
         .map_err(|e| format!("Failed to prepare department check query: {}", e))?;
 
     let dept_info = check_stmt
-        .query_row(params![trimmed_id], |row| {
+        .query_row(params![trimmed_id, trimmed_tenant_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -226,8 +232,8 @@ pub fn update_department_skills_impl(
         .map_err(|e| format!("Failed to serialize skills: {}", e))?;
 
     conn.execute(
-        "UPDATE departments SET skills = ?1 WHERE id = ?2",
-        params![skills_json, trimmed_id],
+        "UPDATE departments SET skills = ?1 WHERE id = ?2 AND tenant_id = ?3",
+        params![skills_json, trimmed_id, trimmed_tenant_id],
     )
     .map_err(|e| format!("Failed to update department skills: {}", e))?;
 
@@ -246,20 +252,13 @@ pub fn update_department_skills_impl(
 #[specta::specta]
 pub async fn create_department<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    tenant_id: Option<String>,
     name: String,
     parent_id: Option<String>,
 ) -> Result<Department, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-    {
-        Some(tid) => tid,
-        None => crate::resolve_active_tenant_id(&conn)?,
-    };
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
     create_department_impl(&conn, &active_tid, name, parent_id)
 }
 
@@ -267,18 +266,11 @@ pub async fn create_department<R: tauri::Runtime>(
 #[specta::specta]
 pub async fn list_departments<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    tenant_id: Option<String>,
 ) -> Result<Vec<Department>, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-    {
-        Some(tid) => tid,
-        None => crate::resolve_active_tenant_id(&conn)?,
-    };
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
     list_departments_impl(&conn, &active_tid)
 }
 
@@ -292,7 +284,8 @@ pub async fn update_department_skills<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    update_department_skills_impl(&conn, &department_id, skills)
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    update_department_skills_impl(&conn, &active_tid, &department_id, skills)
 }
 
 #[cfg(test)]
@@ -596,7 +589,8 @@ pub mod tests {
 
         // When: update_department_skills_impl is called with skills
         let skills = vec!["department.manage".to_string(), "customer.view".to_string()];
-        let updated = update_department_skills_impl(&conn, &dept.id, skills.clone()).unwrap();
+        let updated =
+            update_department_skills_impl(&conn, TEST_TENANT, &dept.id, skills.clone()).unwrap();
 
         // Then: Department skills are updated and deduplicated
         assert_eq!(
@@ -622,6 +616,7 @@ pub mod tests {
         // When: update_department_skills_impl is called with nonexistent department ID
         let result = update_department_skills_impl(
             &conn,
+            TEST_TENANT,
             "nonexistent_id",
             vec!["customer.view".to_string()],
         );
@@ -637,10 +632,53 @@ pub mod tests {
         let conn = setup_test_db();
 
         // When: update_department_skills_impl is called with empty department ID
-        let result = update_department_skills_impl(&conn, "   ", vec!["customer.view".to_string()]);
+        let result = update_department_skills_impl(
+            &conn,
+            TEST_TENANT,
+            "   ",
+            vec!["customer.view".to_string()],
+        );
 
         // Then: Validation error is returned
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Department ID cannot be empty");
+    }
+
+    #[test]
+    fn test_tc_dept_skills_iso_cross_tenant_rejected() {
+        // Given: A department created in TEST_TENANT
+        let conn = setup_test_db();
+        let dept = create_department_impl(&conn, TEST_TENANT, "財務部".to_string(), None).unwrap();
+
+        // When: update_department_skills_impl is executed with TEST_TENANT_B
+        let result = update_department_skills_impl(
+            &conn,
+            TEST_TENANT_B,
+            &dept.id,
+            vec!["finance.view".to_string()],
+        );
+
+        // Then: Cross-tenant modification is rejected with not found
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            format!("Department not found: {}", dept.id)
+        );
+    }
+
+    #[test]
+    fn test_tc_dept_skills_iso_empty_tenant_error() {
+        // Given: An initialized database
+        let conn = setup_test_db();
+
+        // When: update_department_skills_impl is called with empty or whitespace tenant_id
+        let err_empty = update_department_skills_impl(&conn, "", "dept_100", vec![]);
+        let err_whitespace = update_department_skills_impl(&conn, "   ", "dept_100", vec![]);
+
+        // Then: Both return validation errors
+        assert!(err_empty.is_err());
+        assert_eq!(err_empty.unwrap_err(), "Tenant ID cannot be empty");
+        assert!(err_whitespace.is_err());
+        assert_eq!(err_whitespace.unwrap_err(), "Tenant ID cannot be empty");
     }
 }

@@ -251,9 +251,15 @@ pub fn list_tasks_impl(
 // Usecase: update_task_status
 pub fn update_task_status_impl(
     conn: &rusqlite::Connection,
+    tenant_id: &str,
     task_id: &str,
     status: &str,
 ) -> Result<(), String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    if trimmed_tenant_id.is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+
     let valid_statuses = ["pending", "in_progress", "done", "cancelled"];
     if !valid_statuses.contains(&status) {
         return Err(format!(
@@ -267,8 +273,8 @@ pub fn update_task_status_impl(
 
     let rows_affected = conn
         .execute(
-            "UPDATE tasks SET status = ?1, completed_at = ?2 WHERE id = ?3",
-            params![status, completed_at, task_id],
+            "UPDATE tasks SET status = ?1, completed_at = ?2 WHERE id = ?3 AND tenant_id = ?4",
+            params![status, completed_at, task_id, trimmed_tenant_id],
         )
         .map_err(|e| format!("Failed to update task status: {}", e))?;
 
@@ -350,7 +356,6 @@ pub fn get_task_messages_impl(
 #[specta::specta]
 pub async fn create_task<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    tenant_id: Option<String>,
     title: String,
     module_id: String,
     assignee: String,
@@ -360,13 +365,7 @@ pub async fn create_task<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-    {
-        Some(tid) => tid,
-        None => crate::resolve_active_tenant_id(&conn)?,
-    };
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
     create_task_impl(
         &conn,
         &active_tid,
@@ -382,19 +381,12 @@ pub async fn create_task<R: tauri::Runtime>(
 #[specta::specta]
 pub async fn list_tasks<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    tenant_id: Option<String>,
     module_id: String,
 ) -> Result<Vec<Task>, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-    {
-        Some(tid) => tid,
-        None => crate::resolve_active_tenant_id(&conn)?,
-    };
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
     list_tasks_impl(&conn, &active_tid, &module_id)
 }
 
@@ -408,7 +400,8 @@ pub async fn update_task_status<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    update_task_status_impl(&conn, &task_id, &status)
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    update_task_status_impl(&conn, &active_tid, &task_id, &status)
 }
 
 #[tauri::command]
@@ -732,13 +725,13 @@ pub mod tests {
         .unwrap();
 
         // When: Updating to in_progress
-        update_task_status_impl(&conn, &task.id, "in_progress").unwrap();
+        update_task_status_impl(&conn, TEST_TENANT, &task.id, "in_progress").unwrap();
         let list = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
         assert_eq!(list[0].status, "in_progress");
         assert_eq!(list[0].completed_at, None);
 
         // When: Updating to done
-        update_task_status_impl(&conn, &task.id, "done").unwrap();
+        update_task_status_impl(&conn, TEST_TENANT, &task.id, "done").unwrap();
         let list_done = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
 
         // Then: Status is done and completed_at is recorded
@@ -746,7 +739,7 @@ pub mod tests {
         assert!(list_done[0].completed_at.is_some());
 
         // When: Updating to cancelled
-        update_task_status_impl(&conn, &task.id, "cancelled").unwrap();
+        update_task_status_impl(&conn, TEST_TENANT, &task.id, "cancelled").unwrap();
         let list_cancelled = list_tasks_impl(&conn, TEST_TENANT, "sales").unwrap();
         assert_eq!(list_cancelled[0].status, "cancelled");
         assert_eq!(list_cancelled[0].completed_at, None);
@@ -768,7 +761,7 @@ pub mod tests {
         .unwrap();
 
         // When: Updating to invalid status "failed"
-        let result = update_task_status_impl(&conn, &task.id, "failed");
+        let result = update_task_status_impl(&conn, TEST_TENANT, &task.id, "failed");
 
         // Then: Error is returned and status remains pending
         assert!(result.is_err());
@@ -783,11 +776,50 @@ pub mod tests {
         let conn = setup_test_db();
 
         // When: Updating nonexistent task
-        let result = update_task_status_impl(&conn, "task_9999", "done");
+        let result = update_task_status_impl(&conn, TEST_TENANT, "task_9999", "done");
 
         // Then: Error indicating Task not found is returned
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Task not found: task_9999");
+    }
+
+    #[test]
+    fn test_tc_task_iso_update_status_cross_tenant_rejected() {
+        // Given: A task created in TEST_TENANT
+        let conn = setup_test_db();
+        let task = create_task_impl(
+            &conn,
+            TEST_TENANT,
+            "租戶專屬任務".into(),
+            "sales".into(),
+            "User".into(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: update_task_status_impl is called with TEST_TENANT_B
+        let result = update_task_status_impl(&conn, TEST_TENANT_B, &task.id, "done");
+
+        // Then: Cross-tenant modification is rejected with Task not found
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), format!("Task not found: {}", task.id));
+    }
+
+    #[test]
+    fn test_tc_task_iso_update_status_empty_tenant_error() {
+        // Given: An initialized database
+        let conn = setup_test_db();
+
+        // When: update_task_status_impl is called with empty or whitespace tenant_id
+        let err_empty = update_task_status_impl(&conn, "", "task_100", "done");
+        let err_whitespace = update_task_status_impl(&conn, "   ", "task_100", "done");
+
+        // Then: Both return validation errors
+        assert!(err_empty.is_err());
+        assert_eq!(err_empty.unwrap_err(), "Tenant ID cannot be empty");
+        assert!(err_whitespace.is_err());
+        assert_eq!(err_whitespace.unwrap_err(), "Tenant ID cannot be empty");
     }
 
     #[test]

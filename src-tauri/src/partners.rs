@@ -272,7 +272,6 @@ pub fn list_partners_impl(
 #[specta::specta]
 pub async fn create_partner<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    tenant_id: Option<String>,
     name: String,
     is_customer: Option<bool>,
     is_vendor: Option<bool>,
@@ -281,13 +280,7 @@ pub async fn create_partner<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-    {
-        Some(tid) => tid,
-        None => crate::resolve_active_tenant_id(&conn)?,
-    };
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
     create_partner_impl(&conn, &active_tid, name, is_customer, is_vendor, tax_id)
 }
 
@@ -295,20 +288,13 @@ pub async fn create_partner<R: tauri::Runtime>(
 #[specta::specta]
 pub async fn list_partners<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    tenant_id: Option<String>,
     filter_customer: Option<bool>,
     filter_vendor: Option<bool>,
 ) -> Result<Vec<Partner>, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
-    let active_tid = match tenant_id
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-    {
-        Some(tid) => tid,
-        None => crate::resolve_active_tenant_id(&conn)?,
-    };
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
     list_partners_impl(&conn, &active_tid, filter_customer, filter_vendor)
 }
 
