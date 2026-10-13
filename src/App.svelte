@@ -34,7 +34,8 @@
     getSkillsByDomain,
     KNOWN_DOMAINS,
     fetchPartners,
-    createPartnerAction
+    createPartnerAction,
+    updatePartnerAction
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -73,6 +74,11 @@
   let partnerFilter = $state('all'); // 'all' | 'customer' | 'vendor'
   let isAddingPartner = $state(false);
   let partnerError = $state('');
+  let editingPartnerId = $state(null);
+  let editingPartnerName = $state('');
+  let editingPartnerTaxId = $state('');
+  let isUpdatingPartner = $state(false);
+  let editPartnerError = $state('');
 
   let filteredPartners = $derived(
     appState.partners.filter(p => {
@@ -290,6 +296,47 @@
       partnerError = err?.message || '新增夥伴失敗';
     } finally {
       isAddingPartner = false;
+    }
+  }
+
+  function startEditPartner(partner, focusTaxId = false) {
+    editingPartnerId = partner.id;
+    editingPartnerName = partner.name || '';
+    editingPartnerTaxId = partner.tax_id || '';
+    editPartnerError = '';
+  }
+
+  function cancelEditPartner() {
+    editingPartnerId = null;
+    editingPartnerName = '';
+    editingPartnerTaxId = '';
+    editPartnerError = '';
+  }
+
+  async function handleUpdatePartner(e) {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (!editingPartnerName.trim()) {
+      editPartnerError = '請填寫夥伴名稱';
+      return;
+    }
+    const trimmedTax = editingPartnerTaxId.trim();
+    if (trimmedTax && !/^\d{8}$/.test(trimmedTax)) {
+      editPartnerError = '統一編號必須為 8 碼半形數字';
+      return;
+    }
+    isUpdatingPartner = true;
+    editPartnerError = '';
+    try {
+      await updatePartnerAction({
+        id: editingPartnerId,
+        name: editingPartnerName.trim(),
+        taxId: trimmedTax || ''
+      });
+      cancelEditPartner();
+    } catch (err) {
+      editPartnerError = err?.message || '更新夥伴失敗';
+    } finally {
+      isUpdatingPartner = false;
     }
   }
 
@@ -1300,43 +1347,117 @@
                   {/snippet}
 
                   {#each filteredPartners as partner (partner.id)}
-                    <div class="customer-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
-                      <div style="display: flex; align-items: center; gap: 12px;">
-                        <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-cyan), 0.12); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.95rem;">
-                          {#if partner.is_customer && partner.is_vendor}
-                            🌐
-                          {:else if partner.is_vendor}
-                            🏭
-                          {:else}
-                            🏢
-                          {/if}
+                    {#if editingPartnerId === partner.id}
+                      <!-- Inline Edit Form -->
+                      <form onsubmit={handleUpdatePartner} class="customer-item customer-edit-form" style="display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: 6px; background: rgba(0, 240, 255, 0.04); border: 1px solid rgba(var(--accent-cyan), 0.5);">
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end;">
+                          <div style="flex: 2; min-width: 170px;">
+                            <label for="edit-partner-name-{partner.id}" style="display: block; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 3px;">夥伴／廠商名稱（必填）</label>
+                            <input
+                              id="edit-partner-name-{partner.id}"
+                              type="text"
+                              class="form-input"
+                              placeholder="夥伴名稱"
+                              bind:value={editingPartnerName}
+                              style="width: 100%; padding: 6px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                            />
+                          </div>
+                          <div style="flex: 1.5; min-width: 140px;">
+                            <label for="edit-partner-tax-{partner.id}" style="display: block; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 3px;">統一編號（8 碼數字，可清空）</label>
+                            <input
+                              id="edit-partner-tax-{partner.id}"
+                              type="text"
+                              class="form-input"
+                              placeholder="例：22099131"
+                              bind:value={editingPartnerTaxId}
+                              style="width: 100%; padding: 6px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                            />
+                          </div>
+                          <div style="display: flex; gap: 6px; align-items: flex-end;">
+                            <button
+                              type="submit"
+                              class="btn btn-primary btn-sm"
+                              disabled={isUpdatingPartner}
+                              style="height: 33px; padding: 0 14px; font-size: 0.8rem;"
+                            >
+                              {isUpdatingPartner ? '儲存中...' : '儲存'}
+                            </button>
+                            <button
+                              type="button"
+                              class="btn btn-outline btn-sm"
+                              onclick={cancelEditPartner}
+                              disabled={isUpdatingPartner}
+                              style="height: 33px; padding: 0 12px; font-size: 0.8rem;"
+                            >
+                              取消
+                            </button>
+                          </div>
                         </div>
-                        <div>
-                          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                            <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{partner.name}</span>
-                            {#if partner.tax_id}
-                              <span class="badge badge-cyan" style="font-size: 0.72rem;">
-                                統編：{partner.tax_id}
-                              </span>
-                            {/if}
-                            {#if partner.is_customer}
-                              <span class="badge badge-emerald" style="font-size: 0.7rem;">
-                                客戶
-                              </span>
-                            {/if}
-                            {#if partner.is_vendor}
-                              <span class="badge badge-amber" style="font-size: 0.7rem;">
-                                供應商
-                              </span>
+                        {#if editPartnerError}
+                          <div class="field-error-msg" style="color: var(--status-error); font-size: 0.75rem; margin-top: 2px;">
+                            ⚠️ {editPartnerError}
+                          </div>
+                        {/if}
+                      </form>
+                    {:else}
+                      <div class="customer-item" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                          <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-cyan), 0.12); border: 1px solid rgba(var(--accent-cyan), 0.3); display: flex; align-items: center; justify-content: center; font-weight: 600; color: rgb(var(--accent-cyan)); font-size: 0.95rem;">
+                            {#if partner.is_customer && partner.is_vendor}
+                              🌐
+                            {:else if partner.is_vendor}
+                              🏭
+                            {:else}
+                              🏢
                             {/if}
                           </div>
-                          <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{partner.id}</div>
+                          <div>
+                            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                              <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{partner.name}</span>
+                              {#if partner.tax_id}
+                                <span class="badge badge-cyan" style="font-size: 0.72rem;">
+                                  統編：{partner.tax_id}
+                                </span>
+                              {:else}
+                                <button
+                                  type="button"
+                                  class="btn btn-xs"
+                                  onclick={() => startEditPartner(partner, true)}
+                                  style="padding: 2px 8px; font-size: 0.7rem; border-radius: 4px; border: 1px dashed var(--accent-cyan); color: var(--accent-cyan); background: rgba(0, 240, 255, 0.05); cursor: pointer; transition: all 0.2s;"
+                                  title="點擊補填統一編號"
+                                >
+                                  + 補填統編
+                                </button>
+                              {/if}
+                              {#if partner.is_customer}
+                                <span class="badge badge-emerald" style="font-size: 0.7rem;">
+                                  客戶
+                                </span>
+                              {/if}
+                              {#if partner.is_vendor}
+                                <span class="badge badge-amber" style="font-size: 0.7rem;">
+                                  供應商
+                                </span>
+                              {/if}
+                            </div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{partner.id}</div>
+                          </div>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                          <div style="font-size: 0.75rem; color: var(--text-muted);">
+                            {new Date(partner.created_at * 1000).toLocaleString()}
+                          </div>
+                          <button
+                            type="button"
+                            class="btn btn-outline btn-xs"
+                            onclick={() => startEditPartner(partner, false)}
+                            style="padding: 3px 10px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: rgba(255, 255, 255, 0.04); color: var(--text-secondary); cursor: pointer;"
+                          >
+                            編輯
+                          </button>
                         </div>
                       </div>
-                      <div style="font-size: 0.75rem; color: var(--text-muted);">
-                        {new Date(partner.created_at * 1000).toLocaleString()}
-                      </div>
-                    </div>
+                    {/if}
                   {/each}
                 </SettingsEntityCard>
               </div>

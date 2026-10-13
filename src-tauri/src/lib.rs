@@ -720,6 +720,7 @@ pub fn run() {
             departments::update_department_skills,
             partners::create_partner,
             partners::list_partners,
+            partners::update_partner,
             llm::detect_department_intent,
             llm_traces::record_llm_trace,
             llm_traces::update_llm_trace_decision,

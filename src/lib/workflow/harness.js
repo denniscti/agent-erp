@@ -335,8 +335,36 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
     }
   }
 
+  // Optional pre-confirmation preparation / entity resolution hook
+  if (typeof handler.prepareConfirmation === 'function') {
+    try {
+      await handler.prepareConfirmation(args, ctx);
+    } catch (prepErr) {
+      console.error(`[Harness Error] Confirmation preparation for tool "${toolName}" failed:`, prepErr);
+      const errString = prepErr?.message || String(prepErr);
+      return {
+        type: 'error',
+        error: errString,
+        content: `操作前檢查失敗：${errString}`,
+        traceId
+      };
+    }
+  }
+
   // Requires confirmation: build pending confirmation object
-  const confirmText = handler.describeConfirmation(args, ctx);
+  let confirmText;
+  try {
+    confirmText = await handler.describeConfirmation(args, ctx);
+  } catch (confirmErr) {
+    console.error(`[Harness Error] Confirmation text formatting for tool "${toolName}" failed:`, confirmErr);
+    const errString = confirmErr?.message || String(confirmErr);
+    return {
+      type: 'error',
+      error: errString,
+      content: `操作前檢查失敗：${errString}`,
+      traceId
+    };
+  }
   /** @type {import('./types.js').PendingConfirmation} */
   const confirmation = {
     toolName,

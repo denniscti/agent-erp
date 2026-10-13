@@ -21,6 +21,7 @@
  * @typedef {Object} ToolHandler
  * @property {ToolDefinition} definition - The tool definition compliant with OpenAI / NIM format.
  * @property {(args: any, context?: any) => string} describeConfirmation - Formats human-readable confirmation text.
+ * @property {(args: any, context?: any) => (Promise<void> | void)} [prepareConfirmation] - Optional async pre-confirmation hook to resolve entities or validate before card creation.
  * @property {(args: any, context?: any) => Promise<any>} execute - Executes the actual tool operation (e.g. Tauri IPC).
  * @property {boolean} [requiresConfirmation] - Whether human confirmation is required before execution (default: true).
  * @property {boolean} [completesTask] - Whether successful execution marks the active task as completed ('done').

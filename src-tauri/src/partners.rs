@@ -84,6 +84,26 @@ pub fn create_partners_table(conn: &rusqlite::Connection) -> Result<(), rusqlite
     Ok(())
 }
 
+// Helper: validate_tax_id
+pub fn validate_tax_id(tax_id: Option<String>) -> Result<Option<String>, String> {
+    let trimmed = match tax_id {
+        Some(t) => {
+            let s = t.trim().to_string();
+            if s.is_empty() {
+                return Ok(None);
+            }
+            s
+        }
+        None => return Ok(None),
+    };
+
+    if trimmed.len() != 8 || !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err("統一編號必須為 8 碼半形數字".to_string());
+    }
+
+    Ok(Some(trimmed))
+}
+
 // Usecase: create_partner
 pub fn create_partner_impl(
     conn: &rusqlite::Connection,
@@ -103,9 +123,7 @@ pub fn create_partner_impl(
         return Err("Partner name cannot be empty".to_string());
     }
 
-    let trimmed_tax_id = tax_id
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty());
+    let trimmed_tax_id = validate_tax_id(tax_id)?;
 
     let target_is_vend = is_vendor.unwrap_or(false);
     let target_is_cust = is_customer.unwrap_or(!target_is_vend);
@@ -138,6 +156,19 @@ pub fn create_partner_impl(
         let need_add_customer = target_is_cust && !existing.is_customer;
 
         if need_add_vendor || need_add_customer {
+            // Check if provided tax_id is already used by another partner (excluding this existing record)
+            if let Some(ref tid) = trimmed_tax_id {
+                let mut tax_stmt = conn
+                    .prepare("SELECT 1 FROM partners WHERE tenant_id = ?1 AND tax_id = ?2 AND id != ?3 LIMIT 1")
+                    .map_err(|e| format!("Failed to prepare tax duplicate query: {}", e))?;
+                let is_dup = tax_stmt
+                    .query_row(params![trimmed_tenant_id, tid, existing.id], |_| Ok(()))
+                    .is_ok();
+                if is_dup {
+                    return Err(format!("統一編號「{}」已由其他合作夥伴登記", tid));
+                }
+            }
+
             // Overlay identity on existing record
             let merged_is_cust = existing.is_customer || target_is_cust;
             let merged_is_vend = existing.is_vendor || target_is_vend;
@@ -177,6 +208,19 @@ pub fn create_partner_impl(
         ));
     }
 
+    // Check tax_id duplicate for new partner in same tenant
+    if let Some(ref tid) = trimmed_tax_id {
+        let mut tax_stmt = conn
+            .prepare("SELECT 1 FROM partners WHERE tenant_id = ?1 AND tax_id = ?2 LIMIT 1")
+            .map_err(|e| format!("Failed to prepare tax duplicate query: {}", e))?;
+        let is_dup = tax_stmt
+            .query_row(params![trimmed_tenant_id, tid], |_| Ok(()))
+            .is_ok();
+        if is_dup {
+            return Err(format!("統一編號「{}」已由其他合作夥伴登記", tid));
+        }
+    }
+
     let now = current_timestamp();
     let id = format!(
         "part_{}_{}",
@@ -207,6 +251,109 @@ pub fn create_partner_impl(
         is_vendor: target_is_vend,
         tax_id: trimmed_tax_id,
         created_at: now,
+    })
+}
+
+// Usecase: update_partner
+pub fn update_partner_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    id: String,
+    name: Option<String>,
+    tax_id: Option<String>,
+) -> Result<Partner, String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    if trimmed_tenant_id.is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+
+    let trimmed_id = id.trim();
+    if trimmed_id.is_empty() {
+        return Err("Partner ID cannot be empty".to_string());
+    }
+
+    // Tenant isolation: fetch existing partner strictly within active tenant
+    let mut stmt = conn
+        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, created_at FROM partners WHERE id = ?1 AND tenant_id = ?2 LIMIT 1")
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+    let existing = stmt
+        .query_row(params![trimmed_id, trimmed_tenant_id], |row| {
+            let is_cust_int: i64 = row.get(3)?;
+            let is_vend_int: i64 = row.get(4)?;
+            Ok(Partner {
+                id: row.get(0)?,
+                tenant_id: row.get(1)?,
+                name: row.get(2)?,
+                is_customer: is_cust_int == 1,
+                is_vendor: is_vend_int == 1,
+                tax_id: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|_| "Partner not found".to_string())?;
+
+    // Handle name update and duplicate checking excluding self
+    let new_name = match name {
+        Some(n) => {
+            let trimmed_n = n.trim().to_string();
+            if trimmed_n.is_empty() {
+                return Err("合作夥伴名稱不能為空".to_string());
+            }
+            let mut name_stmt = conn
+                .prepare("SELECT 1 FROM partners WHERE tenant_id = ?1 AND LOWER(TRIM(name)) = LOWER(?2) AND id != ?3 LIMIT 1")
+                .map_err(|e| format!("Failed to prepare duplicate name query: {}", e))?;
+            let has_dup = name_stmt
+                .query_row(
+                    params![trimmed_tenant_id, trimmed_n, trimmed_id],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            if has_dup {
+                return Err(format!(
+                    "合作夥伴名稱「{}」已存在，請使用不同名稱",
+                    trimmed_n
+                ));
+            }
+            trimmed_n
+        }
+        None => existing.name,
+    };
+
+    // Handle tax_id update, normalization, and duplicate checking excluding self
+    let new_tax_id = match tax_id {
+        Some(t) => {
+            let validated = validate_tax_id(Some(t))?;
+            if let Some(ref tid) = validated {
+                let mut tax_stmt = conn
+                    .prepare("SELECT 1 FROM partners WHERE tenant_id = ?1 AND tax_id = ?2 AND id != ?3 LIMIT 1")
+                    .map_err(|e| format!("Failed to prepare duplicate tax query: {}", e))?;
+                let has_dup = tax_stmt
+                    .query_row(params![trimmed_tenant_id, tid, trimmed_id], |_| Ok(()))
+                    .is_ok();
+                if has_dup {
+                    return Err(format!("統一編號「{}」已由其他合作夥伴登記", tid));
+                }
+            }
+            validated
+        }
+        None => existing.tax_id,
+    };
+
+    conn.execute(
+        "UPDATE partners SET name = ?1, tax_id = ?2 WHERE id = ?3 AND tenant_id = ?4",
+        params![new_name, new_tax_id, trimmed_id, trimmed_tenant_id],
+    )
+    .map_err(|e| format!("Failed to update partner: {}", e))?;
+
+    Ok(Partner {
+        id: existing.id,
+        tenant_id: existing.tenant_id,
+        name: new_name,
+        is_customer: existing.is_customer,
+        is_vendor: existing.is_vendor,
+        tax_id: new_tax_id,
+        created_at: existing.created_at,
     })
 }
 
@@ -296,6 +443,21 @@ pub async fn list_partners<R: tauri::Runtime>(
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     list_partners_impl(&conn, &active_tid, filter_customer, filter_vendor)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_partner<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    id: String,
+    name: Option<String>,
+    tax_id: Option<String>,
+) -> Result<Partner, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn =
+        rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    update_partner_impl(&conn, &active_tid, id, name, tax_id)
 }
 
 #[cfg(test)]
@@ -943,5 +1105,459 @@ pub mod tests {
         // Then: Empty list is returned without error
         assert_eq!(list_empty.len(), 0);
         assert_eq!(list_space.len(), 0);
+    }
+
+    // --- Issue #147 Test Cases ---
+
+    #[test]
+    fn test_tc_part_pos_01_update_tax_id_success() {
+        // Given: Pre-existing customer without tax ID
+        let conn = setup_test_db();
+        let created =
+            create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None)
+                .unwrap();
+        assert_eq!(created.tax_id, None);
+
+        // When: update_partner_impl is called with valid 8-digit tax_id
+        let updated = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+
+        // Then: tax_id is successfully updated to "22099131"
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.name, "台積電");
+        assert_eq!(updated.tax_id, Some("22099131".to_string()));
+    }
+
+    #[test]
+    fn test_tc_part_pos_02_overwrite_tax_id_success() {
+        // Given: Pre-existing customer with old tax ID
+        let conn = setup_test_db();
+        let created = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+        assert_eq!(created.tax_id, Some("22099131".to_string()));
+
+        // When: update_partner_impl is called with a new valid tax_id
+        let updated = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("03795172".to_string()),
+        )
+        .unwrap();
+
+        // Then: tax_id is updated to new tax ID
+        assert_eq!(updated.tax_id, Some("03795172".to_string()));
+    }
+
+    #[test]
+    fn test_tc_part_pos_03_update_name_only_keeps_other_fields() {
+        // Given: Partner with name and tax ID
+        let conn = setup_test_db();
+        let created = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "聯發科".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+
+        // When: Updating name only (tax_id is None)
+        let updated = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            Some("聯發科技".to_string()),
+            None,
+        )
+        .unwrap();
+
+        // Then: Name is updated and other fields (tax_id, identity flags) are preserved
+        assert_eq!(updated.name, "聯發科技");
+        assert_eq!(updated.tax_id, Some("22099131".to_string()));
+        assert_eq!(updated.is_customer, true);
+        assert_eq!(updated.is_vendor, false);
+    }
+
+    #[test]
+    fn test_tc_part_pos_04_update_trims_whitespace() {
+        // Given: Pre-existing partner
+        let conn = setup_test_db();
+        let created =
+            create_partner_impl(&conn, TEST_TENANT, "華碩".to_string(), None, None, None).unwrap();
+
+        // When: Updating with untrimmed name and untrimmed tax ID
+        let updated = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            Some("   華碩電腦   ".to_string()),
+            Some("   22099131   ".to_string()),
+        )
+        .unwrap();
+
+        // Then: Values are trimmed properly
+        assert_eq!(updated.name, "華碩電腦");
+        assert_eq!(updated.tax_id, Some("22099131".to_string()));
+    }
+
+    #[test]
+    fn test_tc_part_pos_05_clear_tax_id_normalizes_to_none() {
+        // Given: Partner with existing tax ID
+        let conn = setup_test_db();
+        let created = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+
+        // When: Passing empty string or whitespace string as tax_id
+        let updated_empty = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("".to_string()),
+        )
+        .unwrap();
+        assert_eq!(updated_empty.tax_id, None);
+
+        // When: Re-setting and passing whitespace only
+        update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+        let updated_ws = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("   ".to_string()),
+        )
+        .unwrap();
+
+        // Then: tax_id is normalized to None
+        assert_eq!(updated_ws.tax_id, None);
+    }
+
+    #[test]
+    fn test_tc_part_pos_06_update_with_same_values_excludes_self() {
+        // Given: Partner with name and tax ID
+        let conn = setup_test_db();
+        let created = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+
+        // When: Updating with the exact same name and tax ID
+        let res = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            Some("台積電".to_string()),
+            Some("22099131".to_string()),
+        );
+
+        // Then: Self-exclusion works and update succeeds without duplicate error
+        assert!(res.is_ok());
+        let p = res.unwrap();
+        assert_eq!(p.name, "台積電");
+        assert_eq!(p.tax_id, Some("22099131".to_string()));
+    }
+
+    #[test]
+    fn test_tc_part_neg_01_and_02_tax_id_format_errors() {
+        // Given: Pre-existing partner
+        let conn = setup_test_db();
+        let created =
+            create_partner_impl(&conn, TEST_TENANT, "測試夥伴".to_string(), None, None, None)
+                .unwrap();
+
+        // When: 7 digits
+        let err_7 = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("1234567".to_string()),
+        );
+        // When: 9 digits
+        let err_9 = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("123456789".to_string()),
+        );
+        // When: Non-digit characters
+        let err_alpha = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("2209913A".to_string()),
+        );
+        let err_symbol = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            Some("22-99131".to_string()),
+        );
+
+        // Then: All fail with tax ID format error
+        assert_eq!(err_7.unwrap_err(), "統一編號必須為 8 碼半形數字");
+        assert_eq!(err_9.unwrap_err(), "統一編號必須為 8 碼半形數字");
+        assert_eq!(err_alpha.unwrap_err(), "統一編號必須為 8 碼半形數字");
+        assert_eq!(err_symbol.unwrap_err(), "統一編號必須為 8 碼半形數字");
+    }
+
+    #[test]
+    fn test_tc_part_neg_03_update_empty_name_error() {
+        // Given: Pre-existing partner
+        let conn = setup_test_db();
+        let created =
+            create_partner_impl(&conn, TEST_TENANT, "聯發科".to_string(), None, None, None)
+                .unwrap();
+
+        // When: Updating name to empty string or whitespace
+        let err_empty = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            Some("".to_string()),
+            None,
+        );
+        let err_space = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            Some("   ".to_string()),
+            None,
+        );
+
+        // Then: Fails with empty name error
+        assert_eq!(err_empty.unwrap_err(), "合作夥伴名稱不能為空");
+        assert_eq!(err_space.unwrap_err(), "合作夥伴名稱不能為空");
+    }
+
+    #[test]
+    fn test_tc_part_neg_04_create_duplicate_name_error() {
+        // Given: Partner "台積電" exists
+        let conn = setup_test_db();
+        create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None).unwrap();
+
+        // When: Creating another partner with same name (with customer flag)
+        let err = create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None);
+
+        // Then: Duplicate name error is returned
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("已存在，請使用不同名稱"));
+    }
+
+    #[test]
+    fn test_tc_part_neg_05_create_duplicate_tax_id_error() {
+        // Given: Partner with tax_id "22099131" exists
+        let conn = setup_test_db();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+
+        // When: Creating another partner with different name but identical tax_id
+        let err = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "聯發科".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        );
+
+        // Then: Rejected with specific duplicate tax_id error
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "統一編號「22099131」已由其他合作夥伴登記");
+    }
+
+    #[test]
+    fn test_tc_part_neg_06_update_duplicate_name_error() {
+        // Given: Two partners exist in TEST_TENANT
+        let conn = setup_test_db();
+        create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None).unwrap();
+        let p2 = create_partner_impl(&conn, TEST_TENANT, "聯發科".to_string(), None, None, None)
+            .unwrap();
+
+        // When: Updating p2's name to "台積電" (case-insensitive & trimmed)
+        let err = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            p2.id.clone(),
+            Some("  台積電  ".to_string()),
+            None,
+        );
+
+        // Then: Rejected with duplicate name error
+        assert!(err.is_err());
+        assert_eq!(
+            err.unwrap_err(),
+            "合作夥伴名稱「台積電」已存在，請使用不同名稱"
+        );
+    }
+
+    #[test]
+    fn test_tc_part_neg_07_update_duplicate_tax_id_error() {
+        // Given: Partner A with tax_id "22099131" and Partner B without tax_id
+        let conn = setup_test_db();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+        let p_b = create_partner_impl(&conn, TEST_TENANT, "聯發科".to_string(), None, None, None)
+            .unwrap();
+
+        // When: Updating p_b's tax_id to "22099131"
+        let err = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            p_b.id.clone(),
+            None,
+            Some("22099131".to_string()),
+        );
+
+        // Then: Rejected with duplicate tax_id error
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "統一編號「22099131」已由其他合作夥伴登記");
+    }
+
+    #[test]
+    fn test_tc_part_neg_08_update_nonexistent_partner_not_found() {
+        // Given: Initialized database
+        let conn = setup_test_db();
+
+        // When: Updating non-existent partner ID
+        let err = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "part_nonexistent".to_string(),
+            Some("新名稱".to_string()),
+            None,
+        );
+
+        // Then: Partner not found is returned
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "Partner not found");
+    }
+
+    #[test]
+    fn test_tc_part_bnd_01_cross_tenant_same_name_success() {
+        // Given: Partner "台積電" in TEST_TENANT
+        let conn = setup_test_db();
+        create_partner_impl(&conn, TEST_TENANT, "台積電".to_string(), None, None, None).unwrap();
+
+        // When: Creating/updating partner with same name "台積電" in TEST_TENANT_B
+        let p_b = create_partner_impl(&conn, TEST_TENANT_B, "台積電".to_string(), None, None, None);
+
+        // Then: Both succeed independently
+        assert!(p_b.is_ok());
+    }
+
+    #[test]
+    fn test_tc_part_bnd_02_cross_tenant_same_tax_id_success() {
+        // Given: Partner with tax_id "22099131" in TEST_TENANT
+        let conn = setup_test_db();
+        create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        )
+        .unwrap();
+
+        // When: Partner in TEST_TENANT_B registers the same tax_id "22099131"
+        let p_b = create_partner_impl(
+            &conn,
+            TEST_TENANT_B,
+            "分公司".to_string(),
+            None,
+            None,
+            Some("22099131".to_string()),
+        );
+
+        // Then: Succeeds because tax_id is scoped to tenant_id
+        assert!(p_b.is_ok());
+    }
+
+    #[test]
+    fn test_tc_part_bnd_03_cross_tenant_update_enumeration_defense() {
+        // Given: Partner exists in TEST_TENANT_B
+        let conn = setup_test_db();
+        let p_b = create_partner_impl(
+            &conn,
+            TEST_TENANT_B,
+            "秘密客戶".to_string(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Tenant TEST_TENANT attempts to update p_b using p_b.id
+        let err = update_partner_impl(
+            &conn,
+            TEST_TENANT,
+            p_b.id.clone(),
+            Some("篡改名稱".to_string()),
+            Some("22099131".to_string()),
+        );
+
+        // Then: Denied with "Partner not found" to prevent enumeration
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "Partner not found");
+
+        // Verify record in TEST_TENANT_B remains unchanged
+        let list_b = list_partners_impl(&conn, TEST_TENANT_B, None, None).unwrap();
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].name, "秘密客戶");
+        assert_eq!(list_b[0].tax_id, None);
     }
 }

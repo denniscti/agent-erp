@@ -312,12 +312,13 @@ test('TC-WF-PTR-05: Agent Profile manifest compliance with authoring standards',
 
   // Tools & Handlers
   assert.ok(Array.isArray(profile.tools));
-  assert.equal(profile.tools.length, 2);
+  assert.equal(profile.tools.length, 3);
   assert.ok(profile.tools.some(t => t.function.name === 'create_partner'));
   assert.ok(profile.tools.some(t => t.function.name === 'list_partners'));
+  assert.ok(profile.tools.some(t => t.function.name === 'update_partner'));
 
   assert.ok(Array.isArray(profile.toolHandlers));
-  assert.equal(profile.toolHandlers.length, 2);
+  assert.equal(profile.toolHandlers.length, 3);
 
   // Fallback and quickAction
   assert.ok(profile.getFallbackMessage());

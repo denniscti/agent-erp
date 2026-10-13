@@ -179,6 +179,237 @@ export const listPartnersToolHandler = {
   }
 };
 
+/**
+ * Match a partner by name with strict precedence:
+ * 1. Exact match (case-insensitive & trimmed)
+ * 2. If 0 exact match, fallback to substring match
+ * At any tier, if > 1 matches are found, throws ambiguous error instead of silently taking first.
+ * If 0 match found at all, throws not found error.
+ * @param {string} targetName
+ * @param {any[]} partners
+ * @returns {any}
+ */
+export function matchPartnerTarget(targetName, partners = []) {
+  const query = (targetName || '').trim();
+  if (!query) {
+    throw new Error('請提供欲修改的合作夥伴名稱或 ID');
+  }
+  const queryLower = query.toLowerCase();
+
+  // Tier 1: Exact match (case-insensitive & trimmed)
+  const exactMatches = (partners || []).filter(p =>
+    (p.name || '').trim().toLowerCase() === queryLower
+  );
+
+  if (exactMatches.length === 1) {
+    return exactMatches[0];
+  }
+  if (exactMatches.length > 1) {
+    throw new Error(`找到多筆符合「${query}」的夥伴，請提供更明確的名稱`);
+  }
+
+  // Tier 2: Substring / fuzzy match (only if 0 exact match)
+  const fuzzyMatches = (partners || []).filter(p => {
+    const pNameLower = (p.name || '').trim().toLowerCase();
+    return pNameLower.includes(queryLower) || queryLower.includes(pNameLower);
+  });
+
+  if (fuzzyMatches.length === 1) {
+    return fuzzyMatches[0];
+  }
+  if (fuzzyMatches.length > 1) {
+    throw new Error(`找到多筆符合「${query}」的夥伴，請提供更明確的名稱`);
+  }
+
+  throw new Error(`找不到合作夥伴「${query}」`);
+}
+
+/** @type {import('./types.js').ToolHandler} */
+export const updatePartnerToolHandler = {
+  definition: {
+    type: 'function',
+    function: {
+      name: 'update_partner',
+      description: '更新或補登客戶／合作夥伴基本資料（變更名稱、補登／更新統編）',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: '欲修改的合作夥伴 ID（若已知）'
+          },
+          target_name: {
+            type: 'string',
+            description: '欲修改的原合作夥伴名稱，例如：台積電、聯發科'
+          },
+          name: {
+            type: 'string',
+            description: '變更後的新名稱（若欲更名），例如：聯發科技'
+          },
+          tax_id: {
+            type: 'string',
+            description: '補登或更新的統一編號，例如：22099131'
+          }
+        }
+      }
+    }
+  },
+  requiresConfirmation: true,
+  completesTask: true,
+  confirmLabel: '確認修改',
+  cancelLabel: '取消',
+
+  async prepareConfirmation(args) {
+    if (!args) return;
+    const targetName = (args.target_name || args.name || '').trim();
+    const partnerId = args.id ? String(args.id).trim() : '';
+
+    const partners = await invoke('list_partners', {});
+    let target = null;
+    if (partnerId) {
+      target = (partners || []).find(p => p.id === partnerId);
+      if (!target) {
+        throw new Error(`找不到合作夥伴（ID: ${partnerId}）`);
+      }
+    } else {
+      target = matchPartnerTarget(targetName, partners || []);
+    }
+
+    args.id = target.id;
+    args._targetPartner = target;
+  },
+
+  describeConfirmation(args) {
+    const resolved = args?._targetPartner;
+    const target = resolved ? resolved.name : (args?.target_name || args?.name || '指定夥伴').trim();
+    const beforeName = resolved ? resolved.name : target;
+    const beforeTax = resolved?.tax_id ? resolved.tax_id : '未填寫';
+
+    const newName = args?.name && args?.name.trim() !== target ? args.name.trim() : null;
+    const rawTaxId = args?.tax_id !== undefined ? args.tax_id : args?.taxId;
+    const newTax = rawTaxId && String(rawTaxId).trim() ? String(rawTaxId).trim() : null;
+
+    if (resolved) {
+      if (newName && newTax) {
+        return `偵測到您想將客戶「${target}」更名為「${newName}」並設定統編為 ${newTax}（原名稱：${beforeName} ➔ 變更後：${newName}；原統編：${beforeTax} ➔ 變更後：${newTax}），確認要修改嗎？`;
+      } else if (newName) {
+        return `偵測到您想將客戶「${target}」更名為「${newName}」（原名稱：${beforeName} ➔ 變更後：${newName}），確認要修改嗎？`;
+      } else if (newTax) {
+        return `偵測到您想為客戶「${target}」設定統編為 ${newTax}（目前統編：${beforeTax} ➔ 變更後：${newTax}），確認要修改嗎？`;
+      }
+      return `偵測到您想修改客戶「${target}」的資料，確認要修改嗎？`;
+    }
+
+    if (newName && newTax) {
+      return `偵測到您想將客戶「${target}」更名為「${newName}」並設定統編為 ${newTax}，確認要修改嗎？`;
+    } else if (newName) {
+      return `偵測到您想將客戶「${target}」更名為「${newName}」，確認要修改嗎？`;
+    } else if (newTax) {
+      return `偵測到您想為客戶「${target}」設定統編為 ${newTax}，確認要修改嗎？`;
+    }
+    return `偵測到您想修改客戶「${target}」的資料，確認要修改嗎？`;
+  },
+
+  describeTaskSummary(_result, args) {
+    const target = args?._targetPartner?.name || (args?.target_name || args?.name || '夥伴').trim();
+    return `✅「修改客戶資料」已完成，更新了『${target}』`;
+  },
+
+  describeToast(_result, args) {
+    const target = args?._targetPartner?.name || (args?.target_name || args?.name || '夥伴').trim();
+    return `已成功更新「${target}」資料！`;
+  },
+
+  async execute(args) {
+    let partnerId = args?.id ? String(args.id).trim() : '';
+    let targetPartner = args?._targetPartner;
+    const targetName = (args?.target_name || args?.name || '').trim();
+
+    if (!partnerId) {
+      if (!targetName) {
+        throw new Error('請提供欲修改的合作夥伴名稱或 ID');
+      }
+      const partners = await invoke('list_partners', {});
+      targetPartner = matchPartnerTarget(targetName, partners || []);
+      partnerId = targetPartner.id;
+    }
+
+    const payload = { id: partnerId };
+    const currentName = targetPartner ? targetPartner.name : targetName;
+    if (args?.name && args.name.trim() && args.name.trim() !== currentName) {
+      payload.name = args.name.trim();
+    }
+    const rawTaxId = args?.tax_id !== undefined ? args.tax_id : args?.taxId;
+    if (rawTaxId !== undefined) {
+      payload.tax_id = String(rawTaxId).trim();
+      payload.taxId = String(rawTaxId).trim();
+    }
+
+    return await invoke('update_partner', payload);
+  },
+
+  formatResult(result) {
+    const name = result?.name || '';
+    const taxInfo = result?.tax_id ? `（統一編號：${result.tax_id}）` : '';
+    return `已為您成功更新客戶「${name}」資料${taxInfo}！`;
+  },
+
+  describeCancel() {
+    return '好的，已取消合作夥伴資料修改。';
+  },
+
+  extractCandidateRegex(text) {
+    if (!text) return null;
+    const trimmed = text.trim();
+
+    // Check 8-digit tax ID in text
+    let tax_id = null;
+    const taxMatch = trimmed.match(/(?:統編|統一編號|稅號)[:：\s]*([0-9]{8})/);
+    if (taxMatch) {
+      tax_id = taxMatch[1];
+    }
+
+    // 1. Rename intent: 把 [客戶] 聯發科 (改名|更名) 為 聯發科技
+    const renameMatch = trimmed.match(/(?:把|將)\s*(?:客戶|夥伴|廠商)?\s*[「『"']?([A-Za-z0-9\u4e00-\u9fa5（）()_\s-]{2,50})[」』"']?\s*(?:改名|更名|變更名稱)\s*(?:為|成|做)\s*[「『"']?([A-Za-z0-9\u4e00-\u9fa5（）()_\s-]{2,50})[」』"']?/);
+    if (renameMatch) {
+      const target_name = renameMatch[1].trim();
+      const new_name = renameMatch[2].trim();
+      return {
+        tool: 'update_partner',
+        target_name,
+        name: new_name,
+        ...(tax_id ? { tax_id } : {})
+      };
+    }
+
+    // 2. Tax ID update/supplement: 幫 台積電 (補上|補填|設定|更新|修改) 統編 22099131
+    const taxActionMatch = trimmed.match(/(?:幫|替|為|給)?\s*(?:客戶|夥伴|廠商)?\s*[「『"']?([A-Za-z0-9\u4e00-\u9fa5（）()_\s-]{2,50})[」』"']?\s*(?:補上|補填|補登|設定|更新|修改|加)\s*(?:統編|統一編號|稅號)[:：\s]*([0-9]{8})/);
+    if (taxActionMatch) {
+      const target_name = taxActionMatch[1].trim();
+      const extractedTaxId = taxActionMatch[2].trim();
+      return {
+        tool: 'update_partner',
+        target_name,
+        tax_id: extractedTaxId
+      };
+    }
+
+    // 3. Tax ID update reversed phrasing: 幫 台積電 統編 (改為|更新為|設定為) 22099131
+    const taxActionMatch2 = trimmed.match(/(?:幫|替|為|給)?\s*(?:客戶|夥伴|廠商)?\s*[「『"']?([A-Za-z0-9\u4e00-\u9fa5（）()_\s-]{2,50})[」』"']?\s*(?:的)?\s*(?:統編|統一編號|稅號)\s*(?:改為|更新為|設定為|補為)[:：\s]*([0-9]{8})/);
+    if (taxActionMatch2) {
+      const target_name = taxActionMatch2[1].trim();
+      const extractedTaxId = taxActionMatch2[2].trim();
+      return {
+        tool: 'update_partner',
+        target_name,
+        tax_id: extractedTaxId
+      };
+    }
+
+    return null;
+  }
+};
+
 /** @type {import('./types.js').AgentProfile} */
 export const customerCreateBasicProfileAgentProfile = {
   id: 'customer.create_basic_profile',
@@ -186,11 +417,13 @@ export const customerCreateBasicProfileAgentProfile = {
   systemPrompt: '你是一個客戶資料管理助理。請根據使用者的意圖選擇合適的工具進行呼叫。如果使用者的意圖不符合任何工具，請直接回覆文字，不要呼叫任何工具。',
   tools: [
     listPartnersToolHandler.definition,
-    createPartnerToolHandler.definition
+    createPartnerToolHandler.definition,
+    updatePartnerToolHandler.definition
   ],
   toolHandlers: [
     listPartnersToolHandler,
-    createPartnerToolHandler
+    createPartnerToolHandler,
+    updatePartnerToolHandler
   ],
   getFallbackMessage(activeTask) {
     return activeTask?.status !== 'done'

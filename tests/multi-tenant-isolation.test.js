@@ -166,7 +166,7 @@ test('TC-ISO-N-05: Cross-tenant duplicate partner name & tax ID are permitted wi
   // Given: Authenticated session
   await ensureAuthenticated();
   const partnerName = `台積電_${Date.now()}`;
-  const taxId = '22099131';
+  const taxId = String(Math.floor(20000000 + (Date.now() % 70000000))).padStart(8, '0');
 
   // When: Switched to tnt_mock_1, register partner
   await selectTenantAction('tnt_mock_1');

@@ -1010,6 +1010,55 @@ export async function fetchVendors() {
 }
 
 /**
+ * Update an existing partner's name and/or tax_id
+ * @param {{ id: string, name?: string, taxId?: string, tax_id?: string }} input
+ * @returns {Promise<any>}
+ */
+export async function updatePartnerAction(input) {
+  if (!input || typeof input !== 'object') {
+    throw new Error('更新合作夥伴參數錯誤');
+  }
+  const id = (input.id || '').trim();
+  if (!id) {
+    throw new Error('合作夥伴識別碼為必填項目');
+  }
+
+  const payload = { id };
+  if (input.name !== undefined) {
+    const trimmedName = String(input.name).trim();
+    if (!trimmedName) {
+      throw new Error('合作夥伴名稱不能為空');
+    }
+    payload.name = trimmedName;
+  }
+
+  const rawTaxId = input.tax_id !== undefined ? input.tax_id : input.taxId;
+  if (rawTaxId !== undefined) {
+    if (rawTaxId === null || (typeof rawTaxId === 'string' && !rawTaxId.trim())) {
+      payload.tax_id = '';
+      payload.taxId = '';
+    } else {
+      const trimmedTaxId = String(rawTaxId).trim();
+      if (!/^\d{8}$/.test(trimmedTaxId)) {
+        throw new Error('統一編號必須為 8 碼半形數字');
+      }
+      payload.tax_id = trimmedTaxId;
+      payload.taxId = trimmedTaxId;
+    }
+  }
+
+  try {
+    const updated = await invoke('update_partner', payload);
+    await fetchPartners();
+    showToast(`已成功更新合作夥伴「${updated.name}」資料！`);
+    return updated;
+  } catch (err) {
+    console.error("Failed to update partner:", err);
+    throw err;
+  }
+}
+
+/**
  * Filter declared skills list by search keyword (case-insensitive across name, id, domain, description)
  * @param {import('./workflow/types.js').DeclaredSkill[]} skills
  * @param {string} [keyword]

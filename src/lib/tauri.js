@@ -216,7 +216,7 @@ if (!mockUserDepartments || !Array.isArray(mockUserDepartments)) {
 }
 
 const defaultMockPartners = [
-  { id: "part_mock_1", tenant_id: "tnt_mock_1", name: "A 公司 (Customer A)", is_customer: true, is_vendor: false, tax_id: "12345678", created_at: Math.floor(Date.now() / 1000) - 86400 * 5 },
+  { id: "part_mock_1", tenant_id: "tnt_mock_1", name: "A 公司 (Customer A)", is_customer: true, is_vendor: false, tax_id: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 5 },
   { id: "part_mock_2", tenant_id: "tnt_mock_1", name: "台積電 (TSMC)", is_customer: true, is_vendor: false, tax_id: "22099131", created_at: Math.floor(Date.now() / 1000) - 86400 * 2 }
 ];
 
@@ -898,7 +898,16 @@ export async function invoke(cmd, args = {}) {
         throw new Error('Partner name cannot be empty');
       }
       const rawTaxId = tax_id !== undefined ? tax_id : taxId;
-      const normalizedTaxId = rawTaxId && typeof rawTaxId === 'string' && rawTaxId.trim() ? rawTaxId.trim() : null;
+      let normalizedTaxId = null;
+      if (rawTaxId !== undefined && rawTaxId !== null) {
+        const s = String(rawTaxId).trim();
+        if (s.length > 0) {
+          if (!/^\d{8}$/.test(s)) {
+            throw new Error('統一編號必須為 8 碼半形數字');
+          }
+          normalizedTaxId = s;
+        }
+      }
       const vendFlag = is_vendor !== undefined ? is_vendor : (isVendor !== undefined ? isVendor : false);
       const custFlag = is_customer !== undefined ? is_customer : (isCustomer !== undefined ? isCustomer : !vendFlag);
 
@@ -912,6 +921,16 @@ export async function invoke(cmd, args = {}) {
         const needAddCustomer = !!custFlag && !existing.is_customer;
 
         if (needAddVendor || needAddCustomer) {
+          if (normalizedTaxId) {
+            const taxDup = mockPartners.find(p =>
+              (p.tenant_id || 'tnt_mock_1') === targetTenantId &&
+              p.id !== existing.id &&
+              p.tax_id === normalizedTaxId
+            );
+            if (taxDup) {
+              throw new Error(`統一編號「${normalizedTaxId}」已由其他合作夥伴登記`);
+            }
+          }
           existing.is_customer = existing.is_customer || !!custFlag;
           existing.is_vendor = existing.is_vendor || !!vendFlag;
           if (normalizedTaxId) {
@@ -923,6 +942,16 @@ export async function invoke(cmd, args = {}) {
 
         const roleLabel = (vendFlag && !custFlag) ? '供應商' : '客戶';
         throw new Error(`合作夥伴／${roleLabel}「${trimmedName}」已存在，請使用不同名稱`);
+      }
+
+      if (normalizedTaxId) {
+        const taxDup = mockPartners.find(p =>
+          (p.tenant_id || 'tnt_mock_1') === targetTenantId &&
+          p.tax_id === normalizedTaxId
+        );
+        if (taxDup) {
+          throw new Error(`統一編號「${normalizedTaxId}」已由其他合作夥伴登記`);
+        }
       }
 
       const now = Math.floor(Date.now() / 1000);
@@ -938,6 +967,67 @@ export async function invoke(cmd, args = {}) {
       mockPartners.push(newPartner);
       saveStorage('agent_erp_mock_partners', mockPartners);
       return newPartner;
+    }
+
+    case 'update_partner': {
+      const { id, name, tax_id, taxId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const trimmedId = (id || '').trim();
+      if (!trimmedId) {
+        throw new Error('Partner ID cannot be empty');
+      }
+
+      const targetIndex = mockPartners.findIndex(p =>
+        p.id === trimmedId && (p.tenant_id || 'tnt_mock_1') === targetTenantId
+      );
+      if (targetIndex < 0) {
+        throw new Error('Partner not found');
+      }
+      const partner = mockPartners[targetIndex];
+
+      if (name !== undefined) {
+        const trimmedName = String(name).trim();
+        if (!trimmedName) {
+          throw new Error('合作夥伴名稱不能為空');
+        }
+        const nameDup = mockPartners.find(p =>
+          (p.tenant_id || 'tnt_mock_1') === targetTenantId &&
+          p.id !== partner.id &&
+          p.name.trim().toLowerCase() === trimmedName.toLowerCase()
+        );
+        if (nameDup) {
+          throw new Error(`合作夥伴名稱「${trimmedName}」已存在，請使用不同名稱`);
+        }
+        partner.name = trimmedName;
+      }
+
+      const rawTaxId = tax_id !== undefined ? tax_id : taxId;
+      if (rawTaxId !== undefined) {
+        if (rawTaxId === null) {
+          partner.tax_id = null;
+        } else {
+          const s = String(rawTaxId).trim();
+          if (s.length === 0) {
+            partner.tax_id = null;
+          } else {
+            if (!/^\d{8}$/.test(s)) {
+              throw new Error('統一編號必須為 8 碼半形數字');
+            }
+            const taxDup = mockPartners.find(p =>
+              (p.tenant_id || 'tnt_mock_1') === targetTenantId &&
+              p.id !== partner.id &&
+              p.tax_id === s
+            );
+            if (taxDup) {
+              throw new Error(`統一編號「${s}」已由其他合作夥伴登記`);
+            }
+            partner.tax_id = s;
+          }
+        }
+      }
+
+      saveStorage('agent_erp_mock_partners', mockPartners);
+      return { ...partner };
     }
 
     case 'list_partners': {
