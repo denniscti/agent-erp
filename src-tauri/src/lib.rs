@@ -9,6 +9,7 @@ mod downloader;
 pub mod llm;
 pub mod llm_traces;
 pub mod partners;
+pub mod products;
 pub mod tasks;
 pub mod tps2_types;
 
@@ -188,6 +189,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     partners::create_partners_table(&conn)
         .map_err(|e| format!("Failed to create partners table: {}", e))?;
+
+    products::create_products_tables(&conn)
+        .map_err(|e| format!("Failed to create products tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -721,6 +725,13 @@ pub fn run() {
             partners::create_partner,
             partners::list_partners,
             partners::update_partner,
+            products::create_product,
+            products::list_products,
+            products::get_product_detail,
+            products::add_product_variant,
+            products::add_product_unit,
+            products::add_supply_source,
+            products::add_bom_item,
             llm::detect_department_intent,
             llm_traces::record_llm_trace,
             llm_traces::update_llm_trace_decision,

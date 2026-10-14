@@ -18,7 +18,8 @@
 export const KNOWN_DOMAINS = [
   { id: 'department', name: '部門與組織結構', description: '設定部門與組織架構管理' },
   { id: 'customer', name: '客戶管理', description: '客戶資料與交易記錄管理' },
-  { id: 'vendor', name: '供應商管理', description: '供應商資料與採購管理' }
+  { id: 'vendor', name: '供應商管理', description: '供應商資料與採購管理' },
+  { id: 'product', name: '商品管理', description: '商品家族、變體規格、銷售單位與物料 BOM 管理' }
 ];
 
 /**

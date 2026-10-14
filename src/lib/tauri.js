@@ -235,6 +235,68 @@ if (!mockPartners || !Array.isArray(mockPartners)) {
   if (migrated) saveStorage('agent_erp_mock_partners', mockPartners);
 }
 
+const defaultMockProducts = [
+  { id: "prod_mock_1", tenant_id: "tnt_mock_1", name: "智能核心晶片 (AI Core Chip)", category: "resale", is_sellable: true, is_purchasable: true, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "prod_mock_2", tenant_id: "tnt_mock_1", name: "AI 伺服器機櫃 (AI Server Rack)", category: "manufactured", is_sellable: true, is_purchasable: false, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "prod_mock_3", tenant_id: "tnt_mock_1", name: "散熱鋁片 (Cooling Fin)", category: "raw_material", is_sellable: false, is_purchasable: true, created_at: Math.floor(Date.now() / 1000) - 86400 }
+];
+
+let mockProducts = loadStorage('agent_erp_mock_products', defaultMockProducts);
+if (!mockProducts || !Array.isArray(mockProducts)) {
+  mockProducts = defaultMockProducts;
+  saveStorage('agent_erp_mock_products', mockProducts);
+}
+
+const defaultMockProductVariants = [
+  { id: "var_mock_1", product_id: "prod_mock_1", sku: "CHIP-001", name: "標準", is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "var_mock_2", product_id: "prod_mock_2", sku: "SRV-001", name: "標準", is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "var_mock_3", product_id: "prod_mock_3", sku: "FIN-001", name: "標準", is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 }
+];
+
+let mockProductVariants = loadStorage('agent_erp_mock_product_variants', defaultMockProductVariants);
+if (!mockProductVariants || !Array.isArray(mockProductVariants)) {
+  mockProductVariants = defaultMockProductVariants;
+  saveStorage('agent_erp_mock_product_variants', mockProductVariants);
+}
+
+const defaultMockProductUnits = [
+  { id: "unit_mock_1", variant_id: "var_mock_1", unit_name: "顆", conversion_ratio: 1.0, is_base_unit: true, selling_price: 120.0, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "unit_mock_2", variant_id: "var_mock_2", unit_name: "台", conversion_ratio: 1.0, is_base_unit: true, selling_price: 150000.0, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "unit_mock_3", variant_id: "var_mock_3", unit_name: "片", conversion_ratio: 1.0, is_base_unit: true, selling_price: 15.0, created_at: Math.floor(Date.now() / 1000) - 86400 }
+];
+
+let mockProductUnits = loadStorage('agent_erp_mock_product_units', defaultMockProductUnits);
+if (!mockProductUnits || !Array.isArray(mockProductUnits)) {
+  mockProductUnits = defaultMockProductUnits;
+  saveStorage('agent_erp_mock_product_units', mockProductUnits);
+}
+
+let mockProductSupplySources = loadStorage('agent_erp_mock_product_supply_sources', []);
+if (!mockProductSupplySources || !Array.isArray(mockProductSupplySources)) {
+  mockProductSupplySources = [];
+  saveStorage('agent_erp_mock_product_supply_sources', mockProductSupplySources);
+}
+
+let mockProductBomItems = loadStorage('agent_erp_mock_product_bom_items', []);
+if (!mockProductBomItems || !Array.isArray(mockProductBomItems)) {
+  mockProductBomItems = [];
+  saveStorage('agent_erp_mock_product_bom_items', mockProductBomItems);
+}
+
+function resolveMockCategoryFlags(rawCategory) {
+  const norm = String(rawCategory || '').trim().toLowerCase();
+  if (norm === 'resale' || norm === '轉售商品' || norm === '轉售') {
+    return { category: 'resale', is_sellable: true, is_purchasable: true };
+  }
+  if (norm === 'manufactured' || norm === '自製成品' || norm === '自製') {
+    return { category: 'manufactured', is_sellable: true, is_purchasable: false };
+  }
+  if (norm === 'raw_material' || norm === '原物料' || norm === '原料') {
+    return { category: 'raw_material', is_sellable: false, is_purchasable: true };
+  }
+  throw new Error(`無效的商品類別「${rawCategory}」，僅允許：轉售商品、自製成品、原物料`);
+}
+
 let mockLlmProviders = [
   { id: "openai", label: "OpenAI GPT-4o", base_url: "https://api.openai.com/v1", model_name: "gpt-4o", requires_key: true, has_key: false, active: true },
   { id: "deepseek", label: "DeepSeek V3 (BYOK)", base_url: "https://api.deepseek.com/v1", model_name: "deepseek-chat", requires_key: true, has_key: false, active: false },
@@ -1043,6 +1105,330 @@ export async function invoke(cmd, args = {}) {
         list = list.filter(p => p.is_vendor);
       }
       return list;
+    }
+
+    case 'create_product': {
+      const { name, category, sku, unit_name, unitName, selling_price, sellingPrice } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const trimmedName = (name || '').trim();
+      if (!trimmedName) {
+        throw new Error('商品名稱不能為空');
+      }
+
+      const { category: stdCategory, is_sellable, is_purchasable } = resolveMockCategoryFlags(category);
+
+      const rawPrice = selling_price !== undefined ? selling_price : sellingPrice;
+      const price = rawPrice !== undefined && rawPrice !== null ? Number(rawPrice) : 0.0;
+      if (price < 0.0) {
+        throw new Error('售價不能為負數');
+      }
+
+      const existing = mockProducts.find(p =>
+        (p.tenant_id || 'tnt_mock_1') === targetTenantId &&
+        p.name.trim().toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (existing) {
+        throw new Error(`商品「${trimmedName}」已存在，請使用不同名稱`);
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const prodId = `prod_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const newProduct = {
+        id: prodId,
+        tenant_id: targetTenantId,
+        name: trimmedName,
+        category: stdCategory,
+        is_sellable,
+        is_purchasable,
+        created_at: now
+      };
+      mockProducts.push(newProduct);
+      saveStorage('agent_erp_mock_products', mockProducts);
+
+      // Auto-create default variant
+      const varId = `var_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const trimmedSku = sku && String(sku).trim() ? String(sku).trim() : null;
+      const defaultVariant = {
+        id: varId,
+        product_id: prodId,
+        sku: trimmedSku,
+        name: '標準',
+        is_default: true,
+        created_at: now
+      };
+      mockProductVariants.push(defaultVariant);
+      saveStorage('agent_erp_mock_product_variants', mockProductVariants);
+
+      // Auto-create base unit
+      const cleanUnitName = (unit_name || unitName || '').trim() || '個';
+      const unitId = `unit_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const baseUnit = {
+        id: unitId,
+        variant_id: varId,
+        unit_name: cleanUnitName,
+        conversion_ratio: 1.0,
+        is_base_unit: true,
+        selling_price: price,
+        created_at: now
+      };
+      mockProductUnits.push(baseUnit);
+      saveStorage('agent_erp_mock_product_units', mockProductUnits);
+
+      return {
+        product: newProduct,
+        variants: [defaultVariant],
+        units: [baseUnit],
+        supply_sources: [],
+        bom_items: []
+      };
+    }
+
+    case 'list_products': {
+      const { filter_category, filterCategory, filter_sellable, filterSellable, filter_purchasable, filterPurchasable } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      let list = mockProducts.filter(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+
+      const catFilter = filter_category || filterCategory;
+      if (catFilter && String(catFilter).trim()) {
+        const catNorm = String(catFilter).trim().toLowerCase();
+        list = list.filter(p => p.category.toLowerCase() === catNorm);
+      }
+
+      const sellFilter = filter_sellable !== undefined ? filter_sellable : filterSellable;
+      if (sellFilter !== undefined) {
+        list = list.filter(p => p.is_sellable === !!sellFilter);
+      }
+
+      const purchFilter = filter_purchasable !== undefined ? filter_purchasable : filterPurchasable;
+      if (purchFilter !== undefined) {
+        list = list.filter(p => p.is_purchasable === !!purchFilter);
+      }
+
+      return list.sort((a, b) => a.created_at - b.created_at);
+    }
+
+    case 'get_product_detail': {
+      const { product_id, productId, id } = args || {};
+      const targetId = product_id || productId || id;
+      const targetTenantId = resolveMockActiveTenantId();
+
+      const product = mockProducts.find(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId && p.id === targetId);
+      if (!product) {
+        throw new Error('Product not found');
+      }
+
+      const variants = mockProductVariants.filter(v => v.product_id === product.id);
+      const variantIds = new Set(variants.map(v => v.id));
+
+      const units = mockProductUnits.filter(u => variantIds.has(u.variant_id));
+      const unitIds = new Set(units.map(u => u.id));
+      const supply_sources = mockProductSupplySources.filter(s => unitIds.has(s.unit_id));
+      const bom_items = mockProductBomItems.filter(b => variantIds.has(b.parent_variant_id));
+
+      return {
+        product,
+        variants,
+        units,
+        supply_sources,
+        bom_items
+      };
+    }
+
+    case 'add_product_variant': {
+      const { product_id, productId, name, sku } = args || {};
+      const targetProdId = product_id || productId;
+      const targetTenantId = resolveMockActiveTenantId();
+      const trimmedName = (name || '').trim();
+
+      const product = mockProducts.find(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId && p.id === targetProdId);
+      if (!product) {
+        throw new Error('Product not found');
+      }
+      if (!trimmedName) {
+        throw new Error('變體名稱不能為空');
+      }
+
+      const exists = mockProductVariants.some(v => v.product_id === product.id && v.name.trim().toLowerCase() === trimmedName.toLowerCase());
+      if (exists) {
+        throw new Error(`變體「${trimmedName}」已存在`);
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const newVariant = {
+        id: `var_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        product_id: product.id,
+        sku: sku && String(sku).trim() ? String(sku).trim() : null,
+        name: trimmedName,
+        is_default: false,
+        created_at: now
+      };
+      mockProductVariants.push(newVariant);
+      saveStorage('agent_erp_mock_product_variants', mockProductVariants);
+      return newVariant;
+    }
+
+    case 'add_product_unit': {
+      const { variant_id, variantId, unit_name, unitName, conversion_ratio, conversionRatio, is_base_unit, isBaseUnit, selling_price, sellingPrice } = args || {};
+      const targetVarId = variant_id || variantId;
+      const targetTenantId = resolveMockActiveTenantId();
+      const trimmedUnit = (unit_name || unitName || '').trim();
+
+      let variant = mockProductVariants.find(v => v.id === targetVarId);
+      if (!variant) {
+        variant = mockProductVariants.find(v => v.product_id === targetVarId && v.is_default);
+      }
+      if (!variant) {
+        throw new Error('Product variant not found');
+      }
+      const product = mockProducts.find(p => p.id === variant.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!product) {
+        throw new Error('Product variant not found');
+      }
+
+      if (!trimmedUnit) {
+        throw new Error('單位名稱不能為空');
+      }
+      const ratio = Number(conversion_ratio !== undefined ? conversion_ratio : conversionRatio);
+      if (isNaN(ratio) || ratio <= 0) {
+        throw new Error('換算比例必須大於 0');
+      }
+      const price = Number(selling_price !== undefined ? selling_price : sellingPrice);
+      if (isNaN(price) || price < 0) {
+        throw new Error('售價不能為負數');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const isBase = is_base_unit !== undefined ? !!is_base_unit : !!isBaseUnit;
+      const newUnit = {
+        id: `unit_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        variant_id: variant.id,
+        unit_name: trimmedUnit,
+        conversion_ratio: ratio,
+        is_base_unit: isBase,
+        selling_price: price,
+        created_at: now
+      };
+      mockProductUnits.push(newUnit);
+      saveStorage('agent_erp_mock_product_units', mockProductUnits);
+      return newUnit;
+    }
+
+    case 'add_supply_source': {
+      const { unit_id, unitId, variant_id, variantId, vendor_partner_id, vendorPartnerId, purchase_cost, purchaseCost, currency, is_primary, isPrimary } = args || {};
+      const targetId = unit_id || unitId || variant_id || variantId;
+      const targetVendorId = vendor_partner_id || vendorPartnerId;
+      const targetTenantId = resolveMockActiveTenantId();
+
+      // Resilient ID resolution: unit_id -> variant_id (base unit) -> product_id (default variant base unit)
+      let unit = mockProductUnits.find(u => u.id === targetId);
+      if (!unit) {
+        // Fallback: targetId was a variant_id
+        unit = mockProductUnits.find(u => u.variant_id === targetId && u.is_base_unit) ||
+               mockProductUnits.find(u => u.variant_id === targetId);
+      }
+      if (!unit) {
+        // Fallback: targetId was a product_id
+        const fallbackVar = mockProductVariants.find(v => v.product_id === targetId && v.is_default) ||
+                            mockProductVariants.find(v => v.product_id === targetId);
+        if (fallbackVar) {
+          unit = mockProductUnits.find(u => u.variant_id === fallbackVar.id && u.is_base_unit) ||
+                 mockProductUnits.find(u => u.variant_id === fallbackVar.id);
+        }
+      }
+      if (!unit) {
+        throw new Error('Product unit not found');
+      }
+
+      const variant = mockProductVariants.find(v => v.id === unit.variant_id);
+      if (!variant) {
+        throw new Error('Product unit not found');
+      }
+      const product = mockProducts.find(p => p.id === variant.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!product) {
+        throw new Error('Product unit not found');
+      }
+
+      const vendor = mockPartners.find(p => p.id === targetVendorId && (p.tenant_id || 'tnt_mock_1') === targetTenantId && p.is_vendor === true);
+      if (!vendor) {
+        throw new Error('供應商不存在或無效');
+      }
+
+      const cost = Number(purchase_cost !== undefined ? purchase_cost : purchaseCost);
+      if (isNaN(cost) || cost < 0) {
+        throw new Error('採購成本不能為負數');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const newSource = {
+        id: `src_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        unit_id: unit.id,
+        vendor_partner_id: vendor.id,
+        purchase_cost: cost,
+        currency: (currency || 'TWD').trim(),
+        is_primary: is_primary !== undefined ? !!is_primary : !!isPrimary,
+        created_at: now
+      };
+      mockProductSupplySources.push(newSource);
+      saveStorage('agent_erp_mock_product_supply_sources', mockProductSupplySources);
+      return newSource;
+    }
+
+    case 'add_bom_item': {
+      const { parent_variant_id, parentVariantId, child_variant_id, childVariantId, quantity } = args || {};
+      const targetParentVid = parent_variant_id || parentVariantId;
+      const targetChildVid = child_variant_id || childVariantId;
+      const targetTenantId = resolveMockActiveTenantId();
+
+      const qty = Number(quantity);
+      if (isNaN(qty) || qty <= 0) {
+        throw new Error('BOM 用量必須大於 0');
+      }
+
+      let parentVar = mockProductVariants.find(v => v.id === targetParentVid);
+      if (!parentVar) {
+        parentVar = mockProductVariants.find(v => v.product_id === targetParentVid && v.is_default);
+      }
+      if (!parentVar) {
+        throw new Error('母規格變體不存在');
+      }
+      const parentProd = mockProducts.find(p => p.id === parentVar.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!parentProd) {
+        throw new Error('母規格變體不存在');
+      }
+      if (parentProd.category !== 'manufactured') {
+        throw new Error('非自製成品不可建立 BOM 組成');
+      }
+
+      let childVar = mockProductVariants.find(v => v.id === targetChildVid);
+      if (!childVar) {
+        childVar = mockProductVariants.find(v =>
+          (v.product_id === targetChildVid && v.is_default) ||
+          (typeof targetChildVid === 'string' && targetChildVid.startsWith('var_') && targetChildVid.endsWith('_std') && v.product_id === targetChildVid.slice(4, -4))
+        );
+      }
+      if (!childVar) {
+        throw new Error('子物料變體不存在或不屬於同一租戶');
+      }
+      const childProd = mockProducts.find(p => p.id === childVar.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!childProd) {
+        throw new Error('子物料變體不存在或不屬於同一租戶');
+      }
+
+      if (parentVar.id === childVar.id) {
+        throw new Error('BOM 子物料不能為自身');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const newBom = {
+        id: `bom_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        parent_variant_id: parentVar.id,
+        child_variant_id: childVar.id,
+        quantity: qty,
+        created_at: now
+      };
+      mockProductBomItems.push(newBom);
+      saveStorage('agent_erp_mock_product_bom_items', mockProductBomItems);
+      return newBom;
     }
 
     case 'record_audit_log': {

@@ -128,6 +128,12 @@ export const appState = $state({
   /** @type {any[]} */
   partners: [],
 
+  // Products cache
+  /** @type {any[]} */
+  products: [],
+  /** @type {any | null} */
+  currentProductDetail: null,
+
   // Lightweight task confirmation state
   /** @type {import('./workflow/types.js').PendingConfirmation | null} */
   pendingTaskConfirmation: null
@@ -673,6 +679,7 @@ export async function selectTenantAction(tenantId) {
     fetchTasks(),
     fetchDepartments(),
     fetchPartners(),
+    fetchProducts(),
     fetchMembers()
   ]);
   return res;
@@ -1054,6 +1061,258 @@ export async function updatePartnerAction(input) {
     return updated;
   } catch (err) {
     console.error("Failed to update partner:", err);
+    throw err;
+  }
+}
+
+/**
+ * Resolve category string to standard category name and sellable/purchasable flags
+ * @param {string} rawCategory
+ * @returns {{ category: string, is_sellable: boolean, is_purchasable: boolean }}
+ */
+export function resolveCategoryFlags(rawCategory) {
+  const norm = String(rawCategory || '').trim().toLowerCase();
+  if (norm === 'resale' || norm === '轉售商品' || norm === '轉售') {
+    return { category: 'resale', is_sellable: true, is_purchasable: true };
+  }
+  if (norm === 'manufactured' || norm === '自製成品' || norm === '自製') {
+    return { category: 'manufactured', is_sellable: true, is_purchasable: false };
+  }
+  if (norm === 'raw_material' || norm === '原物料' || norm === '原料') {
+    return { category: 'raw_material', is_sellable: false, is_purchasable: true };
+  }
+  throw new Error(`無效的商品類別「${rawCategory}」，僅允許：轉售商品、自製成品、原物料`);
+}
+
+/**
+ * Fetch products list
+ * @param {any} [filters]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchProducts(filters = {}) {
+  try {
+    const payload = {};
+    if (filters.filter_category !== undefined || filters.filterCategory !== undefined) {
+      payload.filter_category = filters.filter_category !== undefined ? filters.filter_category : filters.filterCategory;
+      payload.filterCategory = payload.filter_category;
+    }
+    if (filters.filter_sellable !== undefined || filters.filterSellable !== undefined) {
+      payload.filter_sellable = filters.filter_sellable !== undefined ? filters.filter_sellable : filters.filterSellable;
+      payload.filterSellable = payload.filter_sellable;
+    }
+    if (filters.filter_purchasable !== undefined || filters.filterPurchasable !== undefined) {
+      payload.filter_purchasable = filters.filter_purchasable !== undefined ? filters.filter_purchasable : filters.filterPurchasable;
+      payload.filterPurchasable = payload.filter_purchasable;
+    }
+    const list = await invoke('list_products', payload);
+    appState.products = list || [];
+    return appState.products;
+  } catch (err) {
+    console.error("Failed to fetch products:", err);
+    return [];
+  }
+}
+
+/**
+ * Get product detail (including variants, units, supply sources, BOM)
+ * @param {string} productId
+ * @returns {Promise<any>}
+ */
+export async function getProductDetailAction(productId) {
+  const trimmedId = (productId || '').trim();
+  if (!trimmedId) {
+    throw new Error('商品 ID 為必填項目');
+  }
+  try {
+    const detail = await invoke('get_product_detail', {
+      product_id: trimmedId,
+      productId: trimmedId
+    });
+    appState.currentProductDetail = detail;
+    return detail;
+  } catch (err) {
+    console.error("Failed to get product detail:", err);
+    throw err;
+  }
+}
+
+/**
+ * Create a new product
+ * @param {{ name: string, category: string, sku?: string, unit_name?: string, unitName?: string, selling_price?: number, sellingPrice?: number }} input
+ * @returns {Promise<any>}
+ */
+export async function createProductAction(input) {
+  if (!input || typeof input !== 'object') {
+    throw new Error('商品資訊無效');
+  }
+  const name = (input.name || '').trim();
+  if (!name) {
+    throw new Error('商品名稱不能為空');
+  }
+  const category = (input.category || '').trim();
+  if (!category) {
+    throw new Error('商品類別為必填項目');
+  }
+  const sku = input.sku ? String(input.sku).trim() : undefined;
+  const unitName = (input.unit_name || input.unitName || '').trim() || undefined;
+  const sellingPrice = input.selling_price !== undefined ? input.selling_price : input.sellingPrice;
+
+  try {
+    const created = await invoke('create_product', {
+      name,
+      category,
+      sku,
+      unit_name: unitName,
+      unitName,
+      selling_price: sellingPrice,
+      sellingPrice
+    });
+    await fetchProducts();
+    showToast(`已成功建立商品「${name}」！`);
+    return created;
+  } catch (err) {
+    console.error("Failed to create product:", err);
+    throw err;
+  }
+}
+
+/**
+ * Add a variant to an existing product
+ * @param {string} productId
+ * @param {string} name
+ * @param {string} [sku]
+ * @returns {Promise<any>}
+ */
+export async function addProductVariantAction(productId, name, sku = undefined) {
+  const prodId = (productId || '').trim();
+  const variantName = (name || '').trim();
+  if (!prodId) throw new Error('商品 ID 為必填項目');
+  if (!variantName) throw new Error('變體名稱不能為空');
+
+  try {
+    const v = await invoke('add_product_variant', {
+      product_id: prodId,
+      productId: prodId,
+      name: variantName,
+      sku: sku ? String(sku).trim() : undefined
+    });
+    if (appState.currentProductDetail && appState.currentProductDetail.product.id === prodId) {
+      await getProductDetailAction(prodId);
+    }
+    showToast(`已成功新增變體「${variantName}」！`);
+    return v;
+  } catch (err) {
+    console.error("Failed to add product variant:", err);
+    throw err;
+  }
+}
+
+/**
+ * Add a unit to an existing variant
+ * @param {string} variantId
+ * @param {string} unitName
+ * @param {number} conversionRatio
+ * @param {boolean} [isBaseUnit=false]
+ * @param {number} [sellingPrice=0.0]
+ * @returns {Promise<any>}
+ */
+export async function addProductUnitAction(variantId, unitName, conversionRatio, isBaseUnit = false, sellingPrice = 0.0) {
+  const varId = (variantId || '').trim();
+  const uName = (unitName || '').trim();
+  if (!varId) throw new Error('規格變體 ID 為必填項目');
+  if (!uName) throw new Error('單位名稱不能為空');
+
+  try {
+    const unit = await invoke('add_product_unit', {
+      variant_id: varId,
+      variantId: varId,
+      unit_name: uName,
+      unitName: uName,
+      conversion_ratio: conversionRatio,
+      conversionRatio,
+      is_base_unit: isBaseUnit,
+      isBaseUnit,
+      selling_price: sellingPrice,
+      sellingPrice
+    });
+    if (appState.currentProductDetail) {
+      await getProductDetailAction(appState.currentProductDetail.product.id);
+    }
+    showToast(`已成功新增包裝單位「${uName}」！`);
+    return unit;
+  } catch (err) {
+    console.error("Failed to add product unit:", err);
+    throw err;
+  }
+}
+
+/**
+ * Add a vendor supply source to a product sales unit
+ * @param {string} unitId
+ * @param {string} vendorPartnerId
+ * @param {number} purchaseCost
+ * @param {string} [currency='TWD']
+ * @param {boolean} [isPrimary=false]
+ * @returns {Promise<any>}
+ */
+export async function addSupplySourceAction(unitId, vendorPartnerId, purchaseCost, currency = 'TWD', isPrimary = false) {
+  const uId = (unitId || '').trim();
+  const vendorId = (vendorPartnerId || '').trim();
+  if (!uId) throw new Error('包裝銷售單位 ID 為必填項目');
+  if (!vendorId) throw new Error('供應商 ID 為必填項目');
+
+  try {
+    const src = await invoke('add_supply_source', {
+      unit_id: uId,
+      unitId: uId,
+      variant_id: uId,
+      variantId: uId,
+      vendor_partner_id: vendorId,
+      vendorPartnerId: vendorId,
+      purchase_cost: purchaseCost,
+      purchaseCost,
+      currency,
+      is_primary: isPrimary,
+      isPrimary
+    });
+    if (appState.currentProductDetail) {
+      await getProductDetailAction(appState.currentProductDetail.product.id);
+    }
+    showToast('已成功新增供應來源！');
+    return src;
+  } catch (err) {
+    console.error("Failed to add supply source:", err);
+    throw err;
+  }
+}
+
+/**
+ * Add a BOM item to a manufactured product variant
+ * @param {string} parentVariantId
+ * @param {string} childVariantId
+ * @param {number} quantity
+ * @returns {Promise<any>}
+ */
+export async function addBomItemAction(parentVariantId, childVariantId, quantity) {
+  const parentVid = (parentVariantId || '').trim();
+  const childVid = (childVariantId || '').trim();
+  if (!parentVid || !childVid) throw new Error('母規格變體與子物料變體為必填項目');
+
+  try {
+    const bom = await invoke('add_bom_item', {
+      parent_variant_id: parentVid,
+      parentVariantId: parentVid,
+      child_variant_id: childVid,
+      childVariantId: childVid,
+      quantity
+    });
+    if (appState.currentProductDetail) {
+      await getProductDetailAction(appState.currentProductDetail.product.id);
+    }
+    showToast('已成功新增 BOM 組成項目！');
+    return bom;
+  } catch (err) {
+    console.error("Failed to add BOM item:", err);
     throw err;
   }
 }

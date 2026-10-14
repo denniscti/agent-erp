@@ -35,7 +35,14 @@
     KNOWN_DOMAINS,
     fetchPartners,
     createPartnerAction,
-    updatePartnerAction
+    updatePartnerAction,
+    fetchProducts,
+    createProductAction,
+    getProductDetailAction,
+    addProductVariantAction,
+    addProductUnitAction,
+    addSupplySourceAction,
+    addBomItemAction
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -86,6 +93,54 @@
       if (partnerFilter === 'vendor') return p.is_vendor;
       return true;
     })
+  );
+
+  // Product & Material Management state (Issue #137)
+  let newProductName = $state('');
+  let newProductCategory = $state('resale'); // 'resale' | 'manufactured' | 'raw_material'
+  let newProductUnit = $state('件');
+  let newProductPrice = $state(0);
+  let isAddingProduct = $state(false);
+  let productError = $state('');
+  let productFilter = $state('all'); // 'all' | 'resale' | 'manufactured' | 'raw_material'
+
+  let filteredProducts = $derived(
+    appState.products.filter(p => {
+      if (productFilter === 'all') return true;
+      return p.category === productFilter;
+    })
+  );
+
+  let expandedProductId = $state(null);
+  let expandedProductDetail = $state(null);
+  let isLoadingProductDetail = $state(false);
+  let productDetailTab = $state('variants'); // 'variants' | 'units' | 'sources' | 'bom'
+  let productDetailError = $state('');
+
+  // Sub-entity form states
+  let newVariantName = $state('');
+  let isAddingVariant = $state(false);
+
+  let newUnitVariantId = $state('');
+  let newUnitName = $state('');
+  let newUnitRatio = $state(1);
+  let newUnitPrice = $state(0);
+  let isAddingUnit = $state(false);
+
+  let newSupplyUnitId = $state('');
+  let newSupplyVendorId = $state('');
+  let newSupplyCost = $state(0);
+  let newSupplyCode = $state('');
+  let isAddingSupply = $state(false);
+
+  let newBomParentVariantId = $state('');
+  let newBomChildVariantId = $state('');
+  let newBomQuantity = $state(1);
+  let newBomLossRate = $state(0);
+  let isAddingBom = $state(false);
+
+  let vendorPartners = $derived(
+    appState.partners.filter(p => p.is_vendor)
   );
 
   // Department Skill management state (Issue #115)
@@ -340,6 +395,175 @@
     }
   }
 
+  async function handleCreateProduct(e) {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (!newProductName.trim()) {
+      productError = '請填寫商品名稱';
+      return;
+    }
+    isAddingProduct = true;
+    productError = '';
+    try {
+      await createProductAction({
+        name: newProductName.trim(),
+        category: newProductCategory,
+        baseUnit: newProductUnit.trim() || '件',
+        sellingPrice: Number(newProductPrice) || 0
+      });
+      newProductName = '';
+      newProductUnit = '件';
+      newProductPrice = 0;
+    } catch (err) {
+      productError = err?.message || '新增商品失敗';
+    } finally {
+      isAddingProduct = false;
+    }
+  }
+
+  async function handleToggleProductDetail(productId) {
+    if (expandedProductId === productId) {
+      expandedProductId = null;
+      expandedProductDetail = null;
+      productDetailError = '';
+      return;
+    }
+    expandedProductId = productId;
+    isLoadingProductDetail = true;
+    productDetailError = '';
+    try {
+      expandedProductDetail = await getProductDetailAction(productId);
+      if (expandedProductDetail?.variants?.length > 0) {
+        newUnitVariantId = expandedProductDetail.variants[0].id;
+        newBomParentVariantId = expandedProductDetail.variants[0].id;
+      }
+      if (expandedProductDetail?.units?.length > 0) {
+        newSupplyUnitId = expandedProductDetail.units[0].id;
+      }
+    } catch (err) {
+      productDetailError = err?.message || '載入商品明細失敗';
+    } finally {
+      isLoadingProductDetail = false;
+    }
+  }
+
+  async function handleAddVariant(productId) {
+    if (!newVariantName.trim()) {
+      productDetailError = '請輸入規格名稱';
+      return;
+    }
+    isAddingVariant = true;
+    productDetailError = '';
+    try {
+      await addProductVariantAction(productId, newVariantName.trim());
+      newVariantName = '';
+      expandedProductDetail = await getProductDetailAction(productId);
+    } catch (err) {
+      productDetailError = err?.message || '新增規格失敗';
+    } finally {
+      isAddingVariant = false;
+    }
+  }
+
+  async function handleAddUnit(productId) {
+    if (!newUnitName.trim()) {
+      productDetailError = '請輸入包裝單位名稱';
+      return;
+    }
+    if (!newUnitRatio || Number(newUnitRatio) <= 0) {
+      productDetailError = '換算比例必須大於 0';
+      return;
+    }
+    isAddingUnit = true;
+    productDetailError = '';
+    try {
+      const variantId = newUnitVariantId || expandedProductDetail?.variants?.[0]?.id;
+      if (!variantId) {
+        throw new Error('找不到可綁定的規格變體');
+      }
+      await addProductUnitAction(
+        variantId,
+        newUnitName.trim(),
+        Number(newUnitRatio),
+        false,
+        Number(newUnitPrice) || 0
+      );
+      newUnitName = '';
+      newUnitRatio = 1;
+      newUnitPrice = 0;
+      expandedProductDetail = await getProductDetailAction(productId);
+    } catch (err) {
+      productDetailError = err?.message || '新增包裝單位失敗';
+    } finally {
+      isAddingUnit = false;
+    }
+  }
+
+  async function handleAddSupplySource(productId) {
+    if (!newSupplyVendorId) {
+      productDetailError = '請選擇供應商';
+      return;
+    }
+    isAddingSupply = true;
+    productDetailError = '';
+    try {
+      const unitId = newSupplyUnitId || expandedProductDetail?.units?.[0]?.id;
+      if (!unitId) {
+        throw new Error('找不到可綁定的銷售單位');
+      }
+      await addSupplySourceAction(
+        unitId,
+        newSupplyVendorId,
+        Number(newSupplyCost) || 0,
+        'TWD',
+        false
+      );
+      newSupplyCost = 0;
+      newSupplyCode = '';
+      expandedProductDetail = await getProductDetailAction(productId);
+    } catch (err) {
+      productDetailError = err?.message || '新增採購來源失敗';
+    } finally {
+      isAddingSupply = false;
+    }
+  }
+
+  async function handleAddBomItem(productId) {
+    if (!newBomChildVariantId) {
+      productDetailError = '請選擇或輸入子物料規格 ID';
+      return;
+    }
+    if (!newBomQuantity || Number(newBomQuantity) <= 0) {
+      productDetailError = 'BOM 用量必須大於 0';
+      return;
+    }
+    isAddingBom = true;
+    productDetailError = '';
+    try {
+      const parentVariantId = newBomParentVariantId || expandedProductDetail?.variants?.[0]?.id;
+      if (!parentVariantId) {
+        throw new Error('找不到母規格變體');
+      }
+      await addBomItemAction(
+        parentVariantId,
+        newBomChildVariantId,
+        Number(newBomQuantity)
+      );
+      newBomChildVariantId = '';
+      newBomQuantity = 1;
+      newBomLossRate = 0;
+      expandedProductDetail = await getProductDetailAction(productId);
+    } catch (err) {
+      productDetailError = err?.message || '新增 BOM 組成失敗';
+    } finally {
+      isAddingBom = false;
+    }
+  }
+
+  function getVendorName(vendorId) {
+    const v = appState.partners.find(p => p.id === vendorId);
+    return v ? v.name : vendorId;
+  }
+
   function getParentDepartmentName(parentId) {
     if (!parentId) return null;
     const parent = appState.departments.find(d => d.id === parentId);
@@ -358,6 +582,7 @@
     await fetchPartners();
     await fetchDepartments();
     await fetchMembers();
+    await fetchProducts();
     await initMainChatGreeting();
     initializedKey = currentKey;
   }
@@ -1458,6 +1683,426 @@
                         </div>
                       </div>
                     {/if}
+                  {/each}
+                </SettingsEntityCard>
+
+                <!-- Product & BOM Management (Issue #137) -->
+                <SettingsEntityCard
+                  title="商品主檔與規格 BOM 管理 (Product & BOM Management)"
+                  badge="Product 聚合根"
+                  badgeClass="badge-purple"
+                  description="建立與維護全生命週期商品資料模型（轉售商品、自製成品、原物料），包含多規格變體、多階包裝銷售單位（換算比率與售價）、供應來源採購成本，以及自製成品 BOM 物料清單。"
+                  onRefresh={() => fetchProducts()}
+                  refreshLabel="重新整理"
+                  containerStyle="margin-top: 24px;"
+                  errorMessage={productError}
+                  isEmpty={filteredProducts.length === 0}
+                  emptyMessage="目前尚無符合篩選條件的商品資料，請透過上方表單或 AI 助理對話建立。"
+                  listClass="product-list"
+                  listStyle="display: flex; flex-direction: column; gap: 10px;"
+                >
+                  {#snippet headerExtra()}
+                    <div class="filter-row" style="display: flex; gap: 4px; background: rgba(0, 0, 0, 0.2); padding: 2px; border-radius: 6px;">
+                      <button 
+                        class="filter-btn {productFilter === 'all' ? 'active' : ''}" 
+                        onclick={() => productFilter = 'all'}
+                        style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {productFilter === 'all' ? 'var(--accent-purple)' : 'transparent'}; color: {productFilter === 'all' ? '#fff' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {productFilter === 'all' ? '600' : 'normal'};"
+                      >
+                        全部 ({appState.products.length})
+                      </button>
+                      <button 
+                        class="filter-btn {productFilter === 'resale' ? 'active' : ''}" 
+                        onclick={() => productFilter = 'resale'}
+                        style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {productFilter === 'resale' ? 'var(--accent-purple)' : 'transparent'}; color: {productFilter === 'resale' ? '#fff' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {productFilter === 'resale' ? '600' : 'normal'};"
+                      >
+                        轉售商品 ({appState.products.filter(p => p.category === 'resale').length})
+                      </button>
+                      <button 
+                        class="filter-btn {productFilter === 'manufactured' ? 'active' : ''}" 
+                        onclick={() => productFilter = 'manufactured'}
+                        style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {productFilter === 'manufactured' ? 'var(--accent-purple)' : 'transparent'}; color: {productFilter === 'manufactured' ? '#fff' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {productFilter === 'manufactured' ? '600' : 'normal'};"
+                      >
+                        自製成品 ({appState.products.filter(p => p.category === 'manufactured').length})
+                      </button>
+                      <button 
+                        class="filter-btn {productFilter === 'raw_material' ? 'active' : ''}" 
+                        onclick={() => productFilter = 'raw_material'}
+                        style="font-size: 0.75rem; padding: 4px 10px; border-radius: 4px; border: none; background: {productFilter === 'raw_material' ? 'var(--accent-purple)' : 'transparent'}; color: {productFilter === 'raw_material' ? '#fff' : 'var(--text-secondary)'}; cursor: pointer; font-weight: {productFilter === 'raw_material' ? '600' : 'normal'};"
+                      >
+                        原物料 ({appState.products.filter(p => p.category === 'raw_material').length})
+                      </button>
+                    </div>
+                  {/snippet}
+
+                  {#snippet form()}
+                    <!-- Add Product Form -->
+                    <form onsubmit={handleCreateProduct} class="product-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
+                      <div style="flex: 2; min-width: 170px;">
+                        <label for="prod-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">商品名稱（必填）</label>
+                        <input 
+                          id="prod-name-input"
+                          type="text" 
+                          class="form-input" 
+                          placeholder="例：專業級散熱模組、五金零件" 
+                          bind:value={newProductName}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                        />
+                      </div>
+                      <div style="flex: 1.2; min-width: 130px;">
+                        <label for="prod-category-select" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">商品類別</label>
+                        <select
+                          id="prod-category-select"
+                          class="form-input"
+                          bind:value={newProductCategory}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                        >
+                          <option value="resale">📦 轉售商品 (可售・可採)</option>
+                          <option value="manufactured">⚙️ 自製成品 (可售・BOM)</option>
+                          <option value="raw_material">🧱 原物料 (不售・可採)</option>
+                        </select>
+                      </div>
+                      <div style="flex: 1; min-width: 90px;">
+                        <label for="prod-unit-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">基準單位</label>
+                        <input 
+                          id="prod-unit-input"
+                          type="text" 
+                          class="form-input" 
+                          placeholder="件" 
+                          bind:value={newProductUnit}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                        />
+                      </div>
+                      <div style="flex: 1; min-width: 100px;">
+                        <label for="prod-price-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">基準售價</label>
+                        <input 
+                          id="prod-price-input"
+                          type="number" 
+                          min="0"
+                          step="any"
+                          class="form-input" 
+                          placeholder="0" 
+                          bind:value={newProductPrice}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" 
+                        />
+                      </div>
+                      <button 
+                        type="submit" 
+                        class="btn btn-primary btn-sm" 
+                        disabled={isAddingProduct}
+                        style="height: 35px; white-space: nowrap; padding: 0 16px;"
+                      >
+                        {#if isAddingProduct}建立中...{:else}+ 建立商品{/if}
+                      </button>
+                    </form>
+                  {/snippet}
+
+                  {#each filteredProducts as product (product.id)}
+                    <div class="product-item" style="display: flex; flex-direction: column; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                          <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(168, 85, 247, 0.12); border: 1px solid rgba(168, 85, 247, 0.3); display: flex; align-items: center; justify-content: center; font-size: 1.1rem;">
+                            {#if product.category === 'manufactured'}
+                              ⚙️
+                            {:else if product.category === 'raw_material'}
+                              🧱
+                            {:else}
+                              📦
+                            {/if}
+                          </div>
+                          <div>
+                            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                              <span style="font-weight: 600; color: var(--text-primary); font-size: 0.9rem;">{product.name}</span>
+                              {#if product.category === 'manufactured'}
+                                <span class="badge badge-emerald" style="font-size: 0.7rem;">自製成品</span>
+                              {:else if product.category === 'raw_material'}
+                                <span class="badge badge-amber" style="font-size: 0.7rem;">原物料</span>
+                              {:else}
+                                <span class="badge badge-cyan" style="font-size: 0.7rem;">轉售商品</span>
+                              {/if}
+                              {#if product.is_sellable}
+                                <span style="font-size: 0.7rem; color: #10b981; background: rgba(16, 185, 129, 0.1); padding: 1px 6px; border-radius: 3px;">可銷售</span>
+                              {/if}
+                              {#if product.is_purchasable}
+                                <span style="font-size: 0.7rem; color: #f59e0b; background: rgba(245, 158, 11, 0.1); padding: 1px 6px; border-radius: 3px;">可採購</span>
+                              {/if}
+                            </div>
+                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">
+                              {product.id}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style="display: flex; align-items: center; gap: 12px;">
+                          <button
+                            type="button"
+                            class="btn btn-outline btn-xs"
+                            onclick={() => handleToggleProductDetail(product.id)}
+                            style="padding: 4px 12px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: rgba(255, 255, 255, 0.04); color: var(--text-secondary); cursor: pointer;"
+                          >
+                            {expandedProductId === product.id ? '收合詳情 ▲' : '展開規格與 BOM ▼'}
+                          </button>
+                        </div>
+                      </div>
+
+                      <!-- Expandable Detail Section -->
+                      {#if expandedProductId === product.id}
+                        <div class="product-detail-expanded" style="margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border-color);">
+                          {#if isLoadingProductDetail}
+                            <div style="font-size: 0.8rem; color: var(--text-muted); text-align: center; padding: 12px;">載入詳細資訊中...</div>
+                          {:else if expandedProductDetail}
+                            <!-- Sub-tabs -->
+                            <div style="display: flex; gap: 6px; margin-bottom: 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); padding-bottom: 8px;">
+                              <button
+                                type="button"
+                                class="btn btn-xs {productDetailTab === 'variants' ? 'btn-primary' : 'btn-outline'}"
+                                onclick={() => productDetailTab = 'variants'}
+                                style="font-size: 0.75rem; padding: 3px 10px;"
+                              >
+                                規格變體 ({expandedProductDetail.variants?.length || 0})
+                              </button>
+                              <button
+                                type="button"
+                                class="btn btn-xs {productDetailTab === 'units' ? 'btn-primary' : 'btn-outline'}"
+                                onclick={() => productDetailTab = 'units'}
+                                style="font-size: 0.75rem; padding: 3px 10px;"
+                              >
+                                包裝銷售單位 ({expandedProductDetail.units?.length || 0})
+                              </button>
+                              <button
+                                type="button"
+                                class="btn btn-xs {productDetailTab === 'sources' ? 'btn-primary' : 'btn-outline'}"
+                                onclick={() => productDetailTab = 'sources'}
+                                style="font-size: 0.75rem; padding: 3px 10px;"
+                              >
+                                採購供應商 ({expandedProductDetail.supply_sources?.length || 0})
+                              </button>
+                              {#if product.category === 'manufactured'}
+                                <button
+                                  type="button"
+                                  class="btn btn-xs {productDetailTab === 'bom' ? 'btn-primary' : 'btn-outline'}"
+                                  onclick={() => productDetailTab = 'bom'}
+                                  style="font-size: 0.75rem; padding: 3px 10px;"
+                                >
+                                  BOM 物料組成 ({expandedProductDetail.bom_items?.length || 0})
+                                </button>
+                              {/if}
+                            </div>
+
+                            {#if productDetailError}
+                              <div style="color: var(--status-error); font-size: 0.78rem; margin-bottom: 10px; padding: 6px 10px; background: rgba(239, 68, 68, 0.08); border-radius: 4px;">
+                                ⚠️ {productDetailError}
+                              </div>
+                            {/if}
+
+                            <!-- Tab: Variants -->
+                            {#if productDetailTab === 'variants'}
+                              <div style="display: flex; flex-direction: column; gap: 8px;">
+                                <div style="display: flex; flex-direction: column; gap: 6px;">
+                                  {#each (expandedProductDetail.variants || []) as v (v.id)}
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
+                                      <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-weight: 600;">{v.name}</span>
+                                        {#if v.is_default}
+                                          <span class="badge badge-cyan" style="font-size: 0.65rem;">預設變體</span>
+                                        {/if}
+                                        <span style="color: var(--text-muted); font-size: 0.72rem; font-family: monospace;">SKU: {v.sku}</span>
+                                      </div>
+                                      <span style="color: var(--text-muted); font-size: 0.72rem; font-family: monospace;">{v.id}</span>
+                                    </div>
+                                  {/each}
+                                </div>
+                                <form onsubmit={(e) => { e.preventDefault(); handleAddVariant(product.id); }} style="display: flex; gap: 8px; margin-top: 6px;">
+                                  <input
+                                    type="text"
+                                    class="form-input"
+                                    placeholder="新增規格名稱（例：紅色、XL、256GB）"
+                                    bind:value={newVariantName}
+                                    style="flex: 1; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                  />
+                                  <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingVariant} style="white-space: nowrap; padding: 0 12px;">
+                                    + 新增規格
+                                  </button>
+                                </form>
+                              </div>
+
+                            <!-- Tab: Units -->
+                            {:else if productDetailTab === 'units'}
+                              <div style="display: flex; flex-direction: column; gap: 8px;">
+                                <div style="display: flex; flex-direction: column; gap: 6px;">
+                                  {#each (expandedProductDetail.units || []) as u (u.id)}
+                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
+                                      <div style="display: flex; align-items: center; gap: 8px;">
+                                        <span style="font-weight: 600;">{u.unit_name}</span>
+                                        {#if (expandedProductDetail.variants || []).length > 1}
+                                          {@const matchedVar = (expandedProductDetail.variants || []).find(v => v.id === u.variant_id)}
+                                          {#if matchedVar}
+                                            <span class="badge" style="font-size: 0.65rem; background: rgba(255,255,255,0.06);">{matchedVar.name}</span>
+                                          {/if}
+                                        {/if}
+                                        {#if u.is_base_unit}
+                                          <span class="badge badge-cyan" style="font-size: 0.65rem;">基準單位 (1:1)</span>
+                                        {:else}
+                                          <span style="color: var(--text-muted); font-size: 0.72rem;">比例: {u.conversion_ratio}</span>
+                                        {/if}
+                                      </div>
+                                      <div style="font-weight: 600; color: #10b981;">
+                                        ${u.selling_price}
+                                      </div>
+                                    </div>
+                                  {/each}
+                                </div>
+                                <form onsubmit={(e) => { e.preventDefault(); handleAddUnit(product.id); }} style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; align-items: flex-end;">
+                                  {#if (expandedProductDetail?.variants || []).length > 1}
+                                    <div style="width: 120px;">
+                                      <label for="new-unit-var-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">選擇規格變體</label>
+                                      <select id="new-unit-var-{product.id}" bind:value={newUnitVariantId} class="form-input" style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                                        {#each (expandedProductDetail.variants || []) as v}
+                                          <option value={v.id}>{v.name}{v.is_default ? ' (預設)' : ''}</option>
+                                        {/each}
+                                      </select>
+                                    </div>
+                                  {/if}
+                                  <div style="width: 100px;">
+                                    <label for="new-unit-name-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">單位名稱</label>
+                                    <input id="new-unit-name-{product.id}" type="text" class="form-input" placeholder="例：盒" bind:value={newUnitName} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                  </div>
+                                  <div style="width: 90px;">
+                                    <label for="new-unit-ratio-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">換算比率</label>
+                                    <input id="new-unit-ratio-{product.id}" type="number" min="0.0001" step="any" class="form-input" placeholder="10" bind:value={newUnitRatio} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                  </div>
+                                  <div style="width: 90px;">
+                                    <label for="new-unit-price-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">售價</label>
+                                    <input id="new-unit-price-{product.id}" type="number" min="0" step="any" class="form-input" placeholder="0" bind:value={newUnitPrice} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                  </div>
+                                  <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingUnit} style="height: 28px; white-space: nowrap; padding: 0 12px;">
+                                    + 新增包裝單位
+                                  </button>
+                                </form>
+                              </div>
+
+                            <!-- Tab: Sources -->
+                            {:else if productDetailTab === 'sources'}
+                              <div style="display: flex; flex-direction: column; gap: 8px;">
+                                <div style="display: flex; flex-direction: column; gap: 6px;">
+                                  {#if (expandedProductDetail.supply_sources || []).length === 0}
+                                    <div style="font-size: 0.75rem; color: var(--text-muted); padding: 4px 0;">尚未綁定任何採購供應商。</div>
+                                  {:else}
+                                    {#each expandedProductDetail.supply_sources as s (s.id)}
+                                      {@const matchedUnit = (expandedProductDetail.units || []).find(u => u.id === s.unit_id)}
+                                      {@const matchedVar = matchedUnit ? (expandedProductDetail.variants || []).find(v => v.id === matchedUnit.variant_id) : null}
+                                      <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
+                                        <div>
+                                          <span style="font-weight: 600;">🏭 {getVendorName(s.vendor_partner_id)}</span>
+                                          {#if matchedUnit}
+                                            <span class="badge" style="font-size: 0.65rem; margin-left: 6px; background: rgba(59, 130, 246, 0.15); color: #60a5fa;">
+                                              單位: {matchedUnit.unit_name} (x{matchedUnit.conversion_ratio})
+                                            </span>
+                                          {/if}
+                                          {#if matchedVar && (expandedProductDetail.variants || []).length > 1}
+                                            <span class="badge" style="font-size: 0.65rem; margin-left: 6px; background: rgba(255,255,255,0.06);">{matchedVar.name}</span>
+                                          {/if}
+                                          {#if s.vendor_product_code}
+                                            <span style="color: var(--text-muted); font-size: 0.72rem; margin-left: 6px;">(廠商型號: {s.vendor_product_code})</span>
+                                          {/if}
+                                        </div>
+                                        <div style="font-weight: 600; color: #f59e0b;">
+                                          採購成本: ${s.purchase_cost} {s.currency}
+                                        </div>
+                                      </div>
+                                    {/each}
+                                  {/if}
+                                </div>
+                                <form onsubmit={(e) => { e.preventDefault(); handleAddSupplySource(product.id); }} style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; align-items: flex-end;">
+                                  <div style="width: 150px;">
+                                    <label for="new-supply-unit-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">選擇銷售單位</label>
+                                    <select id="new-supply-unit-{product.id}" bind:value={newSupplyUnitId} class="form-input" style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                                      {#each (expandedProductDetail.units || []) as u}
+                                        {@const uVar = (expandedProductDetail.variants || []).find(v => v.id === u.variant_id)}
+                                        <option value={u.id}>
+                                          {u.unit_name} (x{u.conversion_ratio}){uVar && (expandedProductDetail.variants || []).length > 1 ? ` - ${uVar.name}` : ''}
+                                        </option>
+                                      {/each}
+                                    </select>
+                                  </div>
+                                  <div style="flex: 1.5; min-width: 140px;">
+                                    <label for="new-supply-vendor-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">選擇供應商</label>
+                                    <select id="new-supply-vendor-{product.id}" bind:value={newSupplyVendorId} class="form-input" style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                                      <option value="">-- 請選擇供應商 --</option>
+                                      {#each vendorPartners as vp}
+                                        <option value={vp.id}>{vp.name}</option>
+                                      {/each}
+                                    </select>
+                                  </div>
+                                  <div style="width: 90px;">
+                                    <label for="new-supply-cost-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">採購成本</label>
+                                    <input id="new-supply-cost-{product.id}" type="number" min="0" step="any" class="form-input" placeholder="0" bind:value={newSupplyCost} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                  </div>
+                                  <div style="width: 100px;">
+                                    <label for="new-supply-code-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">廠商料號(選填)</label>
+                                    <input id="new-supply-code-{product.id}" type="text" class="form-input" placeholder="VND-001" bind:value={newSupplyCode} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                  </div>
+                                  <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingSupply} style="height: 28px; white-space: nowrap; padding: 0 12px;">
+                                    + 新增供應商
+                                  </button>
+                                </form>
+                              </div>
+
+                            <!-- Tab: BOM -->
+                            {:else if productDetailTab === 'bom'}
+                              <div style="display: flex; flex-direction: column; gap: 8px;">
+                                <div style="display: flex; flex-direction: column; gap: 6px;">
+                                  {#if (expandedProductDetail.bom_items || []).length === 0}
+                                    <div style="font-size: 0.75rem; color: var(--text-muted); padding: 4px 0;">尚未建立任何 BOM 子物料清單。</div>
+                                  {:else}
+                                    {#each expandedProductDetail.bom_items as b (b.id)}
+                                      <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
+                                        <div>
+                                          <span style="font-weight: 600;">🧱 子物料規格 ID: {b.child_variant_id}</span>
+                                          {#if b.loss_rate > 0}
+                                            <span style="color: var(--text-muted); font-size: 0.72rem; margin-left: 6px;">(損耗率: {(b.loss_rate * 100).toFixed(1)}%)</span>
+                                          {/if}
+                                        </div>
+                                        <div style="font-weight: 600; color: #a855f7;">
+                                          耗用量: {b.quantity}
+                                        </div>
+                                      </div>
+                                    {/each}
+                                  {/if}
+                                </div>
+                                <form onsubmit={(e) => { e.preventDefault(); handleAddBomItem(product.id); }} style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; align-items: flex-end;">
+                                  {#if (expandedProductDetail?.variants || []).length > 1}
+                                    <div style="width: 120px;">
+                                      <label for="new-bom-parent-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">主產品規格</label>
+                                      <select id="new-bom-parent-{product.id}" bind:value={newBomParentVariantId} class="form-input" style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                                        {#each (expandedProductDetail.variants || []) as v}
+                                          <option value={v.id}>{v.name}{v.is_default ? ' (預設)' : ''}</option>
+                                        {/each}
+                                      </select>
+                                    </div>
+                                  {/if}
+                                  <div style="flex: 1.5; min-width: 140px;">
+                                    <label for="new-bom-child-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">選擇原料或子規格</label>
+                                    <select id="new-bom-child-{product.id}" bind:value={newBomChildVariantId} class="form-input" style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                                      <option value="">-- 請選擇原料/物料 --</option>
+                                      {#each appState.products.filter(p => p.id !== product.id) as otherProd}
+                                        <option value={otherProd.id}>{otherProd.name} ({otherProd.category === 'raw_material' ? '原物料' : '半成品/轉售'})</option>
+                                      {/each}
+                                    </select>
+                                  </div>
+                                  <div style="width: 80px;">
+                                    <label for="new-bom-qty-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">用量</label>
+                                    <input id="new-bom-qty-{product.id}" type="number" min="0.0001" step="any" class="form-input" placeholder="1" bind:value={newBomQuantity} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                  </div>
+                                  <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingBom} style="height: 28px; white-space: nowrap; padding: 0 12px;">
+                                    + 加入 BOM
+                                  </button>
+                                </form>
+                              </div>
+                            {/if}
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
                   {/each}
                 </SettingsEntityCard>
               </div>

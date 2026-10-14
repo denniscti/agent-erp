@@ -235,10 +235,11 @@ test('TC-ISO-N-07: Switching tenant via selectTenantAction triggers store refetc
   // Then: appState.activeTenant is updated to tnt_mock_2
   assert.equal(appState.activeTenant?.id, 'tnt_mock_2');
 
-  // And Then: appState departments, tasks, and partners are populated for tnt_mock_2
+  // And Then: appState departments, tasks, partners, and products are populated for tnt_mock_2
   assert.ok(Array.isArray(appState.departments));
   assert.ok(Array.isArray(appState.tasks));
   assert.ok(Array.isArray(appState.partners));
+  assert.ok(Array.isArray(appState.products));
 
   // Clean up: Switch back to tnt_mock_1
   await selectTenantAction('tnt_mock_1');
@@ -471,4 +472,85 @@ test('TC-ISO-B-06: Querying with empty or whitespace tenantId in args defaults s
   assert.ok(Array.isArray(depts));
   assert.ok(Array.isArray(tasks));
   assert.ok(Array.isArray(partners));
+});
+
+test('TC-ISO-PROD-01: Cross-tenant duplicate product name is permitted without conflict', async () => {
+  // Given: Authenticated session
+  await ensureAuthenticated();
+  const prodName = `晶片處理器_${Date.now()}`;
+
+  // When: Switched to tnt_mock_1, create product
+  await selectTenantAction('tnt_mock_1');
+  const prodA = await invoke('create_product', {
+    name: prodName,
+    category: '轉售商品',
+    selling_price: 100
+  });
+
+  // And When: Switched to tnt_mock_2, create product with the same name
+  await selectTenantAction('tnt_mock_2');
+  const prodB = await invoke('create_product', {
+    name: prodName,
+    category: '轉售商品',
+    selling_price: 150
+  });
+
+  // Then: Both creations succeed with independent records and respective tenant IDs
+  assert.ok(prodA.product.id);
+  assert.ok(prodB.product.id);
+  assert.notEqual(prodA.product.id, prodB.product.id);
+  assert.equal(prodA.product.tenant_id, 'tnt_mock_1');
+  assert.equal(prodB.product.tenant_id, 'tnt_mock_2');
+});
+
+test('TC-ISO-PROD-02: Product list strictly isolates data by active tenant', async () => {
+  // Given: Separate products in tnt_mock_1 and tnt_mock_2
+  await ensureAuthenticated();
+  const nameA = `產品_A_${Date.now()}`;
+  const nameB = `產品_B_${Date.now()}`;
+
+  await selectTenantAction('tnt_mock_1');
+  await invoke('create_product', { name: nameA, category: '轉售商品' });
+
+  await selectTenantAction('tnt_mock_2');
+  await invoke('create_product', { name: nameB, category: '自製成品' });
+
+  // When: Querying products for tnt_mock_1
+  await selectTenantAction('tnt_mock_1');
+  const listA = await invoke('list_products');
+
+  // And When: Querying products for tnt_mock_2
+  await selectTenantAction('tnt_mock_2');
+  const listB = await invoke('list_products');
+
+  // Then: Isolation is strictly preserved
+  assert.ok(listA.some(p => p.name === nameA));
+  assert.ok(!listA.some(p => p.name === nameB));
+  assert.ok(listA.every(p => (p.tenant_id || 'tnt_mock_1') === 'tnt_mock_1'));
+
+  assert.ok(listB.some(p => p.name === nameB));
+  assert.ok(!listB.some(p => p.name === nameA));
+  assert.ok(listB.every(p => (p.tenant_id || 'tnt_mock_1') === 'tnt_mock_2'));
+});
+
+test('TC-ISO-PROD-03: Cross-tenant variant mutation is blocked (Horizontal Privilege Defense)', async () => {
+  // Given: Product created in tnt_mock_1
+  await ensureAuthenticated();
+  await selectTenantAction('tnt_mock_1');
+  const pA = await invoke('create_product', {
+    name: `租戶A專屬品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When: Switched to tnt_mock_2, trying to add variant to tnt_mock_1's product
+  await selectTenantAction('tnt_mock_2');
+  await assert.rejects(
+    async () => {
+      await invoke('add_product_variant', {
+        productId: pA.product.id,
+        name: '非法變體'
+      });
+    },
+    /Product not found/
+  );
 });

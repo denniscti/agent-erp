@@ -8,12 +8,14 @@ import {
   customerCreateBasicProfileAgentProfile,
   vendorCreateBasicProfileAgentProfile
 } from './partners.js';
+import { productManagementAgentProfile } from './products.js';
 import { isKnownDomain } from './domains.js';
 
 export * from './types.js';
 export * from './harness.js';
 export * from './departments.js';
 export * from './partners.js';
+export * from './products.js';
 export * from './domains.js';
 
 /**
@@ -32,6 +34,9 @@ registerAgentProfile('customers', customerCreateBasicProfileAgentProfile);
 registerAgentProfile('vendor.create_basic_profile', vendorCreateBasicProfileAgentProfile);
 registerAgentProfile('task_m4_vendor', vendorCreateBasicProfileAgentProfile);
 registerAgentProfile('vendors', vendorCreateBasicProfileAgentProfile);
+registerAgentProfile('product.create_basic_profile', productManagementAgentProfile);
+registerAgentProfile('task_m7_product', productManagementAgentProfile);
+registerAgentProfile('products', productManagementAgentProfile);
 
 /**
  * System declared skills registry
@@ -67,6 +72,18 @@ const declaredSkillsList = [
     name: '新增供應商基本資料',
     domain: 'vendor',
     description: '建立新供應商基本檔案與採購聯絡資訊'
+  },
+  {
+    id: 'product.create_basic_profile',
+    name: '新增商品基本資料',
+    domain: 'product',
+    description: '建立新商品基本檔案、規格變體與銷售單位售價'
+  },
+  {
+    id: 'product.manage',
+    name: '管理商品與規格 BOM',
+    domain: 'product',
+    description: '查詢商品清單、維護變體包裝單位、供應來源與自製成品 BOM 組成'
   }
 ];
 
@@ -112,6 +129,11 @@ export function getAgentProfileForTask(task) {
   // 6. Fallback check for customer subtask title
   if (task.title && (task.title.includes('新增客戶') || task.title.includes('建立客戶') || task.title.includes('客戶'))) {
     return customerCreateBasicProfileAgentProfile;
+  }
+
+  // 7. Fallback check for product subtask title
+  if (task.title && (task.title.includes('新增商品') || task.title.includes('建立商品') || task.title.includes('商品') || task.title.includes('產品'))) {
+    return productManagementAgentProfile;
   }
 
   return null;
