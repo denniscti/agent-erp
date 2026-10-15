@@ -35,6 +35,7 @@ registerAgentProfile('vendor.create_basic_profile', vendorCreateBasicProfileAgen
 registerAgentProfile('task_m4_vendor', vendorCreateBasicProfileAgentProfile);
 registerAgentProfile('vendors', vendorCreateBasicProfileAgentProfile);
 registerAgentProfile('product.create_basic_profile', productManagementAgentProfile);
+registerAgentProfile('product.manage', productManagementAgentProfile);
 registerAgentProfile('task_m7_product', productManagementAgentProfile);
 registerAgentProfile('products', productManagementAgentProfile);
 

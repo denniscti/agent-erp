@@ -46,7 +46,8 @@ const {
   ONBOARDING_STEPS,
   createTaskAction,
   fetchPartners,
-  fetchVendors
+  fetchVendors,
+  fetchProducts
 } = await import('../src/lib/store.svelte.js');
 
 const {
@@ -55,6 +56,7 @@ const {
   departmentAgentProfile,
   customerCreateBasicProfileAgentProfile,
   vendorCreateBasicProfileAgentProfile,
+  productManagementAgentProfile,
   runAgentTurn,
   executeConfirmation
 } = await import('../src/lib/workflow/index.js');
@@ -114,7 +116,23 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and departme
     'Vendor subtask message should include example guidance text'
   );
 
-  // 4. Verify main ambient welcome message
+  // 4. Verify '建立第一個商品' subtask (Issue #139)
+  const productSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品' && t.parent_task_id === parentTask.id);
+  assert.ok(productSubTasks.length > 0, 'Subtask 建立第一個商品 should be created under parent task');
+  const productSubTask = productSubTasks[productSubTasks.length - 1];
+  assert.equal(productSubTask.skill_id, 'product.create_basic_profile', 'Product subtask must have skill_id set');
+  const productMsgs = appState.taskMessages[productSubTask.id] || [];
+  assert.ok(productMsgs.length > 0, 'Product subtask should have initial guidance message');
+  assert.ok(
+    productMsgs[0].content.includes(`新租戶「${tenantName}」建立完成後，讓我們來建立第一筆商品基本資料`),
+    'Product subtask message should contain product setup guidance'
+  );
+  assert.ok(
+    productMsgs[0].content.includes('例如：「我想新增智能核心晶片 分類 轉售商品 售價 120」'),
+    'Product subtask message should include example guidance text'
+  );
+
+  // 5. Verify main ambient welcome message
   const mainMsgs = appState.taskMessages['main'] || [];
   assert.ok(mainMsgs.length > 0, 'Main ambient conversation should have messages');
   const mainGreeting = mainMsgs[mainMsgs.length - 1];
@@ -273,6 +291,71 @@ test('TC-ONB-N-05: Normal case - End-to-end vendor creation in 建立第一個�
   assert.equal(created.is_vendor, true, 'is_vendor flag must be true');
 });
 
+test('TC-ONB-N-06: Normal case - getAgentProfileForTask resolves productManagementAgentProfile for 建立第一個商品', () => {
+  // Given: Preconditions - An onboarding subtask with title '建立第一個商品'
+  const task = {
+    id: 'task_sub_product_1',
+    title: '建立第一個商品',
+    parent_task_id: 'task_parent_1',
+    module_id: 'sales'
+  };
+
+  // When:  Operation to execute - Resolve AgentProfile for task
+  const resolvedProfile = getAgentProfileForTask(task);
+
+  // Then:  Expected result - Resolves to productManagementAgentProfile
+  assert.ok(resolvedProfile, 'AgentProfile must be resolved');
+  assert.equal(resolvedProfile.id, 'product.create_basic_profile');
+  assert.equal(resolvedProfile.domain, 'product');
+  assert.ok(
+    resolvedProfile.tools.some(t => t.function.name === 'create_product'),
+    'Profile must include create_product tool'
+  );
+  assert.ok(
+    resolvedProfile.tools.some(t => t.function.name === 'list_products'),
+    'Profile must include list_products tool'
+  );
+});
+
+test('TC-ONB-N-07: Normal case - End-to-end product creation in 建立第一個商品 subtask context', async () => {
+  // Given: Preconditions - An active task for '建立第一個商品'
+  const task = {
+    id: `task_sub_prod_${Date.now()}`,
+    title: '建立第一個商品',
+    status: 'pending'
+  };
+  const profile = getAgentProfileForTask(task);
+  assert.ok(profile, 'Profile for 建立第一個商品 must exist');
+
+  const uniqueProdName = `首件產品_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+  // When:  Operation to execute - Run agent turn to create product with natural language
+  const turnResult = await runAgentTurn(
+    `幫我新增商品 ${uniqueProdName} 分類 轉售商品 售價 350`,
+    profile,
+    { taskId: task.id, activeTask: task }
+  );
+
+  // Then:  Expected result - Confirmation card is generated for create_product
+  assert.ok(turnResult.confirmation, 'Should produce a pending confirmation');
+  assert.equal(turnResult.confirmation.toolName, 'create_product');
+  assert.equal(turnResult.confirmation.args.name, uniqueProdName);
+
+  // When:  Execute confirmation
+  const confirmResult = await executeConfirmation(turnResult.confirmation, {
+    taskId: task.id,
+    activeTask: task
+  });
+
+  // Then:  Verification - Product created successfully
+  assert.ok(confirmResult.content.includes(uniqueProdName), 'Confirmation content must include product name');
+  assert.ok(confirmResult.toast.includes(uniqueProdName), 'Toast must include product name');
+
+  const products = await fetchProducts();
+  const created = products.find(p => p.name === uniqueProdName);
+  assert.ok(created, 'Created product must be in products list');
+});
+
 // ==========================================
 // Issue #133: skillId Binding & Fallback Tests
 // ==========================================
@@ -419,10 +502,10 @@ test('TC-SKILL-B-01 to B-04: Boundary values - Null, whitespace, and unknown ski
 test('TC-ONB-STEPS-01: Declarative ONBOARDING_STEPS schema and guidance generation', () => {
   // Given: Preconditions - ONBOARDING_STEPS exported array
   assert.ok(Array.isArray(ONBOARDING_STEPS), 'ONBOARDING_STEPS must be an array');
-  assert.equal(ONBOARDING_STEPS.length, 3, 'Must define exactly 3 initial onboarding steps');
+  assert.equal(ONBOARDING_STEPS.length, 4, 'Must define exactly 4 initial onboarding steps');
 
   // When & Then: Check step definitions
-  const [step1, step2, step3] = ONBOARDING_STEPS;
+  const [step1, step2, step3, step4] = ONBOARDING_STEPS;
 
   assert.equal(step1.title, '設定部門');
   assert.equal(step1.skillId, 'department.manage');
@@ -441,6 +524,12 @@ test('TC-ONB-STEPS-01: Declarative ONBOARDING_STEPS schema and guidance generati
   assert.equal(step3.moduleId, 'sales');
   assert.equal(typeof step3.guidanceMessage, 'function');
   assert.ok(step3.guidanceMessage('測試租戶').includes('測試租戶'));
+
+  assert.equal(step4.title, '建立第一個商品');
+  assert.equal(step4.skillId, 'product.create_basic_profile');
+  assert.equal(step4.moduleId, 'sales');
+  assert.equal(typeof step4.guidanceMessage, 'function');
+  assert.ok(step4.guidanceMessage('測試租戶').includes('測試租戶'));
 });
 
 test('TC-ONB-ACT-01 & ACT-02: createTaskAction with and without skillId parameter', async () => {
@@ -493,6 +582,13 @@ test('TC-ONB-B-01: Equivalence class - English and special characters in tenant 
   assert.ok(
     vendorMsgs[0].content.includes(`新租戶「${specialTenantName}」建立完成後，讓我們來建立第一筆供應商基本資料`)
   );
+
+  const productSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品');
+  assert.ok(productSubTasks.length > 0);
+  const productMsgs = appState.taskMessages[productSubTasks[productSubTasks.length - 1].id] || [];
+  assert.ok(
+    productMsgs[0].content.includes(`新租戶「${specialTenantName}」建立完成後，讓我們來建立第一筆商品基本資料`)
+  );
 });
 
 test('TC-ONB-B-02: Boundary value - Empty string tenant name handled safely', async () => {
@@ -519,6 +615,8 @@ test('TC-ONB-B-02: Boundary value - Empty string tenant name handled safely', as
   assert.ok(customerSubTasks.length > 0, 'Customer subtask created');
   const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商');
   assert.ok(vendorSubTasks.length > 0, 'Vendor subtask created');
+  const prodSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品');
+  assert.ok(prodSubTasks.length > 0, 'Product subtask created');
 });
 
 test('TC-ONB-B-03: Boundary value - Whitespace string tenant name handled safely', async () => {
@@ -538,6 +636,8 @@ test('TC-ONB-B-03: Boundary value - Whitespace string tenant name handled safely
   assert.ok(customerSubTasks.length > 0, 'Customer subtask created');
   const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商');
   assert.ok(vendorSubTasks.length > 0, 'Vendor subtask created');
+  const prodSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品');
+  assert.ok(prodSubTasks.length > 0, 'Product subtask created');
   const vendorMsgs = appState.taskMessages[vendorSubTasks[vendorSubTasks.length - 1].id] || [];
   assert.ok(vendorMsgs.length > 0);
 });

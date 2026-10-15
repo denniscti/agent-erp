@@ -309,17 +309,22 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
                 .unwrap_or_default()
                 .as_secs() as i64;
             conn.execute(
-                "INSERT INTO tasks (id, tenant_id, title, status, parent_task_id, module_id, assignee, created_at) VALUES
-                 ('task_parent_1', 'tnt_mock_1', '新租戶起步', 'in_progress', NULL, 'sales', '主管', ?1),
-                 ('task_sub_1', 'tnt_mock_1', '設定部門', 'pending', 'task_parent_1', 'sales', '主管', ?1),
-                 ('task_sub_2', 'tnt_mock_1', '邀請團隊成員', 'pending', 'task_parent_1', 'sales', '主管', ?1)",
+                "INSERT INTO tasks (id, tenant_id, title, status, parent_task_id, module_id, assignee, skill_id, created_at) VALUES
+                 ('task_parent_1', 'tnt_mock_1', '新租戶起步', 'in_progress', NULL, 'sales', '主管', NULL, ?1),
+                 ('task_sub_1', 'tnt_mock_1', '設定部門', 'pending', 'task_parent_1', 'sales', '主管', 'department.manage', ?1),
+                 ('task_sub_2', 'tnt_mock_1', '建立第一個客戶', 'pending', 'task_parent_1', 'sales', '主管', 'customer.create_basic_profile', ?1),
+                 ('task_sub_3', 'tnt_mock_1', '建立第一個供應商', 'pending', 'task_parent_1', 'sales', '主管', 'vendor.create_basic_profile', ?1),
+                 ('task_sub_4', 'tnt_mock_1', '建立第一個商品', 'pending', 'task_parent_1', 'sales', '主管', 'product.create_basic_profile', ?1)",
                 [now],
             ).map_err(|e| format!("Failed to seed tasks: {}", e))?;
 
             conn.execute(
                 "INSERT INTO task_messages (id, task_id, role, content, timestamp) VALUES
                  ('msg_1', 'main', 'assistant', '你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 3 筆待處理任務、1 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：', ?1),
-                 ('msg_2', 'task_sub_1', 'assistant', '您好！我是部門設定助理。新租戶建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？（您可以直接輸入「我想新增行銷部」或詢問「目前有哪些部門」）', ?1)",
+                 ('msg_2', 'task_sub_1', 'assistant', '您好！我是部門設定助理。新租戶建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？（您可以直接輸入「我想新增行銷部」或詢問「目前有哪些部門」）', ?1),
+                 ('msg_3', 'task_sub_2', 'assistant', '您好！我是客戶管理助理。新租戶建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）', ?1),
+                 ('msg_4', 'task_sub_3', 'assistant', '您好！我是供應商管理助理。新租戶建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）', ?1),
+                 ('msg_5', 'task_sub_4', 'assistant', '您好！我是商品資料管理助理。新租戶建立完成後，讓我們來建立第一筆商品基本資料。請問您想先新增哪一項商品？（例如：「我想新增智能核心晶片 分類 轉售商品 售價 120」）', ?1)",
                 [now],
             ).map_err(|e| format!("Failed to seed task messages: {}", e))?;
         }
@@ -729,6 +734,7 @@ pub fn run() {
             products::list_products,
             products::get_product_detail,
             products::add_product_variant,
+            products::update_product_variant,
             products::add_product_unit,
             products::add_supply_source,
             products::add_bom_item,

@@ -40,6 +40,7 @@
     createProductAction,
     getProductDetailAction,
     addProductVariantAction,
+    updateProductVariantAction,
     addProductUnitAction,
     addSupplySourceAction,
     addBomItemAction
@@ -119,7 +120,16 @@
 
   // Sub-entity form states
   let newVariantName = $state('');
+  let newVariantSku = $state('');
+  let newVariantSpecPairs = $state([{ key: '', value: '' }]);
   let isAddingVariant = $state(false);
+
+  // Edit variant states
+  let editingVariantId = $state(null);
+  let editVariantName = $state('');
+  let editVariantSku = $state('');
+  let editVariantSpecPairs = $state([]);
+  let isUpdatingVariant = $state(false);
 
   let newUnitVariantId = $state('');
   let newUnitName = $state('');
@@ -446,21 +456,99 @@
     }
   }
 
+  function addSpecPair() {
+    newVariantSpecPairs = [...newVariantSpecPairs, { key: '', value: '' }];
+  }
+
+  function removeSpecPair(index) {
+    newVariantSpecPairs = newVariantSpecPairs.filter((_, i) => i !== index);
+  }
+
+  function addEditSpecPair() {
+    editVariantSpecPairs = [...editVariantSpecPairs, { key: '', value: '' }];
+  }
+
+  function removeEditSpecPair(index) {
+    editVariantSpecPairs = editVariantSpecPairs.filter((_, i) => i !== index);
+  }
+
+  function startEditVariant(variant) {
+    editingVariantId = variant.id;
+    editVariantName = variant.name || '';
+    editVariantSku = variant.sku || '';
+    const specs = variant.spec_attributes || {};
+    const pairs = Object.entries(specs).map(([key, value]) => ({ key, value: String(value) }));
+    editVariantSpecPairs = pairs.length > 0 ? pairs : [{ key: '', value: '' }];
+    productDetailError = '';
+  }
+
+  function cancelEditVariant() {
+    editingVariantId = null;
+    editVariantName = '';
+    editVariantSku = '';
+    editVariantSpecPairs = [];
+    productDetailError = '';
+  }
+
   async function handleAddVariant(productId) {
-    if (!newVariantName.trim()) {
-      productDetailError = '請輸入規格名稱';
+    const specAttrs = {};
+    for (const pair of newVariantSpecPairs) {
+      const k = (pair.key || '').trim();
+      const v = (pair.value || '').trim();
+      if (k && v) {
+        specAttrs[k] = v;
+      }
+    }
+    const nameToSubmit = newVariantName.trim();
+    if (!nameToSubmit && Object.keys(specAttrs).length === 0) {
+      productDetailError = '請輸入規格名稱或設定規格軸屬性';
       return;
     }
     isAddingVariant = true;
     productDetailError = '';
     try {
-      await addProductVariantAction(productId, newVariantName.trim());
+      await addProductVariantAction(productId, nameToSubmit, newVariantSku.trim() || undefined, specAttrs);
       newVariantName = '';
+      newVariantSku = '';
+      newVariantSpecPairs = [{ key: '', value: '' }];
       expandedProductDetail = await getProductDetailAction(productId);
     } catch (err) {
       productDetailError = err?.message || '新增規格失敗';
     } finally {
       isAddingVariant = false;
+    }
+  }
+
+  async function handleUpdateVariant(productId) {
+    if (!editingVariantId) return;
+    const specAttrs = {};
+    for (const pair of editVariantSpecPairs) {
+      const k = (pair.key || '').trim();
+      const v = (pair.value || '').trim();
+      if (k && v) {
+        specAttrs[k] = v;
+      }
+    }
+    const nameToSubmit = editVariantName.trim();
+    if (!nameToSubmit && Object.keys(specAttrs).length === 0) {
+      productDetailError = '變體名稱不能為空';
+      return;
+    }
+    isUpdatingVariant = true;
+    productDetailError = '';
+    try {
+      await updateProductVariantAction(editingVariantId, {
+        name: nameToSubmit || undefined,
+        sku: editVariantSku.trim() || null,
+        spec_attributes: specAttrs,
+        productId
+      });
+      cancelEditVariant();
+      expandedProductDetail = await getProductDetailAction(productId);
+    } catch (err) {
+      productDetailError = err?.message || '更新規格變體失敗';
+    } finally {
+      isUpdatingVariant = false;
     }
   }
 
@@ -1908,30 +1996,195 @@
                               <div style="display: flex; flex-direction: column; gap: 8px;">
                                 <div style="display: flex; flex-direction: column; gap: 6px;">
                                   {#each (expandedProductDetail.variants || []) as v (v.id)}
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
-                                      <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-weight: 600;">{v.name}</span>
-                                        {#if v.is_default}
-                                          <span class="badge badge-cyan" style="font-size: 0.65rem;">預設變體</span>
-                                        {/if}
-                                        <span style="color: var(--text-muted); font-size: 0.72rem; font-family: monospace;">SKU: {v.sku}</span>
+                                    <div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 6px; font-size: 0.8rem;">
+                                      <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                          <span style="font-weight: 600;">{v.name}</span>
+                                          {#if v.is_default}
+                                            <span class="badge badge-cyan" style="font-size: 0.65rem;">預設規格</span>
+                                          {/if}
+                                          {#if v.sku}
+                                            <span style="color: var(--text-muted); font-size: 0.72rem; font-family: monospace;">SKU: {v.sku}</span>
+                                          {/if}
+                                          {#if v.spec_attributes && typeof v.spec_attributes === 'object' && Object.keys(v.spec_attributes).length > 0}
+                                            {#each Object.entries(v.spec_attributes) as [attrKey, attrVal]}
+                                              <span class="badge" style="font-size: 0.65rem; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3);">
+                                                {attrKey}: {attrVal}
+                                              </span>
+                                            {/each}
+                                          {:else}
+                                            <span style="color: var(--text-muted); font-size: 0.7rem;">無規格差異</span>
+                                          {/if}
+                                        </div>
+                                        <div style="display: flex; align-items: center; gap: 6px;">
+                                          <span style="color: var(--text-muted); font-size: 0.7rem; font-family: monospace;">{v.id}</span>
+                                          <button
+                                            type="button"
+                                            class="btn btn-outline btn-xs"
+                                            style="padding: 2px 8px; font-size: 0.72rem;"
+                                            onclick={() => {
+                                              if (editingVariantId === v.id) {
+                                                cancelEditVariant();
+                                              } else {
+                                                startEditVariant(v);
+                                              }
+                                            }}
+                                          >
+                                            {editingVariantId === v.id ? '取消' : '✏️ 編輯'}
+                                          </button>
+                                        </div>
                                       </div>
-                                      <span style="color: var(--text-muted); font-size: 0.72rem; font-family: monospace;">{v.id}</span>
+
+                                      <!-- Inline Edit Form -->
+                                      {#if editingVariantId === v.id}
+                                        <div style="margin-top: 6px; padding: 10px; background: rgba(0, 0, 0, 0.2); border-radius: 6px; border: 1px dashed var(--border-color); display: flex; flex-direction: column; gap: 8px;">
+                                          <div style="font-size: 0.75rem; font-weight: 600; color: var(--text-secondary);">
+                                            編輯規格變體「{v.name}」
+                                          </div>
+                                          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                            <input
+                                              type="text"
+                                              class="form-input"
+                                              placeholder="規格名稱"
+                                              bind:value={editVariantName}
+                                              style="flex: 1; min-width: 130px; padding: 4px 8px; font-size: 0.78rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                            />
+                                            <input
+                                              type="text"
+                                              class="form-input"
+                                              placeholder="SKU 代碼 (例：CLOTH-RED-M)"
+                                              bind:value={editVariantSku}
+                                              style="flex: 1; min-width: 140px; padding: 4px 8px; font-size: 0.78rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                            />
+                                          </div>
+
+                                          <!-- Spec Attributes Axis Pairs for Edit -->
+                                          <div style="display: flex; flex-direction: column; gap: 4px;">
+                                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                              <span style="font-size: 0.72rem; color: var(--text-muted);">規格軸屬性鍵值 (如 顏色: 紅、尺寸: M)：</span>
+                                              <button type="button" class="btn btn-outline btn-xs" style="font-size: 0.68rem; padding: 1px 6px;" onclick={addEditSpecPair}>
+                                                + 增加屬性
+                                              </button>
+                                            </div>
+                                            {#each editVariantSpecPairs as pair, pIdx}
+                                              <div style="display: flex; gap: 6px; align-items: center;">
+                                                <input
+                                                  type="text"
+                                                  class="form-input"
+                                                  placeholder="軸向 (例: 顏色)"
+                                                  bind:value={pair.key}
+                                                  style="flex: 1; padding: 3px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                                />
+                                                <input
+                                                  type="text"
+                                                  class="form-input"
+                                                  placeholder="數值 (例: 紅色)"
+                                                  bind:value={pair.value}
+                                                  style="flex: 1; padding: 3px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                                />
+                                                <button
+                                                  type="button"
+                                                  class="btn btn-outline btn-xs"
+                                                  style="padding: 2px 6px; color: var(--status-error); border-color: rgba(239,68,68,0.3);"
+                                                  onclick={() => removeEditSpecPair(pIdx)}
+                                                >
+                                                  ✕
+                                                </button>
+                                              </div>
+                                            {/each}
+                                          </div>
+
+                                          <div style="display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px;">
+                                            <button type="button" class="btn btn-outline btn-xs" onclick={cancelEditVariant}>
+                                              取消
+                                            </button>
+                                            <button
+                                              type="button"
+                                              class="btn btn-primary btn-xs"
+                                              disabled={isUpdatingVariant}
+                                              onclick={() => handleUpdateVariant(product.id)}
+                                            >
+                                              {isUpdatingVariant ? '儲存中...' : '儲存規格變更'}
+                                            </button>
+                                          </div>
+                                        </div>
+                                      {/if}
                                     </div>
                                   {/each}
                                 </div>
-                                <form onsubmit={(e) => { e.preventDefault(); handleAddVariant(product.id); }} style="display: flex; gap: 8px; margin-top: 6px;">
-                                  <input
-                                    type="text"
-                                    class="form-input"
-                                    placeholder="新增規格名稱（例：紅色、XL、256GB）"
-                                    bind:value={newVariantName}
-                                    style="flex: 1; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
-                                  />
-                                  <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingVariant} style="white-space: nowrap; padding: 0 12px;">
-                                    + 新增規格
-                                  </button>
-                                </form>
+
+                                <!-- Add Variant Form -->
+                                <div style="margin-top: 8px; padding: 10px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 6px; display: flex; flex-direction: column; gap: 8px;">
+                                  <div style="font-size: 0.75rem; font-weight: 600; color: var(--text-secondary);">
+                                    + 新增規格變體
+                                  </div>
+                                  <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                    <input
+                                      type="text"
+                                      class="form-input"
+                                      placeholder="變體名稱（例：紅色 / M，可留空自動依規格軸組合）"
+                                      bind:value={newVariantName}
+                                      style="flex: 2; min-width: 160px; padding: 5px 8px; font-size: 0.78rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                    />
+                                    <input
+                                      type="text"
+                                      class="form-input"
+                                      placeholder="SKU 代碼 (選填)"
+                                      bind:value={newVariantSku}
+                                      style="flex: 1; min-width: 120px; padding: 5px 8px; font-size: 0.78rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                    />
+                                  </div>
+
+                                  <!-- Spec Attributes Dynamic Key-Value Pairs -->
+                                  <div style="display: flex; flex-direction: column; gap: 4px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                      <span style="font-size: 0.72rem; color: var(--text-muted);">規格軸（例如 顏色: 紅、尺寸: M）：</span>
+                                      <button type="button" class="btn btn-outline btn-xs" style="font-size: 0.68rem; padding: 1px 6px;" onclick={addSpecPair}>
+                                        + 增加規格軸
+                                      </button>
+                                    </div>
+                                    {#each newVariantSpecPairs as pair, pIdx}
+                                      <div style="display: flex; gap: 6px; align-items: center;">
+                                        <input
+                                          type="text"
+                                          class="form-input"
+                                          placeholder="軸向 (例: 顏色)"
+                                          bind:value={pair.key}
+                                          style="flex: 1; padding: 3px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                        />
+                                        <input
+                                          type="text"
+                                          class="form-input"
+                                          placeholder="屬性值 (例: 紅色)"
+                                          bind:value={pair.value}
+                                          style="flex: 1; padding: 3px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                        />
+                                        {#if newVariantSpecPairs.length > 1}
+                                          <button
+                                            type="button"
+                                            class="btn btn-outline btn-xs"
+                                            style="padding: 2px 6px; color: var(--status-error); border-color: rgba(239,68,68,0.3);"
+                                            onclick={() => removeSpecPair(pIdx)}
+                                          >
+                                            ✕
+                                          </button>
+                                        {/if}
+                                      </div>
+                                    {/each}
+                                  </div>
+
+                                  <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
+                                    <button
+                                      type="button"
+                                      class="btn btn-primary btn-xs"
+                                      disabled={isAddingVariant}
+                                      onclick={() => handleAddVariant(product.id)}
+                                      style="padding: 4px 14px; font-size: 0.75rem;"
+                                    >
+                                      {isAddingVariant ? '新增中...' : '+ 新增規格變體'}
+                                    </button>
+                                  </div>
+                                </div>
                               </div>
 
                             <!-- Tab: Units -->

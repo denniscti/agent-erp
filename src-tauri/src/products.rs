@@ -29,6 +29,7 @@ pub struct ProductVariant {
     pub product_id: String,
     pub sku: Option<String>,
     pub name: String,
+    pub spec_attributes: serde_json::Value,
     pub is_default: bool,
     pub created_at: i64,
 }
@@ -104,11 +105,17 @@ pub fn create_products_tables(conn: &rusqlite::Connection) -> Result<(), rusqlit
             product_id TEXT NOT NULL,
             sku TEXT,
             name TEXT NOT NULL,
+            spec_attributes TEXT NOT NULL DEFAULT '{}',
             is_default INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL
         )",
         [],
     )?;
+
+    let _ = conn.execute(
+        "ALTER TABLE product_variants ADD COLUMN spec_attributes TEXT NOT NULL DEFAULT '{}'",
+        [],
+    );
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_variants_product ON product_variants (product_id)",
@@ -278,9 +285,9 @@ pub fn create_product_impl(
     let trimmed_sku = sku.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
     conn.execute(
-        "INSERT INTO product_variants (id, product_id, sku, name, is_default, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![var_id, prod_id, trimmed_sku, "標準", 1, now],
+        "INSERT INTO product_variants (id, product_id, sku, name, spec_attributes, is_default, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![var_id, prod_id, trimmed_sku, "標準", "{}", 1, now],
     )
     .map_err(|e| format!("Failed to insert default product variant: {}", e))?;
 
@@ -289,6 +296,7 @@ pub fn create_product_impl(
         product_id: prod_id.clone(),
         sku: trimmed_sku,
         name: "標準".to_string(),
+        spec_attributes: serde_json::json!({}),
         is_default: true,
         created_at: now,
     };
@@ -441,19 +449,23 @@ pub fn get_product_detail_impl(
 
     // Load variants
     let mut var_stmt = conn
-        .prepare("SELECT id, product_id, sku, name, is_default, created_at FROM product_variants WHERE product_id = ?1 ORDER BY is_default DESC, created_at ASC")
+        .prepare("SELECT id, product_id, sku, name, spec_attributes, is_default, created_at FROM product_variants WHERE product_id = ?1 ORDER BY is_default DESC, created_at ASC")
         .map_err(|e| format!("Failed to prepare query variants: {}", e))?;
 
     let var_rows = var_stmt
         .query_map(params![trimmed_prod_id], |row| {
-            let is_default_int: i64 = row.get(4)?;
+            let is_default_int: i64 = row.get(5)?;
+            let raw_spec: String = row.get(4).unwrap_or_else(|_| "{}".to_string());
+            let spec_val = serde_json::from_str::<serde_json::Value>(&raw_spec)
+                .unwrap_or(serde_json::json!({}));
             Ok(ProductVariant {
                 id: row.get(0)?,
                 product_id: row.get(1)?,
                 sku: row.get(2)?,
                 name: row.get(3)?,
+                spec_attributes: spec_val,
                 is_default: is_default_int == 1,
-                created_at: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })
         .map_err(|e| format!("Failed to query variants: {}", e))?;
@@ -566,6 +578,7 @@ pub fn add_product_variant_impl(
     product_id: &str,
     name: String,
     sku: Option<String>,
+    spec_attributes: Option<serde_json::Value>,
 ) -> Result<ProductVariant, String> {
     let trimmed_tenant_id = tenant_id.trim();
     let trimmed_prod_id = product_id.trim();
@@ -577,9 +590,35 @@ pub fn add_product_variant_impl(
     if trimmed_prod_id.is_empty() {
         return Err("Product not found".to_string());
     }
-    if trimmed_name.is_empty() {
-        return Err("變體名稱不能為空".to_string());
-    }
+
+    let clean_spec_attributes = match spec_attributes {
+        Some(val) => {
+            if !val.is_object() {
+                return Err("規格屬性必須為 JSON 物件格式".to_string());
+            }
+            val
+        }
+        None => serde_json::json!({}),
+    };
+
+    let effective_name = if trimmed_name.is_empty() {
+        if let Some(obj) = clean_spec_attributes.as_object() {
+            let derived: Vec<&str> = obj
+                .values()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            if !derived.is_empty() {
+                derived.join(" / ")
+            } else {
+                return Err("變體名稱不能為空".to_string());
+            }
+        } else {
+            return Err("變體名稱不能為空".to_string());
+        }
+    } else {
+        trimmed_name.to_string()
+    };
 
     // Verify product exists in active tenant
     let mut check_prod = conn
@@ -597,20 +636,22 @@ pub fn add_product_variant_impl(
         .prepare("SELECT 1 FROM product_variants WHERE product_id = ?1 AND LOWER(TRIM(name)) = LOWER(?2) LIMIT 1")
         .map_err(|e| format!("Failed to prepare variant duplicate check: {}", e))?;
     let has_dup = check_var
-        .query_row(params![trimmed_prod_id, trimmed_name], |_| Ok(()))
+        .query_row(params![trimmed_prod_id, effective_name], |_| Ok(()))
         .is_ok();
     if has_dup {
-        return Err(format!("變體「{}」已存在", trimmed_name));
+        return Err(format!("變體「{}」已存在", effective_name));
     }
 
     let now = current_timestamp();
     let var_id = format!("var_{}_{}", now, ID_COUNTER.fetch_add(1, Ordering::Relaxed));
     let trimmed_sku = sku.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let spec_str =
+        serde_json::to_string(&clean_spec_attributes).unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
-        "INSERT INTO product_variants (id, product_id, sku, name, is_default, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![var_id, trimmed_prod_id, trimmed_sku, trimmed_name, 0, now],
+        "INSERT INTO product_variants (id, product_id, sku, name, spec_attributes, is_default, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![var_id, trimmed_prod_id, trimmed_sku, effective_name, spec_str, 0, now],
     )
     .map_err(|e| format!("Failed to insert variant: {}", e))?;
 
@@ -618,9 +659,132 @@ pub fn add_product_variant_impl(
         id: var_id,
         product_id: trimmed_prod_id.to_string(),
         sku: trimmed_sku,
-        name: trimmed_name.to_string(),
+        name: effective_name,
+        spec_attributes: clean_spec_attributes,
         is_default: false,
         created_at: now,
+    })
+}
+
+// Usecase: update_product_variant
+pub fn update_product_variant_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    variant_id: &str,
+    name: Option<String>,
+    sku: Option<String>,
+    spec_attributes: Option<serde_json::Value>,
+) -> Result<ProductVariant, String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    let trimmed_var_id = variant_id.trim();
+
+    if trimmed_tenant_id.is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+    if trimmed_var_id.is_empty() {
+        return Err("Variant not found".to_string());
+    }
+
+    // Verify variant exists and belongs to active tenant
+    let mut check_var = conn
+        .prepare(
+            "SELECT v.id, v.product_id, v.sku, v.name, v.spec_attributes, v.is_default, v.created_at
+             FROM product_variants v
+             JOIN products p ON v.product_id = p.id
+             WHERE v.id = ?1 AND p.tenant_id = ?2
+             LIMIT 1",
+        )
+        .map_err(|e| format!("Failed to prepare variant lookup: {}", e))?;
+
+    let existing = check_var
+        .query_row(params![trimmed_var_id, trimmed_tenant_id], |row| {
+            let is_default_int: i64 = row.get(5)?;
+            let raw_spec: String = row.get(4).unwrap_or_else(|_| "{}".to_string());
+            let spec_val = serde_json::from_str::<serde_json::Value>(&raw_spec)
+                .unwrap_or(serde_json::json!({}));
+            Ok(ProductVariant {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                sku: row.get(2)?,
+                name: row.get(3)?,
+                spec_attributes: spec_val,
+                is_default: is_default_int == 1,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|_| "Variant not found".to_string())?;
+
+    // Determine target name
+    let new_name = match name {
+        Some(n) => {
+            let tr = n.trim().to_string();
+            if tr.is_empty() {
+                return Err("變體名稱不能為空".to_string());
+            }
+            tr
+        }
+        None => existing.name,
+    };
+
+    // Check duplicate name within this product excluding self
+    let mut dup_stmt = conn
+        .prepare(
+            "SELECT 1 FROM product_variants
+             WHERE product_id = ?1 AND id != ?2 AND LOWER(TRIM(name)) = LOWER(?3)
+             LIMIT 1",
+        )
+        .map_err(|e| format!("Failed to prepare variant name duplicate check: {}", e))?;
+    let has_dup = dup_stmt
+        .query_row(params![existing.product_id, existing.id, new_name], |_| {
+            Ok(())
+        })
+        .is_ok();
+    if has_dup {
+        return Err(format!("變體名稱「{}」已存在", new_name));
+    }
+
+    // Determine target SKU
+    let new_sku = match sku {
+        Some(s) => {
+            let tr = s.trim().to_string();
+            if tr.is_empty() {
+                None
+            } else {
+                Some(tr)
+            }
+        }
+        None => existing.sku,
+    };
+
+    // Determine target spec_attributes
+    let new_spec_attributes = match spec_attributes {
+        Some(val) => {
+            if !val.is_object() {
+                return Err("規格屬性必須為 JSON 物件格式".to_string());
+            }
+            val
+        }
+        None => existing.spec_attributes,
+    };
+
+    let spec_str = serde_json::to_string(&new_spec_attributes).unwrap_or_else(|_| "{}".to_string());
+
+    conn.execute(
+        "UPDATE product_variants
+         SET name = ?1, sku = ?2, spec_attributes = ?3
+         WHERE id = ?4",
+        params![new_name, new_sku, spec_str, existing.id],
+    )
+    .map_err(|e| format!("Failed to update product variant: {}", e))?;
+
+    Ok(ProductVariant {
+        id: existing.id,
+        product_id: existing.product_id,
+        sku: new_sku,
+        name: new_name,
+        spec_attributes: new_spec_attributes,
+        is_default: existing.is_default,
+        created_at: existing.created_at,
     })
 }
 
@@ -951,12 +1115,29 @@ pub async fn add_product_variant<R: tauri::Runtime>(
     product_id: String,
     name: String,
     sku: Option<String>,
+    spec_attributes: Option<serde_json::Value>,
 ) -> Result<ProductVariant, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    add_product_variant_impl(&conn, &active_tid, &product_id, name, sku)
+    add_product_variant_impl(&conn, &active_tid, &product_id, name, sku, spec_attributes)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_product_variant<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    variant_id: String,
+    name: Option<String>,
+    sku: Option<String>,
+    spec_attributes: Option<serde_json::Value>,
+) -> Result<ProductVariant, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn =
+        rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    update_product_variant_impl(&conn, &active_tid, &variant_id, name, sku, spec_attributes)
 }
 
 #[tauri::command]
@@ -1200,11 +1381,14 @@ pub mod tests {
             &p.product.id,
             "512GB 灰色".into(),
             Some("CHIP-512G-GRY".into()),
+            Some(serde_json::json!({"規格": "512GB", "顏色": "灰色"})),
         )
         .unwrap();
 
         // Then: Variant is added successfully
         assert_eq!(v.name, "512GB 灰色");
+        assert_eq!(v.spec_attributes["規格"], "512GB");
+        assert_eq!(v.spec_attributes["顏色"], "灰色");
         assert!(!v.is_default);
 
         let detail = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
@@ -1866,6 +2050,7 @@ pub mod tests {
             &p_a.product.id,
             "惡意變體".into(),
             None,
+            None,
         );
 
         // Then: Operation rejected with not found
@@ -2092,5 +2277,233 @@ pub mod tests {
         assert_eq!(bom1.parent_variant_id, parent.variants[0].id);
         assert_eq!(bom1.child_variant_id, child.variants[0].id);
         assert_eq!(bom2.child_variant_id, child.variants[0].id);
+    }
+
+    #[test]
+    fn test_tc_prod_pos_05b_update_variant_success() {
+        // Given: An existing product with a default variant and an added variant
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "多規格服飾".into(),
+            "resale".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let v = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "紅色 / M".into(),
+            Some("CLOTH-RED-M".into()),
+            Some(serde_json::json!({"顏色": "紅色", "尺寸": "M"})),
+        )
+        .unwrap();
+
+        // When: Updating variant name, sku, and spec_attributes
+        let updated = update_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &v.id,
+            Some("紅色 / M 極致版".into()),
+            Some("CLOTH-RED-M-V2".into()),
+            Some(serde_json::json!({"顏色": "紅色", "尺寸": "M", "材質": "純棉"})),
+        )
+        .unwrap();
+
+        // Then: Variant is updated correctly
+        assert_eq!(updated.id, v.id);
+        assert_eq!(updated.name, "紅色 / M 極致版");
+        assert_eq!(updated.sku, Some("CLOTH-RED-M-V2".into()));
+        assert_eq!(updated.spec_attributes["材質"], "純棉");
+        assert_eq!(updated.spec_attributes["顏色"], "紅色");
+    }
+
+    #[test]
+    fn test_tc_prod_pos_05c_add_variant_auto_derived_name() {
+        // Given: Product exists
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "運動鞋".into(),
+            "resale".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Adding variant with empty name but valid spec_attributes
+        let v = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "".into(),
+            Some("SHOE-BLK-42".into()),
+            Some(serde_json::json!({"顏色": "黑色", "尺碼": "42"})),
+        )
+        .unwrap();
+
+        // Then: Name is auto-derived from attributes
+        assert!(!v.name.is_empty());
+        assert!(v.name.contains("黑色"));
+        assert!(v.name.contains("42"));
+    }
+
+    #[test]
+    fn test_tc_prod_neg_11_variant_invalid_spec_attributes_format() {
+        // Given: Product exists
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "格式測試商品".into(),
+            "resale".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Passing array as spec_attributes
+        let err = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "測試變體".into(),
+            None,
+            Some(serde_json::json!(["無效陣列"])),
+        );
+
+        // Then: Validation error is returned
+        assert_eq!(err.unwrap_err(), "規格屬性必須為 JSON 物件格式");
+    }
+
+    #[test]
+    fn test_tc_prod_neg_12_update_variant_duplicate_name() {
+        // Given: Product with two variants
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "手機".into(),
+            "resale".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let _v1 = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "黑色 128G".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        let v2 = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "白色 128G".into(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Trying to rename v2 to v1's name (case-insensitive and trimmed)
+        let err = update_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &v2.id,
+            Some("  黑色 128G  ".into()),
+            None,
+            None,
+        );
+
+        // Then: Duplicate name error
+        assert_eq!(err.unwrap_err(), "變體名稱「黑色 128G」已存在");
+    }
+
+    #[test]
+    fn test_tc_prod_neg_13_update_variant_empty_name() {
+        // Given: Product with a variant
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "耳機".into(),
+            "resale".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let v = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "無線版".into(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Updating name to whitespace
+        let err = update_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &v.id,
+            Some("   ".into()),
+            None,
+            None,
+        );
+
+        // Then: Empty name error
+        assert_eq!(err.unwrap_err(), "變體名稱不能為空");
+    }
+
+    #[test]
+    fn test_tc_prod_iso_03b_cross_tenant_variant_update_blocked() {
+        // Given: Variant belongs to Tenant A
+        let conn = setup_test_db();
+        let p_a = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "A-專屬-2".into(),
+            "resale".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let v_a = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p_a.product.id,
+            "A規格".into(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Tenant B tries to update Tenant A's variant
+        let err = update_product_variant_impl(
+            &conn,
+            TEST_TENANT_B,
+            &v_a.id,
+            Some("竄改規格".into()),
+            None,
+            None,
+        );
+
+        // Then: Operation rejected with not found
+        assert_eq!(err.unwrap_err(), "Variant not found");
     }
 }

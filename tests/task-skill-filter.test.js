@@ -88,6 +88,17 @@ function createMockOnboardingTasks(parentTaskId = 'task-parent-001') {
       status: 'pending',
       skillId: 'vendor.create_basic_profile',
       skill_id: 'vendor.create_basic_profile'
+    },
+    {
+      id: 'subtask-prod-004',
+      title: '建立第一個商品',
+      module_id: 'sales',
+      assignee: '主管',
+      parent_task_id: parentTaskId,
+      status: 'pending',
+      skillId: 'product.create_basic_profile',
+      skill_id: 'product.create_basic_profile',
+      skills: ['product.create_basic_profile', 'product.manage']
     }
   ];
 }
@@ -100,12 +111,13 @@ test('TC-FLT-N-01: Equivalence - Department granted only customer.create_basic_p
   // When:  Operation to execute - Filter tasks by user effective skills
   const filtered = filterTasksBySkills(tasks, userEffectiveSkills);
 
-  // Then:  Expected result - Parent task and customer subtask are kept; department and vendor subtasks are excluded
+  // Then:  Expected result - Parent task and customer subtask are kept; department, vendor and product subtasks are excluded
   const titles = filtered.map(t => t.title);
   assert.ok(titles.includes('新租戶起步'), 'Parent task without skillId must be preserved');
   assert.ok(titles.includes('建立第一個客戶'), 'Customer subtask with granted skillId must be preserved');
   assert.equal(titles.includes('設定部門'), false, 'Department subtask must be filtered out when skill not granted');
   assert.equal(titles.includes('建立第一個供應商'), false, 'Vendor subtask must be filtered out when skill not granted');
+  assert.equal(titles.includes('建立第一個商品'), false, 'Product subtask must be filtered out when skill not granted');
   assert.equal(filtered.length, 2, 'Total visible tasks should be 2 (parent + customer)');
 });
 
@@ -117,12 +129,13 @@ test('TC-FLT-N-02: Equivalence - User with customer and vendor skills retains bo
   // When:  Operation to execute - Filter tasks
   const filtered = filterTasksBySkills(tasks, userEffectiveSkills);
 
-  // Then:  Expected result - Customer and vendor subtasks visible; department subtask filtered out
+  // Then:  Expected result - Customer and vendor subtasks visible; department and product subtasks filtered out
   const titles = filtered.map(t => t.title);
   assert.ok(titles.includes('新租戶起步'));
   assert.ok(titles.includes('建立第一個客戶'));
   assert.ok(titles.includes('建立第一個供應商'));
   assert.equal(titles.includes('設定部門'), false);
+  assert.equal(titles.includes('建立第一個商品'), false);
   assert.equal(filtered.length, 3);
 });
 
@@ -143,27 +156,28 @@ test('TC-FLT-N-03: Equivalence - Cross-department union of skills preserves resp
   // When:  Operation to execute - Filter tasks with cross-department union
   const filtered = filterTasksBySkills(tasks, effectiveSkills);
 
-  // Then:  Expected result - Parent task, department subtask and customer subtask visible; vendor subtask filtered
+  // Then:  Expected result - Parent task, department subtask and customer subtask visible; vendor and product subtasks filtered
   const titles = filtered.map(t => t.title);
   assert.ok(titles.includes('新租戶起步'));
   assert.ok(titles.includes('設定部門'));
   assert.ok(titles.includes('建立第一個客戶'));
   assert.equal(titles.includes('建立第一個供應商'), false);
+  assert.equal(titles.includes('建立第一個商品'), false);
   assert.equal(filtered.length, 3);
 });
 
 test('TC-FLT-N-04: Equivalence - Full skill authorization preserves all onboarding subtasks', () => {
-  // Given: Preconditions - User granted all 3 system skills
+  // Given: Preconditions - User granted all 4 system skills
   const tasks = createMockOnboardingTasks();
-  const allSkills = ['department.manage', 'customer.create_basic_profile', 'vendor.create_basic_profile'];
+  const allSkills = ['department.manage', 'customer.create_basic_profile', 'vendor.create_basic_profile', 'product.create_basic_profile'];
 
   // When:  Operation to execute - Filter tasks
   const filtered = filterTasksBySkills(tasks, allSkills);
 
-  // Then:  Expected result - All 4 tasks (parent + 3 subtasks) are retained
-  assert.equal(filtered.length, 4);
+  // Then:  Expected result - All 5 tasks (parent + 4 subtasks) are retained
+  assert.equal(filtered.length, 5);
   const subtasks = filtered.filter(t => t.parent_task_id !== null);
-  assert.equal(subtasks.length, 3);
+  assert.equal(subtasks.length, 4);
 });
 
 test('TC-FLT-N-05: Equivalence - General tasks without skillId are always preserved', () => {
@@ -471,5 +485,96 @@ test('TC-PANEL-INT-03: Boundary / Integration - Parent task preserved while all 
   assert.equal(visibleTasksEmpty.length, 1);
   assert.equal(parentTasksEmpty.length, 1);
   assert.deepEqual(childrenEmpty, []);
+});
+
+test('TC-FLT-N-07: Equivalence - Department granted only product.create_basic_profile filters to product subtask only', () => {
+  // Given: Preconditions - User granted only product.create_basic_profile
+  const tasks = createMockOnboardingTasks();
+  const userEffectiveSkills = ['product.create_basic_profile'];
+
+  // When:  Operation to execute - Filter tasks
+  const filtered = filterTasksBySkills(tasks, userEffectiveSkills);
+
+  // Then:  Expected result - Parent task and product subtask preserved; department, customer, vendor filtered out
+  const titles = filtered.map(t => t.title);
+  assert.ok(titles.includes('新租戶起步'));
+  assert.ok(titles.includes('建立第一個商品'), 'Product subtask must be visible when product.create_basic_profile is granted');
+  assert.equal(titles.includes('設定部門'), false);
+  assert.equal(titles.includes('建立第一個客戶'), false);
+  assert.equal(titles.includes('建立第一個供應商'), false);
+  assert.equal(filtered.length, 2);
+});
+
+test('TC-FLT-N-08: Equivalence - Department granted product.manage preserves product subtask via multi-skill / task.skills support', () => {
+  // Given: Preconditions - User granted only product.manage
+  const tasks = createMockOnboardingTasks();
+  const userEffectiveSkills = ['product.manage'];
+
+  // When:  Operation to execute - Filter tasks
+  const filtered = filterTasksBySkills(tasks, userEffectiveSkills);
+
+  // Then:  Expected result - Product subtask is visible when product.manage is granted
+  const titles = filtered.map(t => t.title);
+  assert.ok(titles.includes('新租戶起步'));
+  assert.ok(titles.includes('建立第一個商品'), 'Product subtask must be visible when product.manage is granted');
+  assert.equal(titles.includes('設定部門'), false);
+  assert.equal(titles.includes('建立第一個客戶'), false);
+  assert.equal(titles.includes('建立第一個供應商'), false);
+  assert.equal(filtered.length, 2);
+});
+
+test('TC-FLT-N-09: Equivalence - Department granted customer and product skills preserves both customer and product subtasks', () => {
+  // Given: Preconditions - User granted customer and product skills
+  const tasks = createMockOnboardingTasks();
+  const userEffectiveSkills = ['customer.create_basic_profile', 'product.create_basic_profile'];
+
+  // When:  Operation to execute - Filter tasks
+  const filtered = filterTasksBySkills(tasks, userEffectiveSkills);
+
+  // Then:  Expected result - Customer and product subtasks are visible
+  const titles = filtered.map(t => t.title);
+  assert.ok(titles.includes('新租戶起步'));
+  assert.ok(titles.includes('建立第一個客戶'));
+  assert.ok(titles.includes('建立第一個商品'));
+  assert.equal(titles.includes('設定部門'), false);
+  assert.equal(titles.includes('建立第一個供應商'), false);
+  assert.equal(filtered.length, 3);
+});
+
+test('TC-FLT-E-01: Error / Boundary - Corrupted task.skills array elements handled safely without crashing', () => {
+  // Given: Preconditions - Tasks with corrupted skills array elements (null, undefined, numbers, objects)
+  const corruptedTasks = [
+    { id: 'corrupt-1', title: '異常商品任務 1', skills: [null, undefined, 'product.create_basic_profile'] },
+    { id: 'corrupt-2', title: '異常商品任務 2', skills: [123, { bad: 'obj' }, 'vendor.create_basic_profile'] },
+    { id: 'corrupt-3', title: '異常任務 3', skills: 'not-an-array-string' }
+  ];
+
+  // When:  Operation to execute - Filter tasks
+  const filtered = filterTasksBySkills(corruptedTasks, ['product.create_basic_profile']);
+
+  // Then:  Expected result - Corrupted entries safely sanitized and matched without throwing exception
+  assert.ok(Array.isArray(filtered));
+  assert.equal(filtered.some(t => t.id === 'corrupt-1'), true);
+  assert.equal(filtered.some(t => t.id === 'corrupt-2'), false);
+});
+
+test('TC-FLT-SEC-01: Security - Task requiring ungranted product domain skill (e.g. product.view_cost) is NOT visible even when user has product.manage', () => {
+  // Given: Preconditions - User has only product.manage, and task specifically requires sensitive product.view_cost
+  const sensitiveTask = [
+    { id: 'task-sec-1', title: '檢視商品進貨成本', skillId: 'product.view_cost' },
+    { id: 'task-sec-2', title: '刪除商品資料', skills: ['product.delete'] },
+    { id: 'task-sec-3', title: '一般商品維護', skills: ['product.manage'] }
+  ];
+  const userEffectiveSkills = ['product.manage'];
+
+  // When:  Operation to execute - Filter tasks
+  const filtered = filterTasksBySkills(sensitiveTask, userEffectiveSkills);
+
+  // Then:  Expected result - Only task explicitly granting product.manage is visible; ungranted product.* tasks are filtered out
+  const ids = filtered.map(t => t.id);
+  assert.equal(ids.includes('task-sec-1'), false, 'product.view_cost must not be visible via product.manage');
+  assert.equal(ids.includes('task-sec-2'), false, 'product.delete must not be visible via product.manage');
+  assert.equal(ids.includes('task-sec-3'), true, 'product.manage task must be visible');
+  assert.equal(filtered.length, 1);
 });
 

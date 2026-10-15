@@ -42,6 +42,14 @@ function saveStorage(key, val) {
   }
 }
 
+let mockUidCounter = 0;
+function nextMockUid(prefix) {
+  mockUidCounter++;
+  const ms = Date.now();
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `${prefix}_${ms}_${mockUidCounter}_${rand}`;
+}
+
 // Local mock database for user authentication
 const defaultMockUsers = [
   { id: "usr_mock_admin", email: "admin@example.com", password: "password123", name: "Admin User" },
@@ -118,6 +126,21 @@ const defaultMockTasks = [
     assignee: "主管",
     skill_id: "vendor.create_basic_profile",
     skillId: "vendor.create_basic_profile",
+    skills: ["vendor.create_basic_profile", "vendor.manage"],
+    created_at: Math.floor(Date.now() / 1000) - 3600,
+    completed_at: null
+  },
+  {
+    id: "task_sub_4",
+    tenant_id: "tnt_mock_1",
+    title: "建立第一個商品",
+    status: "pending",
+    parent_task_id: "task_parent_1",
+    module_id: "sales",
+    assignee: "主管",
+    skill_id: "product.create_basic_profile",
+    skillId: "product.create_basic_profile",
+    skills: ["product.create_basic_profile", "product.manage"],
     created_at: Math.floor(Date.now() / 1000) - 3600,
     completed_at: null
   }
@@ -151,6 +174,13 @@ const defaultMockTaskMessages = [
     role: "assistant",
     content: "您好！我是供應商管理助理。新租戶建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）",
     timestamp: Math.floor(Date.now() / 1000) - 3600
+  },
+  {
+    id: "msg_sub_4",
+    task_id: "task_sub_4",
+    role: "assistant",
+    content: "您好！我是商品資料管理助理。新租戶建立完成後，讓我們來建立第一筆商品基本資料。請問您想先新增哪一項商品？（例如：「我想新增智能核心晶片 分類 轉售商品 售價 120」）",
+    timestamp: Math.floor(Date.now() / 1000) - 3600
   }
 ];
 
@@ -167,6 +197,20 @@ if (!mockTasks || mockTasks.length === 0) {
       migrated = true;
     }
   });
+
+  // Ensure task_sub_4 exists for product onboarding
+  const hasProductSubtask = mockTasks.some(t => t.id === 'task_sub_4' || t.title === '建立第一個商品');
+  if (!hasProductSubtask) {
+    const parentTask = mockTasks.find(t => t.id === 'task_parent_1' || t.title === '新租戶起步');
+    if (parentTask) {
+      const prodSubtask = defaultMockTasks.find(t => t.id === 'task_sub_4');
+      if (prodSubtask) {
+        mockTasks.push({ ...prodSubtask, tenant_id: parentTask.tenant_id || 'tnt_mock_1', parent_task_id: parentTask.id });
+        migrated = true;
+      }
+    }
+  }
+
   if (migrated) saveStorage('agent_erp_mock_tasks', mockTasks);
 }
 
@@ -174,6 +218,16 @@ let mockTaskMessages = loadStorage('agent_erp_mock_task_messages', defaultMockTa
 if (!mockTaskMessages || mockTaskMessages.length === 0) {
   mockTaskMessages = defaultMockTaskMessages;
   saveStorage('agent_erp_mock_task_messages', mockTaskMessages);
+} else {
+  // Ensure msg_sub_4 exists
+  const hasProductMsg = mockTaskMessages.some(m => m.task_id === 'task_sub_4');
+  if (!hasProductMsg) {
+    const prodMsg = defaultMockTaskMessages.find(m => m.id === 'msg_sub_4');
+    if (prodMsg) {
+      mockTaskMessages.push({ ...prodMsg });
+      saveStorage('agent_erp_mock_task_messages', mockTaskMessages);
+    }
+  }
 }
 
 function createDefaultMockDepartments(tenantId = 'tnt_mock_1') {
@@ -248,15 +302,20 @@ if (!mockProducts || !Array.isArray(mockProducts)) {
 }
 
 const defaultMockProductVariants = [
-  { id: "var_mock_1", product_id: "prod_mock_1", sku: "CHIP-001", name: "標準", is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
-  { id: "var_mock_2", product_id: "prod_mock_2", sku: "SRV-001", name: "標準", is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "var_mock_3", product_id: "prod_mock_3", sku: "FIN-001", name: "標準", is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 }
+  { id: "var_mock_1", product_id: "prod_mock_1", sku: "CHIP-001", name: "標準", spec_attributes: {}, is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "var_mock_2", product_id: "prod_mock_2", sku: "SRV-001", name: "標準", spec_attributes: {}, is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "var_mock_3", product_id: "prod_mock_3", sku: "FIN-001", name: "標準", spec_attributes: {}, is_default: true, created_at: Math.floor(Date.now() / 1000) - 86400 }
 ];
 
 let mockProductVariants = loadStorage('agent_erp_mock_product_variants', defaultMockProductVariants);
 if (!mockProductVariants || !Array.isArray(mockProductVariants)) {
   mockProductVariants = defaultMockProductVariants;
   saveStorage('agent_erp_mock_product_variants', mockProductVariants);
+} else {
+  mockProductVariants = mockProductVariants.map(v => ({
+    ...v,
+    spec_attributes: (v.spec_attributes && typeof v.spec_attributes === 'object' && !Array.isArray(v.spec_attributes)) ? v.spec_attributes : {}
+  }));
 }
 
 const defaultMockProductUnits = [
@@ -821,13 +880,17 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'create_task': {
-      const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id } = args;
+      const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id, skills } = args;
       const targetTenantId = resolveMockActiveTenantId();
       const now = Math.floor(Date.now() / 1000);
       const finalModuleId = (moduleId || module_id || '').trim();
       const finalParentTaskId = parentTaskId || parent_task_id || null;
       const rawSkillId = skillId || skill_id || null;
       const finalSkillId = rawSkillId ? String(rawSkillId).trim() || null : null;
+      const rawSkills = skills || (Array.isArray(skillId) ? skillId : null);
+      const finalSkills = Array.isArray(rawSkills)
+        ? rawSkills.map(s => String(s).trim()).filter(Boolean)
+        : (finalSkillId ? [finalSkillId] : []);
       const newTask = {
         id: `task_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
         tenant_id: targetTenantId,
@@ -838,6 +901,7 @@ export async function invoke(cmd, args = {}) {
         assignee: (assignee || '').trim(),
         skill_id: finalSkillId,
         skillId: finalSkillId,
+        skills: finalSkills,
         created_at: now,
         completed_at: null
       };
@@ -1132,7 +1196,7 @@ export async function invoke(cmd, args = {}) {
       }
 
       const now = Math.floor(Date.now() / 1000);
-      const prodId = `prod_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const prodId = nextMockUid('prod');
       const newProduct = {
         id: prodId,
         tenant_id: targetTenantId,
@@ -1146,13 +1210,14 @@ export async function invoke(cmd, args = {}) {
       saveStorage('agent_erp_mock_products', mockProducts);
 
       // Auto-create default variant
-      const varId = `var_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const varId = nextMockUid('var');
       const trimmedSku = sku && String(sku).trim() ? String(sku).trim() : null;
       const defaultVariant = {
         id: varId,
         product_id: prodId,
         sku: trimmedSku,
         name: '標準',
+        spec_attributes: {},
         is_default: true,
         created_at: now
       };
@@ -1161,7 +1226,7 @@ export async function invoke(cmd, args = {}) {
 
       // Auto-create base unit
       const cleanUnitName = (unit_name || unitName || '').trim() || '個';
-      const unitId = `unit_${now}_${Math.floor(1000 + Math.random() * 9000)}`;
+      const unitId = nextMockUid('unit');
       const baseUnit = {
         id: unitId,
         variant_id: varId,
@@ -1247,17 +1312,37 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'add_product_variant': {
-      const { product_id, productId, name, sku } = args || {};
+      const { product_id, productId, name, sku, spec_attributes, specAttributes } = args || {};
       const targetProdId = product_id || productId;
       const targetTenantId = resolveMockActiveTenantId();
-      const trimmedName = (name || '').trim();
+      let trimmedName = (name || '').trim();
 
       const product = mockProducts.find(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId && p.id === targetProdId);
       if (!product) {
         throw new Error('Product not found');
       }
+
+      let cleanSpec = spec_attributes !== undefined ? spec_attributes : specAttributes;
+      if (cleanSpec === undefined || cleanSpec === null) {
+        cleanSpec = {};
+      } else if (typeof cleanSpec === 'string') {
+        try {
+          cleanSpec = JSON.parse(cleanSpec);
+        } catch (_) {
+          throw new Error('規格屬性必須為 JSON 物件格式');
+        }
+      }
+      if (typeof cleanSpec !== 'object' || Array.isArray(cleanSpec) || cleanSpec === null) {
+        throw new Error('規格屬性必須為 JSON 物件格式');
+      }
+
       if (!trimmedName) {
-        throw new Error('變體名稱不能為空');
+        const values = Object.values(cleanSpec).filter(v => v !== undefined && v !== null && String(v).trim());
+        if (values.length > 0) {
+          trimmedName = values.map(v => String(v).trim()).join(' / ');
+        } else {
+          throw new Error('變體名稱不能為空');
+        }
       }
 
       const exists = mockProductVariants.some(v => v.product_id === product.id && v.name.trim().toLowerCase() === trimmedName.toLowerCase());
@@ -1267,16 +1352,88 @@ export async function invoke(cmd, args = {}) {
 
       const now = Math.floor(Date.now() / 1000);
       const newVariant = {
-        id: `var_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        id: nextMockUid('var'),
         product_id: product.id,
         sku: sku && String(sku).trim() ? String(sku).trim() : null,
         name: trimmedName,
+        spec_attributes: cleanSpec,
         is_default: false,
         created_at: now
       };
       mockProductVariants.push(newVariant);
       saveStorage('agent_erp_mock_product_variants', mockProductVariants);
       return newVariant;
+    }
+
+    case 'update_product_variant': {
+      const { variant_id, variantId, id, name, sku, spec_attributes, specAttributes } = args || {};
+      const targetVarId = variant_id || variantId || id;
+      const targetTenantId = resolveMockActiveTenantId();
+
+      if (!targetVarId) {
+        throw new Error('Variant not found');
+      }
+
+      const variantIndex = mockProductVariants.findIndex(v => v.id === targetVarId);
+      if (variantIndex === -1) {
+        throw new Error('Variant not found');
+      }
+      const variant = mockProductVariants[variantIndex];
+
+      // Verify product belongs to active tenant
+      const product = mockProducts.find(p => p.id === variant.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!product) {
+        throw new Error('Variant not found');
+      }
+
+      let newName = variant.name;
+      if (name !== undefined) {
+        const tr = String(name).trim();
+        if (!tr) {
+          throw new Error('變體名稱不能為空');
+        }
+        newName = tr;
+      }
+
+      // Check duplicate name within the same product (excluding self)
+      const duplicate = mockProductVariants.some(v => v.product_id === variant.product_id && v.id !== variant.id && v.name.trim().toLowerCase() === newName.toLowerCase());
+      if (duplicate) {
+        throw new Error(`變體名稱「${newName}」已存在`);
+      }
+
+      let newSku = variant.sku;
+      if (sku !== undefined) {
+        const trSku = sku && String(sku).trim() ? String(sku).trim() : null;
+        newSku = trSku;
+      }
+
+      let newSpec = variant.spec_attributes || {};
+      const inputSpec = spec_attributes !== undefined ? spec_attributes : specAttributes;
+      if (inputSpec !== undefined) {
+        let parsedSpec = inputSpec;
+        if (typeof parsedSpec === 'string') {
+          try {
+            parsedSpec = JSON.parse(parsedSpec);
+          } catch (_) {
+            throw new Error('規格屬性必須為 JSON 物件格式');
+          }
+        }
+        if (typeof parsedSpec !== 'object' || Array.isArray(parsedSpec) || parsedSpec === null) {
+          throw new Error('規格屬性必須為 JSON 物件格式');
+        }
+        newSpec = parsedSpec;
+      }
+
+      const updatedVariant = {
+        ...variant,
+        name: newName,
+        sku: newSku,
+        spec_attributes: newSpec
+      };
+
+      mockProductVariants[variantIndex] = updatedVariant;
+      saveStorage('agent_erp_mock_product_variants', mockProductVariants);
+      return updatedVariant;
     }
 
     case 'add_product_unit': {
@@ -1312,7 +1469,7 @@ export async function invoke(cmd, args = {}) {
       const now = Math.floor(Date.now() / 1000);
       const isBase = is_base_unit !== undefined ? !!is_base_unit : !!isBaseUnit;
       const newUnit = {
-        id: `unit_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        id: nextMockUid('unit'),
         variant_id: variant.id,
         unit_name: trimmedUnit,
         conversion_ratio: ratio,
@@ -1372,7 +1529,7 @@ export async function invoke(cmd, args = {}) {
 
       const now = Math.floor(Date.now() / 1000);
       const newSource = {
-        id: `src_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        id: nextMockUid('src'),
         unit_id: unit.id,
         vendor_partner_id: vendor.id,
         purchase_cost: cost,
@@ -1398,7 +1555,8 @@ export async function invoke(cmd, args = {}) {
 
       let parentVar = mockProductVariants.find(v => v.id === targetParentVid);
       if (!parentVar) {
-        parentVar = mockProductVariants.find(v => v.product_id === targetParentVid && v.is_default);
+        parentVar = mockProductVariants.find(v => v.product_id === targetParentVid && v.is_default) ||
+                    mockProductVariants.find(v => v.product_id === targetParentVid);
       }
       if (!parentVar) {
         throw new Error('母規格變體不存在');
@@ -1407,7 +1565,8 @@ export async function invoke(cmd, args = {}) {
       if (!parentProd) {
         throw new Error('母規格變體不存在');
       }
-      if (parentProd.category !== 'manufactured') {
+      const isParentManufactured = parentProd.category === 'manufactured' || parentProd.category === '自製成品' || parentProd.category === '自製';
+      if (!isParentManufactured) {
         throw new Error('非自製成品不可建立 BOM 組成');
       }
 
@@ -1415,7 +1574,8 @@ export async function invoke(cmd, args = {}) {
       if (!childVar) {
         childVar = mockProductVariants.find(v =>
           (v.product_id === targetChildVid && v.is_default) ||
-          (typeof targetChildVid === 'string' && targetChildVid.startsWith('var_') && targetChildVid.endsWith('_std') && v.product_id === targetChildVid.slice(4, -4))
+          (typeof targetChildVid === 'string' && targetChildVid.startsWith('var_') && targetChildVid.endsWith('_std') && v.product_id === targetChildVid.slice(4, -4)) ||
+          v.product_id === targetChildVid
         );
       }
       if (!childVar) {
@@ -1432,7 +1592,7 @@ export async function invoke(cmd, args = {}) {
 
       const now = Math.floor(Date.now() / 1000);
       const newBom = {
-        id: `bom_${now}_${Math.floor(1000 + Math.random() * 9000)}`,
+        id: nextMockUid('bom'),
         parent_variant_id: parentVar.id,
         child_variant_id: childVar.id,
         quantity: qty,

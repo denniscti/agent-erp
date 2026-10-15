@@ -588,6 +588,15 @@ export const ONBOARDING_STEPS = [
     assignee: '主管',
     guidanceMessage: (tenantName) =>
       `您好！我是供應商管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）`
+  },
+  {
+    title: '建立第一個商品',
+    skillId: 'product.create_basic_profile',
+    skills: ['product.create_basic_profile', 'product.manage'],
+    moduleId: 'sales',
+    assignee: '主管',
+    guidanceMessage: (tenantName) =>
+      `您好！我是商品資料管理助理。新租戶「${tenantName}」建立完成後，讓我們來建立第一筆商品基本資料。請問您想先新增哪一項商品？（例如：「我想新增智能核心晶片 分類 轉售商品 售價 120」）`
   }
 ];
 
@@ -605,7 +614,8 @@ export async function seedOnboardingTasks(tenantName) {
         step.moduleId || 'sales',
         step.assignee || '主管',
         parentTask.id,
-        step.skillId
+        step.skillId,
+        step.skills || (step.skillId ? [step.skillId] : null)
       );
       if (step.guidanceMessage) {
         const msg = typeof step.guidanceMessage === 'function'
@@ -729,9 +739,10 @@ export async function fetchTasks(moduleId = null) {
  * @param {string} assignee
  * @param {string | null} [parentTaskId]
  * @param {string | null} [skillId]
+ * @param {string[] | null} [skills]
  * @returns {Promise<any>}
  */
-export async function createTaskAction(title, moduleId, assignee, parentTaskId = null, skillId = null) {
+export async function createTaskAction(title, moduleId, assignee, parentTaskId = null, skillId = null, skills = null) {
   try {
     const task = await invoke('create_task', {
       title,
@@ -740,7 +751,8 @@ export async function createTaskAction(title, moduleId, assignee, parentTaskId =
       parentTaskId: parentTaskId || null,
       skillId: skillId || null,
       parent_task_id: parentTaskId || null,
-      skill_id: skillId || null
+      skill_id: skillId || null,
+      skills: Array.isArray(skills) ? skills : (skillId ? [skillId] : null)
     });
     await fetchTasks();
     return task;
@@ -1181,28 +1193,78 @@ export async function createProductAction(input) {
  * @param {string} productId
  * @param {string} name
  * @param {string} [sku]
+ * @param {object} [specAttributes={}]
  * @returns {Promise<any>}
  */
-export async function addProductVariantAction(productId, name, sku = undefined) {
+export async function addProductVariantAction(productId, name, sku = undefined, specAttributes = {}) {
   const prodId = (productId || '').trim();
   const variantName = (name || '').trim();
   if (!prodId) throw new Error('商品 ID 為必填項目');
-  if (!variantName) throw new Error('變體名稱不能為空');
+  if (!variantName && (!specAttributes || Object.keys(specAttributes).length === 0)) {
+    throw new Error('變體名稱不能為空');
+  }
 
   try {
     const v = await invoke('add_product_variant', {
       product_id: prodId,
       productId: prodId,
       name: variantName,
-      sku: sku ? String(sku).trim() : undefined
+      sku: sku ? String(sku).trim() : undefined,
+      spec_attributes: specAttributes || {},
+      specAttributes: specAttributes || {}
     });
     if (appState.currentProductDetail && appState.currentProductDetail.product.id === prodId) {
       await getProductDetailAction(prodId);
     }
-    showToast(`已成功新增變體「${variantName}」！`);
+    showToast(`已成功新增變體「${v.name || variantName}」！`);
     return v;
   } catch (err) {
     console.error("Failed to add product variant:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update an existing product variant
+ * @param {string} variantId
+ * @param {object} updates
+ * @param {string} [updates.name]
+ * @param {string} [updates.sku]
+ * @param {object} [updates.spec_attributes]
+ * @param {object} [updates.specAttributes]
+ * @param {string} [updates.productId] Optional product ID to reload currentProductDetail
+ * @returns {Promise<any>}
+ */
+export async function updateProductVariantAction(variantId, { name, sku, spec_attributes, specAttributes, productId } = {}) {
+  const vId = (variantId || '').trim();
+  if (!vId) throw new Error('變體 ID 為必填項目');
+
+  const payload = {
+    variant_id: vId,
+    variantId: vId
+  };
+  if (name !== undefined) {
+    payload.name = name;
+  }
+  if (sku !== undefined) {
+    payload.sku = sku;
+  }
+  const spec = spec_attributes !== undefined ? spec_attributes : specAttributes;
+  if (spec !== undefined) {
+    payload.spec_attributes = spec;
+    payload.specAttributes = spec;
+  }
+
+  try {
+    const updated = await invoke('update_product_variant', payload);
+    const prodId = productId || (appState.currentProductDetail?.product?.id);
+    if (prodId) {
+      await getProductDetailAction(prodId);
+    }
+    showToast(`已成功更新規格變體「${updated.name}」！`);
+    return updated;
+  } catch (err) {
+    console.error("Failed to update product variant:", err);
     throw err;
   }
 }
@@ -1570,13 +1632,22 @@ export function filterTasksBySkills(tasks, effectiveSkills = getCurrentUserEffec
     }
 
     const rawSkillId = task.skillId || task.skill_id;
-    if (!rawSkillId || (typeof rawSkillId === 'string' && !rawSkillId.trim())) {
+    let taskSkills = [];
+    if (Array.isArray(task.skills) && task.skills.length > 0) {
+      taskSkills = task.skills.map(s => typeof s === 'string' ? s.trim() : String(s).trim()).filter(Boolean);
+    } else if (typeof rawSkillId === 'string' && rawSkillId.trim()) {
+      taskSkills = rawSkillId.split(',').map(s => s.trim()).filter(Boolean);
+    } else if (rawSkillId) {
+      const trimmed = String(rawSkillId).trim();
+      if (trimmed) taskSkills = [trimmed];
+    }
+
+    if (taskSkills.length === 0) {
       // Unrestricted task (e.g. parent task or general task without skill requirement)
       return true;
     }
 
-    const skillId = String(rawSkillId).trim();
-    return skillSet.has(skillId);
+    return taskSkills.some(s => skillSet.has(s));
   });
 }
 

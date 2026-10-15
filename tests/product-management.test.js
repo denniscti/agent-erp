@@ -32,6 +32,24 @@
  * | TC-PROD-WF-03 | Workflow cancellation flow | Workflow – Cancellation handling | Produces cancel guidance message | Cancellation |
  * | TC-PROD-WF-04 | Profile manifest compliance | Architecture – Agent Skill authoring standard | Profile contains valid id, domain, and handlers | Standards compliance |
  * | TC-PROD-ALIAS-01 | Invoke list_product via IPC, ToolHandler, and runAgentTurn | Equivalence – Singular alias workflow compatibility | Successfully executes without whitelist blocking | Tool alias DoD |
+ * | TC-VAR-N-01 | Create product without specs | Equivalence – Auto default variant | Generates default variant with spec_attributes={} | Happy path |
+ * | TC-VAR-N-02 | Add variant with name, sku, and spec_attributes | Equivalence – Variant with spec_attributes | Variant created and attached to product | Happy path |
+ * | TC-VAR-N-03 | Update variant SKU and spec_attributes | Equivalence – Update existing variant | Variant updated successfully | Happy path |
+ * | TC-VAR-N-04 | Update variant name only | Equivalence – Partial update | Variant name updated, other fields preserved | Happy path |
+ * | TC-VAR-B-01 | Add variant with spec_attributes={} | Boundary – Empty spec object | Allowed, saved as {} | Lower bound |
+ * | TC-VAR-B-02 | Add variant with whitespace in name/sku | Boundary – Whitespace trimming | Automatically trimmed in store and mock | Normalization |
+ * | TC-VAR-B-03 | Add variant with empty name but valid spec_attributes | Boundary – Auto-derived variant name | Generates name from attribute values | Resilient fallback |
+ * | TC-VAR-B-04 | Update variant: clear SKU to null/empty | Boundary – Clear optional SKU | SKU set to null | Boundary |
+ * | TC-VAR-B-05 | Query product details with multiple variants | Boundary – Collection ordering | Default variant sorted first | Ordering |
+ * | TC-VAR-E-01 | Add variant: empty name and empty spec_attributes | Error – Required name or attributes | Throws validation error | Validation |
+ * | TC-VAR-E-02 | Add variant: duplicate name in same product | Error – Duplicate variant name | Rejects with duplicate error | Uniqueness guard |
+ * | TC-VAR-E-03 | Add variant: nonexistent product_id | Error – Invalid product ID | Rejects with product not found | Relation check |
+ * | TC-VAR-E-04 | Update variant: nonexistent variant_id | Error – Invalid variant ID | Rejects with variant not found | Primary key check |
+ * | TC-VAR-E-05 | Update variant: duplicate name with another variant in same product | Error – Duplicate variant name | Rejects with duplicate error | Uniqueness guard |
+ * | TC-VAR-E-06 | Update variant: empty or whitespace name | Error – Empty name update | Rejects with validation error | Required field |
+ * | TC-VAR-E-07 | Cross-tenant add variant: Tenant A to Tenant B | Error – Tenant isolation | Rejects with not found | Multi-tenant security |
+ * | TC-VAR-E-08 | Cross-tenant update variant: Tenant A to Tenant B | Error – Tenant isolation | Rejects with not found | Multi-tenant security |
+ * | TC-VAR-E-09 | Invalid spec_attributes format (array or non-object) | Error – Malformed JSON/object | Rejects with format error | Schema guard |
  */
 
 import test from 'node:test';
@@ -50,6 +68,7 @@ const {
   createProductAction,
   getProductDetailAction,
   addProductVariantAction,
+  updateProductVariantAction,
   addProductUnitAction,
   addSupplySourceAction,
   addBomItemAction,
@@ -614,12 +633,13 @@ test('TC-PROD-RES-02: Resilient fallback when product_id or variant_id is passed
 test('TC-PROD-RES-03: Resilient fallback when product_id or synthetic ID is passed to addBomItemAction', async () => {
   // Given: Manufactured parent and raw material child
   await ensureAuthenticated();
+  const uniqueSuffix = `${Date.now()}_${Math.floor(Math.random() * 10000)}`;
   const parent = await createProductAction({
-    name: `容錯BOM成品_${Date.now()}`,
+    name: `容錯BOM成品_${uniqueSuffix}`,
     category: '自製成品'
   });
   const child = await createProductAction({
-    name: `容錯BOM零件_${Date.now()}`,
+    name: `容錯BOM零件_${uniqueSuffix}`,
     category: '原物料'
   });
 
@@ -684,4 +704,375 @@ test('TC-PROD-ALIAS-01: list_product alias is fully supported in invoke, toolHan
   assert.ok(Array.isArray(simulatedLlmTurn.result));
   assert.ok(simulatedLlmTurn.content.includes('已為您查詢到'), 'Response should contain formatted product list');
 });
+
+// ==========================================
+// Issue #139: Specification Variants Test Suite
+// ==========================================
+
+test('TC-VAR-N-01: Create product without specs auto-generates default variant with empty spec_attributes', async () => {
+  // Given: Unique product info without variants specified
+  await ensureAuthenticated();
+  const prodName = `變體測試商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+  // When: Calling createProductAction
+  const result = await createProductAction({
+    name: prodName,
+    category: '轉售商品',
+    selling_price: 200
+  });
+
+  // Then: Default variant is generated with is_default=true and empty spec_attributes
+  assert.ok(result.product.id);
+  assert.equal(result.variants.length, 1);
+  const defVar = result.variants[0];
+  assert.equal(defVar.is_default, true);
+  assert.equal(defVar.name, '標準');
+  assert.deepEqual(defVar.spec_attributes, {});
+});
+
+test('TC-VAR-N-02: Add variant with name, sku, and spec_attributes successfully', async () => {
+  // Given: An existing product
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `多規格服飾_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding variant with color and size spec_attributes
+  const newVar = await addProductVariantAction(
+    p.product.id,
+    '紅色 / M',
+    'CLOTH-RED-M',
+    { 顏色: '紅色', 尺寸: 'M' }
+  );
+
+  // Then: Variant created with attributes and attached
+  assert.ok(newVar.id);
+  assert.equal(newVar.product_id, p.product.id);
+  assert.equal(newVar.name, '紅色 / M');
+  assert.equal(newVar.sku, 'CLOTH-RED-M');
+  assert.deepEqual(newVar.spec_attributes, { 顏色: '紅色', 尺寸: 'M' });
+  assert.equal(newVar.is_default, false);
+
+  const detail = await getProductDetailAction(p.product.id);
+  assert.equal(detail.variants.length, 2);
+  const found = detail.variants.find(v => v.id === newVar.id);
+  assert.ok(found);
+  assert.deepEqual(found.spec_attributes, { 顏色: '紅色', 尺寸: 'M' });
+});
+
+test('TC-VAR-N-03: Update variant SKU and spec_attributes', async () => {
+  // Given: Product with an added variant
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `運動長褲_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  const v = await addProductVariantAction(p.product.id, '黑色 / L', 'PANTS-BLK-L', { 顏色: '黑色', 尺寸: 'L' });
+
+  // When: Updating SKU and spec_attributes
+  const updated = await updateProductVariantAction(v.id, {
+    sku: 'PANTS-BLK-L-V2',
+    spec_attributes: { 顏色: '黑色', 尺寸: 'L', 材質: '聚酯纖維' },
+    productId: p.product.id
+  });
+
+  // Then: SKU and attributes updated while name is preserved
+  assert.equal(updated.id, v.id);
+  assert.equal(updated.name, '黑色 / L');
+  assert.equal(updated.sku, 'PANTS-BLK-L-V2');
+  assert.deepEqual(updated.spec_attributes, { 顏色: '黑色', 尺寸: 'L', 材質: '聚酯纖維' });
+
+  const detail = await getProductDetailAction(p.product.id);
+  const reloaded = detail.variants.find(varItem => varItem.id === v.id);
+  assert.equal(reloaded.sku, 'PANTS-BLK-L-V2');
+  assert.deepEqual(reloaded.spec_attributes, { 顏色: '黑色', 尺寸: 'L', 材質: '聚酯纖維' });
+});
+
+test('TC-VAR-N-04: Update variant name only', async () => {
+  // Given: Product with a variant
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `手機殼_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  const v = await addProductVariantAction(p.product.id, '原色', 'CASE-RAW', { 色系: '透明' });
+
+  // When: Updating name only
+  const updated = await updateProductVariantAction(v.id, {
+    name: '極致透明原色',
+    productId: p.product.id
+  });
+
+  // Then: Name is updated, other fields preserved
+  assert.equal(updated.name, '極致透明原色');
+  assert.equal(updated.sku, 'CASE-RAW');
+  assert.deepEqual(updated.spec_attributes, { 色系: '透明' });
+});
+
+test('TC-VAR-B-01: Add variant with empty spec_attributes object', async () => {
+  // Given: Existing product
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `空屬性商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding variant with spec_attributes: {}
+  const v = await addProductVariantAction(p.product.id, '無軸向規格', 'SKU-NONE', {});
+
+  // Then: Saved with empty spec_attributes
+  assert.deepEqual(v.spec_attributes, {});
+});
+
+test('TC-VAR-B-02: Whitespace trimming on variant name and SKU', async () => {
+  // Given: Product exists
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `空白修剪測試_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding variant with leading and trailing whitespaces
+  const v = await addProductVariantAction(
+    p.product.id,
+    '   藍色 / XL   ',
+    '   CLOTH-BLU-XL   ',
+    { 顏色: '藍色' }
+  );
+
+  // Then: Whitespace is trimmed
+  assert.equal(v.name, '藍色 / XL');
+  assert.equal(v.sku, 'CLOTH-BLU-XL');
+});
+
+test('TC-VAR-B-03: Auto-derived variant name when name is empty but spec_attributes has values', async () => {
+  // Given: Product exists
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `自動名稱商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding variant with empty name and spec_attributes
+  const v = await addProductVariantAction(
+    p.product.id,
+    '',
+    'AUTO-01',
+    { 顏色: '黃色', 尺寸: 'S' }
+  );
+
+  // Then: Name is auto-derived from attribute values
+  assert.ok(v.name);
+  assert.ok(v.name.includes('黃色'));
+  assert.ok(v.name.includes('S'));
+});
+
+test('TC-VAR-B-04: Update variant: clearing SKU to empty string normalizes to null', async () => {
+  // Given: Variant with initial SKU
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `清空SKU商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  const v = await addProductVariantAction(p.product.id, '規格A', 'SKU-A');
+
+  // When: Updating SKU to empty string
+  const updated = await updateProductVariantAction(v.id, {
+    sku: '   ',
+    productId: p.product.id
+  });
+
+  // Then: SKU is normalized to null
+  assert.equal(updated.sku, null);
+});
+
+test('TC-VAR-B-05: Query product detail preserves variant collection ordering (default first)', async () => {
+  // Given: Product with default and two custom variants
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `排序測試商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  await addProductVariantAction(p.product.id, '變體 1');
+  await addProductVariantAction(p.product.id, '變體 2');
+
+  // When: Fetching product detail
+  const detail = await getProductDetailAction(p.product.id);
+
+  // Then: 3 variants, and index 0 is default variant
+  assert.equal(detail.variants.length, 3);
+  assert.equal(detail.variants[0].is_default, true);
+  assert.equal(detail.variants[1].is_default, false);
+  assert.equal(detail.variants[2].is_default, false);
+});
+
+test('TC-VAR-E-01: Add variant: empty name and empty spec_attributes throws error', async () => {
+  // Given: Product exists
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `空名稱驗證_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+
+  // When & Then: Throws validation error
+  await assert.rejects(
+    async () => {
+      await addProductVariantAction(p.product.id, '   ', undefined, {});
+    },
+    {
+      message: '變體名稱不能為空'
+    }
+  );
+});
+
+test('TC-VAR-E-02: Add variant: duplicate name in same product is rejected', async () => {
+  // Given: Product with an existing variant
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `重複名稱商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  await addProductVariantAction(p.product.id, '紅色');
+
+  // When & Then: Adding another variant with identical name (ignoring case & whitespace)
+  await assert.rejects(
+    async () => {
+      await addProductVariantAction(p.product.id, '  紅色  ');
+    },
+    /變體「紅色」已存在/
+  );
+});
+
+test('TC-VAR-E-03: Add variant: nonexistent product_id is rejected', async () => {
+  // Given: Nonexistent product ID
+  await ensureAuthenticated();
+
+  // When & Then: Rejects with Product not found
+  await assert.rejects(
+    async () => {
+      await addProductVariantAction('prod_nonexistent_9999', '標準');
+    },
+    /Product not found/
+  );
+});
+
+test('TC-VAR-E-04: Update variant: nonexistent variant_id is rejected', async () => {
+  // Given: Nonexistent variant ID
+  await ensureAuthenticated();
+
+  // When & Then: Rejects with Variant not found
+  await assert.rejects(
+    async () => {
+      await updateProductVariantAction('var_nonexistent_9999', { name: '新名稱' });
+    },
+    /Variant not found/
+  );
+});
+
+test('TC-VAR-E-05: Update variant: duplicate name with another sibling variant is rejected', async () => {
+  // Given: Product with two distinct variants
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `編輯衝突商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  const v1 = await addProductVariantAction(p.product.id, '紅色');
+  const v2 = await addProductVariantAction(p.product.id, '藍色');
+
+  // When & Then: Renaming v2 to v1's name is rejected
+  await assert.rejects(
+    async () => {
+      await updateProductVariantAction(v2.id, { name: '  紅色  ' });
+    },
+    /變體名稱「紅色」已存在/
+  );
+});
+
+test('TC-VAR-E-06: Update variant: empty or whitespace name is rejected', async () => {
+  // Given: Variant exists
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `空名稱更新商品_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  const v = await addProductVariantAction(p.product.id, '規格一');
+
+  // When & Then: Updating name to whitespace throws error
+  await assert.rejects(
+    async () => {
+      await updateProductVariantAction(v.id, { name: '   ' });
+    },
+    /變體名稱不能為空/
+  );
+});
+
+test('TC-VAR-E-07: Cross-tenant add variant: Tenant B cannot add variant to Tenant A product', async () => {
+  // Given: Product created in Tenant 1
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `租戶A專屬_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+
+  // When: Switching to Tenant 2
+  await selectTenantAction('tnt_mock_2');
+
+  // Then: Attempting to add variant to Tenant 1's product fails
+  await assert.rejects(
+    async () => {
+      await addProductVariantAction(p.product.id, '惡意規格');
+    },
+    /Product not found/
+  );
+
+  // Restore Tenant 1
+  await selectTenantAction('tnt_mock_1');
+});
+
+test('TC-VAR-E-08: Cross-tenant update variant: Tenant B cannot update Tenant A variant', async () => {
+  // Given: Variant created in Tenant 1
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `租戶A更新保護_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+  const v = await addProductVariantAction(p.product.id, '規格A');
+
+  // When: Switching to Tenant 2
+  await selectTenantAction('tnt_mock_2');
+
+  // Then: Attempting to update Tenant 1's variant fails
+  await assert.rejects(
+    async () => {
+      await updateProductVariantAction(v.id, { name: '竄改名稱' });
+    },
+    /Variant not found/
+  );
+
+  // Restore Tenant 1
+  await selectTenantAction('tnt_mock_1');
+});
+
+test('TC-VAR-E-09: Invalid spec_attributes format (array or non-object) is rejected', async () => {
+  // Given: Product exists
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `格式錯誤測試_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+    category: '轉售商品'
+  });
+
+  // When & Then: Passing array as spec_attributes throws error
+  await assert.rejects(
+    async () => {
+      await invoke('add_product_variant', {
+        product_id: p.product.id,
+        name: '陣列屬性變體',
+        spec_attributes: ['顏色', '紅']
+      });
+    },
+    /規格屬性必須為 JSON 物件格式/
+  );
+});
+
 
