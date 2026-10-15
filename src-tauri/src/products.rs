@@ -62,6 +62,12 @@ pub struct ProductBomItem {
     pub child_variant_id: String,
     pub quantity: f64,
     pub created_at: i64,
+    #[serde(default)]
+    pub child_product_name: Option<String>,
+    #[serde(default)]
+    pub child_variant_name: Option<String>,
+    #[serde(default)]
+    pub child_sku: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -488,9 +494,17 @@ pub fn get_product_detail_impl(
                 units.push(u.map_err(|e| format!("Error reading unit: {}", e))?);
             }
 
-            // Query bom items
+            // Query bom items with joined product and variant names
             let mut bom_stmt = conn
-                .prepare("SELECT id, parent_variant_id, child_variant_id, quantity, created_at FROM product_bom_items WHERE parent_variant_id = ?1 ORDER BY created_at ASC")
+                .prepare(
+                    "SELECT b.id, b.parent_variant_id, b.child_variant_id, b.quantity, b.created_at,
+                            p.name, v.name, v.sku
+                     FROM product_bom_items b
+                     LEFT JOIN product_variants v ON b.child_variant_id = v.id
+                     LEFT JOIN products p ON v.product_id = p.id
+                     WHERE b.parent_variant_id = ?1
+                     ORDER BY b.created_at ASC",
+                )
                 .map_err(|e| format!("Failed to prepare bom query: {}", e))?;
             let b_rows = bom_stmt
                 .query_map(params![vid], |row| {
@@ -500,6 +514,9 @@ pub fn get_product_detail_impl(
                         child_variant_id: row.get(2)?,
                         quantity: row.get(3)?,
                         created_at: row.get(4)?,
+                        child_product_name: row.get(5)?,
+                        child_variant_name: row.get(6)?,
+                        child_sku: row.get(7)?,
                     })
                 })
                 .map_err(|e| format!("Failed to query bom items: {}", e))?;
@@ -829,14 +846,15 @@ pub fn add_bom_item_impl(
 
     // Verify child variant belongs to product in active tenant (support variant_id or product_id or synthetic ID)
     let mut check_child = conn
-        .prepare("SELECT v.id FROM product_variants v JOIN products p ON v.product_id = p.id WHERE (v.id = ?1 OR v.product_id = ?1 OR v.product_id = ?2) AND p.tenant_id = ?3 ORDER BY v.is_default DESC LIMIT 1")
+        .prepare("SELECT v.id, p.name, v.name, v.sku FROM product_variants v JOIN products p ON v.product_id = p.id WHERE (v.id = ?1 OR v.product_id = ?1 OR v.product_id = ?2) AND p.tenant_id = ?3 ORDER BY v.is_default DESC LIMIT 1")
         .map_err(|e| format!("Failed to prepare child variant check: {}", e))?;
-    let resolved_child_vid: Result<String, _> = check_child.query_row(
-        params![trimmed_child_vid, potential_child_pid, trimmed_tenant_id],
-        |row| row.get(0),
-    );
-    let actual_child_vid = match resolved_child_vid {
-        Ok(id) => id,
+    let resolved_child: Result<(String, String, String, Option<String>), _> = check_child
+        .query_row(
+            params![trimmed_child_vid, potential_child_pid, trimmed_tenant_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        );
+    let (actual_child_vid, child_pname, child_vname, child_sku) = match resolved_child {
+        Ok(info) => info,
         Err(_) => return Err("子物料變體不存在或不屬於同一租戶".to_string()),
     };
 
@@ -860,6 +878,9 @@ pub fn add_bom_item_impl(
         child_variant_id: actual_child_vid,
         quantity,
         created_at: now,
+        child_product_name: Some(child_pname),
+        child_variant_name: Some(child_vname),
+        child_sku,
     })
 }
 
@@ -1343,13 +1364,23 @@ pub mod tests {
         )
         .unwrap();
 
-        // Then: BOM item is linked with correct quantity
+        // Then: BOM item is linked with correct quantity and child names
         assert_eq!(bom.parent_variant_id, parent.variants[0].id);
         assert_eq!(bom.child_variant_id, child.variants[0].id);
         assert_eq!(bom.quantity, 4.0);
+        assert_eq!(bom.child_product_name, Some("散熱片".to_string()));
+        assert_eq!(bom.child_variant_name, Some("標準".to_string()));
 
         let detail = get_product_detail_impl(&conn, TEST_TENANT_A, &parent.product.id).unwrap();
         assert_eq!(detail.bom_items.len(), 1);
+        assert_eq!(
+            detail.bom_items[0].child_product_name,
+            Some("散熱片".to_string())
+        );
+        assert_eq!(
+            detail.bom_items[0].child_variant_name,
+            Some("標準".to_string())
+        );
     }
 
     #[test]

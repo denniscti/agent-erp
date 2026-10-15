@@ -240,6 +240,24 @@ export const listProductsToolHandler = {
   }
 };
 
+/** @type {import('./types.js').ToolHandler} */
+export const listProductToolHandler = {
+  definition: {
+    type: 'function',
+    function: {
+      name: 'list_product',
+      description: '查詢或列出已建立的商品清單（可選按類別或販售狀態過濾）',
+      parameters: listProductsToolHandler.definition.function.parameters
+    }
+  },
+  requiresConfirmation: false,
+  completesTask: false,
+  execute: listProductsToolHandler.execute,
+  formatResult: listProductsToolHandler.formatResult,
+  describeCancel: listProductsToolHandler.describeCancel,
+  extractCandidateRegex: listProductsToolHandler.extractCandidateRegex
+};
+
 /** @type {import('./types.js').AgentProfile} */
 export const productManagementAgentProfile = {
   id: 'product.create_basic_profile',
@@ -247,11 +265,13 @@ export const productManagementAgentProfile = {
   systemPrompt: '你是一個商品資料管理助理。請根據使用者的意圖選擇合適的工具進行呼叫。如果使用者的意圖不符合任何工具，請直接回覆文字，不要呼叫任何工具。',
   tools: [
     listProductsToolHandler.definition,
-    createProductToolHandler.definition
+    createProductToolHandler.definition,
+    listProductToolHandler.definition
   ],
   toolHandlers: [
     listProductsToolHandler,
-    createProductToolHandler
+    createProductToolHandler,
+    listProductToolHandler
   ],
   getFallbackMessage(activeTask) {
     return activeTask?.status !== 'done'

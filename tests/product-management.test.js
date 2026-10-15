@@ -31,6 +31,7 @@
  * | TC-PROD-WF-02 | Workflow harness execution with confirmation | Workflow – Two-phase HITL execution | Pending card shown, executes on confirm | Core harness loop |
  * | TC-PROD-WF-03 | Workflow cancellation flow | Workflow – Cancellation handling | Produces cancel guidance message | Cancellation |
  * | TC-PROD-WF-04 | Profile manifest compliance | Architecture – Agent Skill authoring standard | Profile contains valid id, domain, and handlers | Standards compliance |
+ * | TC-PROD-ALIAS-01 | Invoke list_product via IPC, ToolHandler, and runAgentTurn | Equivalence – Singular alias workflow compatibility | Successfully executes without whitelist blocking | Tool alias DoD |
  */
 
 import test from 'node:test';
@@ -59,6 +60,7 @@ const {
 const {
   createProductToolHandler,
   listProductsToolHandler,
+  listProductToolHandler,
   productManagementAgentProfile,
   KNOWN_DOMAINS,
   isKnownDomain,
@@ -67,6 +69,8 @@ const {
   executeCancellation,
   getAgentProfileForTask
 } = await import('../src/lib/workflow/index.js');
+
+const { invoke } = await import('../src/lib/tauri.js');
 
 // Helper to ensure authenticated state
 async function ensureAuthenticated() {
@@ -262,11 +266,18 @@ test('TC-PROD-N-08: Add BOM item to manufactured product', async () => {
   // When: Adding BOM item
   const bom = await addBomItemAction(parent.variants[0].id, child.variants[0].id, 3.5);
 
-  // Then: BOM item is linked
+  // Then: BOM item is linked and child product/variant names are populated
   assert.ok(bom.id);
   assert.equal(bom.parent_variant_id, parent.variants[0].id);
   assert.equal(bom.child_variant_id, child.variants[0].id);
   assert.equal(bom.quantity, 3.5);
+  assert.equal(bom.child_product_name, child.product.name);
+  assert.equal(bom.child_variant_name, child.variants[0].name);
+
+  const detail = await getProductDetailAction(parent.product.id);
+  assert.equal(detail.bom_items.length, 1);
+  assert.equal(detail.bom_items[0].child_product_name, child.product.name);
+  assert.equal(detail.bom_items[0].child_variant_name, child.variants[0].name);
 });
 
 test('TC-PROD-B-01: Whitespace trimming on name and unit', async () => {
@@ -525,8 +536,12 @@ test('TC-PROD-WF-04: AgentProfile manifest compliance', () => {
   assert.equal(productManagementAgentProfile.id, 'product.create_basic_profile');
   assert.equal(productManagementAgentProfile.domain, 'product');
   assert.ok(isKnownDomain(productManagementAgentProfile.domain));
-  assert.equal(productManagementAgentProfile.tools.length, 2);
-  assert.equal(productManagementAgentProfile.toolHandlers.length, 2);
+  assert.equal(productManagementAgentProfile.tools.length, 3);
+  assert.equal(productManagementAgentProfile.toolHandlers.length, 3);
+  const toolNames = productManagementAgentProfile.tools.map(t => t?.function?.name);
+  assert.ok(toolNames.includes('list_products'));
+  assert.ok(toolNames.includes('create_product'));
+  assert.ok(toolNames.includes('list_product'));
 
   const taskProfile = getAgentProfileForTask({ title: '建立商品' });
   assert.equal(taskProfile.id, 'product.create_basic_profile');
@@ -623,3 +638,50 @@ test('TC-PROD-RES-03: Resilient fallback when product_id or synthetic ID is pass
   assert.equal(bom2.child_variant_id, child.variants[0].id);
   assert.equal(bom2.quantity, 2.5);
 });
+
+test('TC-PROD-ALIAS-01: list_product alias is fully supported in invoke, toolHandlers, and runAgentTurn workflow', async () => {
+  // Given: Active session in tnt_mock_1 with known products
+  await ensureAuthenticated();
+  await selectTenantAction('tnt_mock_1');
+
+  // When: Calling invoke with singular 'list_product' command
+  const singularResult = await invoke('list_product');
+  const pluralResult = await invoke('list_products');
+
+  // Then: Both return arrays with identical items
+  assert.ok(Array.isArray(singularResult));
+  assert.ok(Array.isArray(pluralResult));
+  assert.equal(singularResult.length, pluralResult.length);
+
+  // And When: Executing listProductToolHandler directly
+  const handlerResult = await listProductToolHandler.execute();
+  assert.ok(Array.isArray(handlerResult));
+  assert.equal(handlerResult.length, pluralResult.length);
+
+  // And Then: Tool definition name is 'list_product' and formatResult formats list correctly
+  assert.equal(listProductToolHandler.definition.function.name, 'list_product');
+  const formatted = listProductToolHandler.formatResult(handlerResult);
+  assert.ok(typeof formatted === 'string');
+  assert.ok(formatted.includes('已為您查詢到'));
+
+  // And When: Simulating AI agent turn calling singular tool 'list_product' (e.g. LLM model output alias)
+  const simulatedLlmTurn = await runAgentTurn(
+    '請幫我列出商品',
+    productManagementAgentProfile,
+    { taskId: 'task_m7_product' },
+    {
+      llmDetector: async () => ({
+        tool: 'list_product',
+        args: {}
+      })
+    }
+  );
+
+  // Then: The turn succeeds through the harness without being blocked by whitelist security check
+  assert.notEqual(simulatedLlmTurn.type, 'error', 'Tool call should not be blocked or rejected as error');
+  assert.equal(simulatedLlmTurn.type, 'executed');
+  assert.equal(simulatedLlmTurn.toolName, 'list_product');
+  assert.ok(Array.isArray(simulatedLlmTurn.result));
+  assert.ok(simulatedLlmTurn.content.includes('已為您查詢到'), 'Response should contain formatted product list');
+});
+

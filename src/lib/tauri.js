@@ -1183,6 +1183,7 @@ export async function invoke(cmd, args = {}) {
       };
     }
 
+    case 'list_product':
     case 'list_products': {
       const { filter_category, filterCategory, filter_sellable, filterSellable, filter_purchasable, filterPurchasable } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
@@ -1223,7 +1224,18 @@ export async function invoke(cmd, args = {}) {
       const units = mockProductUnits.filter(u => variantIds.has(u.variant_id));
       const unitIds = new Set(units.map(u => u.id));
       const supply_sources = mockProductSupplySources.filter(s => unitIds.has(s.unit_id));
-      const bom_items = mockProductBomItems.filter(b => variantIds.has(b.parent_variant_id));
+      const bom_items = mockProductBomItems
+        .filter(b => variantIds.has(b.parent_variant_id))
+        .map(b => {
+          const childVar = mockProductVariants.find(v => v.id === b.child_variant_id);
+          const childProd = childVar ? mockProducts.find(p => p.id === childVar.product_id) : null;
+          return {
+            ...b,
+            child_product_name: b.child_product_name || (childProd ? childProd.name : null),
+            child_variant_name: b.child_variant_name || (childVar ? childVar.name : null),
+            child_sku: b.child_sku || (childVar ? childVar.sku : null)
+          };
+        });
 
       return {
         product,
@@ -1424,7 +1436,10 @@ export async function invoke(cmd, args = {}) {
         parent_variant_id: parentVar.id,
         child_variant_id: childVar.id,
         quantity: qty,
-        created_at: now
+        created_at: now,
+        child_product_name: childProd.name,
+        child_variant_name: childVar.name,
+        child_sku: childVar.sku || null
       };
       mockProductBomItems.push(newBom);
       saveStorage('agent_erp_mock_product_bom_items', mockProductBomItems);

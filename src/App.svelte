@@ -564,6 +564,15 @@
     return v ? v.name : vendorId;
   }
 
+  function getChildMaterialDisplayName(b) {
+    if (!b) return '未命名物料';
+    if (b.child_product_name) {
+      return b.child_product_name;
+    }
+    const found = appState.products.find(p => p.id === b.child_variant_id || (b.child_variant_id && b.child_variant_id.includes(p.id)));
+    return found ? found.name : (b.child_variant_id || '未命名物料');
+  }
+
   function getParentDepartmentName(parentId) {
     if (!parentId) return null;
     const parent = appState.departments.find(d => d.id === parentId);
@@ -2056,13 +2065,26 @@
                                   {:else}
                                     {#each expandedProductDetail.bom_items as b (b.id)}
                                       <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
-                                        <div>
-                                          <span style="font-weight: 600;">🧱 子物料規格 ID: {b.child_variant_id}</span>
+                                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                          <span style="font-weight: 600; color: var(--text-primary);">🧱 {getChildMaterialDisplayName(b)}</span>
+                                          {#if b.child_variant_name}
+                                            <span style="font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3);">
+                                              規格: {b.child_variant_name}
+                                            </span>
+                                          {/if}
+                                          {#if b.child_sku}
+                                            <span style="font-size: 0.72rem; color: var(--text-muted); font-family: monospace;">
+                                              SKU: {b.child_sku}
+                                            </span>
+                                          {/if}
+                                          <span style="color: var(--text-muted); font-size: 0.7rem; opacity: 0.75;" title="子物料變體 ID">
+                                            (#{b.child_variant_id})
+                                          </span>
                                           {#if b.loss_rate > 0}
-                                            <span style="color: var(--text-muted); font-size: 0.72rem; margin-left: 6px;">(損耗率: {(b.loss_rate * 100).toFixed(1)}%)</span>
+                                            <span style="color: var(--text-muted); font-size: 0.72rem;">(損耗率: {(b.loss_rate * 100).toFixed(1)}%)</span>
                                           {/if}
                                         </div>
-                                        <div style="font-weight: 600; color: #a855f7;">
+                                        <div style="font-weight: 600; color: #a855f7; white-space: nowrap;">
                                           耗用量: {b.quantity}
                                         </div>
                                       </div>
