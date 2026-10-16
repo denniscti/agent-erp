@@ -49,6 +49,7 @@
   ```
   agent-erp 自己不發明新的業務錯誤語意——**能對應到 TPS2 的 `google.rpc.ErrorInfo` reason 碼（`IAM_ERR_*` 系列）就直接對應**，只有本地才會發生、TPS2 管不到的錯誤（例如 Keychain 讀寫失敗）才用本地變體。`#[tauri::command]` 回傳給 JS 前，在 delivery 層邊界把 `ApiError` 轉成可序列化的結構（例如 `{ code, message }`），不要把 Rust 錯誤型別直接外洩到 IPC 邊界。
 - **序列化**：跨 IPC 邊界的資料一律定義明確的 `#[derive(Serialize, Deserialize)]` struct，對齊 TPS2 對應的 JSON 欄位命名，不要在業務邏輯裡到處傳遞未定型的 `serde_json::Value`（只有 `api_call` 這種刻意設計成通用轉發的邊界函式可以例外）。
+- **`#[tauri::command]` 參數命名不可用底線前綴**：即使函式體暫時沒用到某個參數的值，也不要把參數命名成 `_xxx` 來消除 unused-variable warning——Tauri 預設用參數名的 camelCase 轉換當作 JS 端 `invoke()` 呼叫的 key，底線前綴的參數名轉換後對不上前端送出的 key，會讓這次呼叫在 IPC 反序列化階段直接失敗、Rust 函式本體完全不會被執行，而且這種失敗不會在 Rust 端留下任何 log（因為根本沒進到函式體），只會在前端 catch 到一個通用錯誤，非常不容易定位。暫時用不到的參數改用 `#[allow(unused_variables)]` 標註函式，或在函式體內 `let _ = param;` 顯式丟棄。
 - **組件互動順序**：需要時用 Markdown 條列式或簡易序列圖表達。
 - 進度標記的禁令見 `CLAUDE.md`。
 
