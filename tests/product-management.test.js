@@ -50,6 +50,30 @@
  * | TC-VAR-E-07 | Cross-tenant add variant: Tenant A to Tenant B | Error – Tenant isolation | Rejects with not found | Multi-tenant security |
  * | TC-VAR-E-08 | Cross-tenant update variant: Tenant A to Tenant B | Error – Tenant isolation | Rejects with not found | Multi-tenant security |
  * | TC-VAR-E-09 | Invalid spec_attributes format (array or non-object) | Error – Malformed JSON/object | Rejects with format error | Schema guard |
+ * | TC-UNIT-N-01 | Create variant auto base unit | Equivalence – Auto base unit creation | Base unit created with ratio=1.0 and is_base_unit=true | Auto init |
+ * | TC-UNIT-N-02 | Add packaging unit '盒' (ratio: 10, sell_price: 900) | Equivalence – Multi-packaging unit addition | Packaging unit created with ratio and sell_price | Packaging unit |
+ * | TC-UNIT-N-03 | Add unit with selling_price parameter | Equivalence – Dual alias compatibility | selling_price properly mapped and stored | Alias compatibility |
+ * | TC-UNIT-N-04 | Add unit to non-sellable product (raw material) | Equivalence – Non-sellable unit | Unit created, sell_price defaults to 0 | Non-sellable |
+ * | TC-UNIT-N-05 | Update packaging unit name and sell_price | Equivalence – Unit modification | Unit attributes updated successfully | Update action |
+ * | TC-UNIT-N-06 | Update unit conversion ratio for packaging unit | Equivalence – Packaging unit ratio adjustment | Conversion ratio updated successfully | Ratio update |
+ * | TC-UNIT-N-07 | Switch base unit from existing base to another unit | Equivalence – Base unit reassignment | New base unit gets ratio=1.0 & is_base_unit=true; old base unit unseated | Base reassignment |
+ * | TC-UNIT-B-01 | Unit name with leading/trailing whitespaces | Boundary – Whitespace trimming | Automatically trimmed in store and mock | Normalization |
+ * | TC-UNIT-B-02 | sell_price = 0.0 for sellable unit | Boundary – Free sample / zero price | Allowed and stored as 0.0 | Lower bound |
+ * | TC-UNIT-B-03 | Large conversion ratio and fractional ratio | Boundary – Ratio boundary values | Handled accurately without overflow or truncation | Scale boundary |
+ * | TC-UNIT-B-04 | Large sell_price value | Boundary – Large monetary value | Handled accurately | High bound |
+ * | TC-UNIT-B-05 | Add unit as base unit when base already exists | Boundary – Add unit preempting base unit | New unit becomes base, existing base becomes non-base | Preemptive base |
+ * | TC-UNIT-B-06 | Update unit selling_price via sell_price alias | Boundary – Alias in update payload | selling_price and sell_price both synchronized | Alias in update |
+ * | TC-UNIT-E-01 | Add unit with empty unit_name | Error – Empty unit name | Rejects with validation error | Required field |
+ * | TC-UNIT-E-02 | Add unit with non-positive conversion_ratio (0) | Error – Zero conversion ratio | Rejects with ratio validation error | Ratio check |
+ * | TC-UNIT-E-03 | Add unit with negative conversion_ratio (-5) | Error – Negative conversion ratio | Rejects with ratio validation error | Ratio check |
+ * | TC-UNIT-E-04 | Add unit with negative sell_price (-100) | Error – Negative sell price | Rejects with price validation error | Price check |
+ * | TC-UNIT-E-05 | Add unit with duplicate unit_name in same variant | Error – Duplicate unit name | Rejects with duplicate unit error | Uniqueness guard |
+ * | TC-UNIT-E-06 | Add unit to nonexistent variant_id | Error – Invalid variant ID | Rejects with variant not found | Relation check |
+ * | TC-UNIT-E-07 | Update nonexistent unit_id | Error – Invalid unit ID | Rejects with unit not found | Primary key check |
+ * | TC-UNIT-E-08 | Update unit with empty unit_name | Error – Empty unit name in update | Rejects with validation error | Required field |
+ * | TC-UNIT-E-09 | Update unit to duplicate unit_name with sibling unit | Error – Duplicate unit name in update | Rejects with duplicate unit error | Uniqueness guard |
+ * | TC-UNIT-E-10 | Update base unit to have conversion_ratio != 1.0 | Error – Base unit ratio constraint | Rejects or enforces ratio 1.0 | Integrity check |
+ * | TC-UNIT-E-11 | Demote base unit when no other base unit exists | Error – Lone base unit demotion | Rejects demotion to preserve variant's base unit | Invariant guard |
  */
 
 import test from 'node:test';
@@ -70,6 +94,7 @@ const {
   addProductVariantAction,
   updateProductVariantAction,
   addProductUnitAction,
+  updateProductUnitAction,
   addSupplySourceAction,
   addBomItemAction,
   resolveCategoryFlags,
@@ -1073,6 +1098,485 @@ test('TC-VAR-E-09: Invalid spec_attributes format (array or non-object) is rejec
     },
     /規格屬性必須為 JSON 物件格式/
   );
+});
+
+// ==========================================
+// Issue #140: Product Units & Pricing Tests (TC-UNIT-*)
+// ==========================================
+
+test('TC-UNIT-N-01: Auto-generate base unit when creating product with unit_name & price', async () => {
+  // Given: Authenticated tenant user creating resale product
+  await ensureAuthenticated();
+  const prodName = `單位自動生成_${Date.now()}`;
+
+  // When: Calling createProductAction
+  const p = await createProductAction({
+    name: prodName,
+    category: '轉售商品',
+    unit_name: '罐',
+    selling_price: 65
+  });
+
+  // Then: Default variant has base unit with ratio 1.0, is_base_unit true, and both selling_price & sell_price
+  assert.equal(p.units.length, 1);
+  assert.equal(p.units[0].unit_name, '罐');
+  assert.equal(p.units[0].conversion_ratio, 1.0);
+  assert.equal(p.units[0].is_base_unit, true);
+  assert.equal(p.units[0].selling_price, 65);
+  assert.equal(p.units[0].sell_price, 65);
+});
+
+test('TC-UNIT-N-02: Auto-generate base unit when adding a new variant to existing product', async () => {
+  // Given: Product created with default variant
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `多變體單位品_${Date.now()}`,
+    category: '轉售商品',
+    unit_name: '包',
+    selling_price: 30
+  });
+
+  // When: Adding a new variant "大容量"
+  const newVar = await addProductVariantAction(p.product.id, '大容量', 'BIG-001', { 容量: '大' });
+
+  // Then: Querying product detail shows new variant automatically has a base unit
+  const detail = await getProductDetailAction(p.product.id);
+  const vUnits = detail.units.filter(u => u.variant_id === newVar.id);
+  assert.equal(vUnits.length, 1, '新變體應自動具備至少一個基礎單位');
+  assert.equal(vUnits[0].unit_name, '包');
+  assert.equal(vUnits[0].conversion_ratio, 1.0);
+  assert.equal(vUnits[0].is_base_unit, true);
+  assert.equal(vUnits[0].selling_price, 30);
+
+  // When: Updating secondary variant's unit price to 88 and adding 3rd variant
+  await updateProductUnitAction(vUnits[0].id, { selling_price: 88 });
+  const thirdVar = await addProductVariantAction(p.product.id, '特大容量', 'BIG-002', { 容量: '特大' });
+
+  // Then: 3rd variant still inherits base unit price from default variant (30)
+  const detail3 = await getProductDetailAction(p.product.id);
+  const v3Units = detail3.units.filter(u => u.variant_id === thirdVar.id);
+  assert.equal(v3Units.length, 1);
+  assert.equal(v3Units[0].selling_price, 30);
+});
+
+test('TC-UNIT-N-03: Add secondary packaging unit with ratio > 1 and distinct price', async () => {
+  // Given: Product with base unit
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `階層包裝品_${Date.now()}`,
+    category: '轉售商品',
+    unit_name: '支',
+    selling_price: 10
+  });
+  const varId = p.variants[0].id;
+
+  // When: Adding secondary packaging unit "盒" (ratio 12, price 110)
+  const unit = await addProductUnitAction(varId, '盒', 12.0, false, 110.0);
+
+  // Then: Unit is recorded properly with is_base_unit = false
+  assert.ok(unit.id);
+  assert.equal(unit.unit_name, '盒');
+  assert.equal(unit.conversion_ratio, 12.0);
+  assert.equal(unit.is_base_unit, false);
+  assert.equal(unit.selling_price, 110.0);
+  assert.equal(unit.sell_price, 110.0);
+});
+
+test('TC-UNIT-N-04: Update unit name, ratio, and sell_price successfully via updateProductUnitAction', async () => {
+  // Given: Product with packaging unit
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `單位更新測試品_${Date.now()}`,
+    category: '轉售商品',
+    unit_name: '個',
+    selling_price: 20
+  });
+  const unit = await addProductUnitAction(p.variants[0].id, '盒', 10.0, false, 190.0);
+
+  // When: Updating unit name to "大盒", ratio to 12.0, price to 220.0
+  const updated = await updateProductUnitAction(unit.id, {
+    unit_name: '大盒',
+    conversion_ratio: 12.0,
+    selling_price: 220.0,
+    productId: p.product.id
+  });
+
+  // Then: All fields are updated properly
+  assert.equal(updated.unit_name, '大盒');
+  assert.equal(updated.conversion_ratio, 12.0);
+  assert.equal(updated.selling_price, 220.0);
+  assert.equal(updated.is_base_unit, false);
+});
+
+test('TC-UNIT-N-05: Update unit to become base unit (is_base_unit: true), auto-switching previous base unit', async () => {
+  // Given: Variant with base unit "個" and secondary unit "盒"
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `基準單位切換品_${Date.now()}`,
+    category: '轉售商品',
+    unit_name: '個',
+    selling_price: 5
+  });
+  const originalBaseId = p.units[0].id;
+  const boxUnit = await addProductUnitAction(p.variants[0].id, '盒', 10.0, false, 45.0);
+
+  // When: Promoting "盒" to base unit
+  const updatedBox = await updateProductUnitAction(boxUnit.id, {
+    is_base_unit: true,
+    productId: p.product.id
+  });
+
+  // Then: "盒" becomes base unit with ratio 1.0, and original "個" is demoted to non-base unit
+  assert.equal(updatedBox.is_base_unit, true);
+  assert.equal(updatedBox.conversion_ratio, 1.0);
+
+  const detail = await getProductDetailAction(p.product.id);
+  const oldBase = detail.units.find(u => u.id === originalBaseId);
+  assert.equal(oldBase.is_base_unit, false);
+});
+
+test('TC-UNIT-N-06: Create packaging unit for non-sellable product (raw_material) without sell_price', async () => {
+  // Given: Raw material product (is_sellable = false)
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `原料包裝品_${Date.now()}`,
+    category: '原物料',
+    unit_name: '公斤'
+  });
+
+  // When: Adding packaging unit "袋" (ratio 25) without sell_price
+  const unit = await addProductUnitAction(p.variants[0].id, '袋', 25.0, false);
+
+  // Then: Unit created successfully with selling_price 0.0
+  assert.equal(unit.unit_name, '袋');
+  assert.equal(unit.conversion_ratio, 25.0);
+  assert.equal(unit.selling_price, 0.0);
+});
+
+test('TC-UNIT-N-07: Resilient field access: accept both sell_price and selling_price', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `別名傳參品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When: Creating unit using sell_price in invoke directly
+  const unit = await invoke('add_product_unit', {
+    variant_id: p.variants[0].id,
+    unit_name: '打',
+    conversion_ratio: 12.0,
+    sell_price: 108.0
+  });
+
+  // Then: Both sell_price and selling_price fields exist on returned object
+  assert.equal(unit.sell_price, 108.0);
+  assert.equal(unit.selling_price, 108.0);
+
+  // When: Updating using sell_price
+  const updated = await invoke('update_product_unit', {
+    unit_id: unit.id,
+    sell_price: 115.0
+  });
+
+  // Then: Value updated
+  assert.equal(updated.selling_price, 115.0);
+  assert.equal(updated.sell_price, 115.0);
+});
+
+test('TC-UNIT-B-01: Boundary – conversion ratio = 1.0', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `比率邊界一品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding unit with ratio exactly 1.0
+  const unit = await addProductUnitAction(p.variants[0].id, '組', 1.0, false, 50.0);
+
+  // Then: Exactly 1.0 stored
+  assert.equal(unit.conversion_ratio, 1.0);
+});
+
+test('TC-UNIT-B-02: Boundary – conversion ratio fractional value 0.001 allowed', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `微量比率品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding unit with tiny fraction
+  const unit = await addProductUnitAction(p.variants[0].id, '毫克', 0.001, false, 1.0);
+
+  // Then: Precision preserved
+  assert.equal(unit.conversion_ratio, 0.001);
+});
+
+test('TC-UNIT-B-03: Boundary – selling_price = 0.0 allowed (promotional/sample unit)', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `贈品單位測試_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding free sample unit with price 0.0
+  const unit = await addProductUnitAction(p.variants[0].id, '試用包', 1.0, false, 0.0);
+
+  // Then: Price is 0.0
+  assert.equal(unit.selling_price, 0.0);
+});
+
+test('TC-UNIT-B-04: Boundary – selling_price = 99999999.99 (large value)', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `高價單位測試_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding unit with large price
+  const unit = await addProductUnitAction(p.variants[0].id, '批', 1000.0, false, 99999999.99);
+
+  // Then: Stored without overflow
+  assert.equal(unit.selling_price, 99999999.99);
+});
+
+test('TC-UNIT-B-05: Boundary – whitespace trimming on unit_name', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `空白清理單位品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When: Adding unit with leading/trailing spaces
+  const unit = await addProductUnitAction(p.variants[0].id, '   箱   ', 10.0, false, 90.0);
+
+  // Then: Cleaned to '箱'
+  assert.equal(unit.unit_name, '箱');
+});
+
+test('TC-UNIT-B-06: Boundary – base unit conversion_ratio locked to 1.0', async () => {
+  // Given: Product with base unit
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `基準比率約束品_${Date.now()}`,
+    category: '轉售商品',
+    unit_name: '瓶',
+    selling_price: 40
+  });
+  const baseUnitId = p.units[0].id;
+
+  // When & Then: Attempting to update base unit with ratio != 1.0 throws error
+  await assert.rejects(
+    async () => {
+      await updateProductUnitAction(baseUnitId, { conversion_ratio: 5.0 });
+    },
+    /基準單位換算比例必須為 1/
+  );
+});
+
+test('TC-UNIT-E-01: Boundary – empty or whitespace unit_name rejected', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `空名稱單位品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When & Then: Empty name rejected
+  await assert.rejects(
+    async () => {
+      await addProductUnitAction(p.variants[0].id, '   ', 10.0);
+    },
+    /單位名稱不能為空/
+  );
+});
+
+test('TC-UNIT-E-02: Boundary – NULL/undefined unit_name rejected', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `無名稱單位品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When & Then: Null name rejected
+  await assert.rejects(
+    async () => {
+      await invoke('add_product_unit', {
+        variant_id: p.variants[0].id,
+        unit_name: null,
+        conversion_ratio: 5.0
+      });
+    },
+    /單位名稱不能為空/
+  );
+});
+
+test('TC-UNIT-E-03: Boundary – conversion_ratio = 0.0 rejected', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `零比例品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When & Then: Ratio 0 rejected
+  await assert.rejects(
+    async () => {
+      await addProductUnitAction(p.variants[0].id, '組', 0.0);
+    },
+    /換算比例必須大於 0/
+  );
+});
+
+test('TC-UNIT-E-04: Boundary – conversion_ratio = -1.0 (negative) rejected', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `負比例品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When & Then: Negative ratio rejected
+  await assert.rejects(
+    async () => {
+      await addProductUnitAction(p.variants[0].id, '組', -1.0);
+    },
+    /換算比例必須大於 0/
+  );
+});
+
+test('TC-UNIT-E-05: Boundary – selling_price = -0.01 / -1.0 (negative) rejected', async () => {
+  // Given: Product created
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `負價品_${Date.now()}`,
+    category: '轉售商品'
+  });
+
+  // When & Then: Negative price rejected
+  await assert.rejects(
+    async () => {
+      await addProductUnitAction(p.variants[0].id, '組', 5.0, false, -0.01);
+    },
+    /售價不能為負數/
+  );
+});
+
+test('TC-UNIT-E-06: Error – duplicate unit_name within same variant rejected', async () => {
+  // Given: Variant with unit "箱"
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `重複單位品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  await addProductUnitAction(p.variants[0].id, '箱', 10.0, false, 90.0);
+
+  // When & Then: Adding another "箱" or " 箱 " to the same variant throws duplicate error
+  await assert.rejects(
+    async () => {
+      await addProductUnitAction(p.variants[0].id, '  箱  ', 20.0, false, 180.0);
+    },
+    /單位「箱」已存在/
+  );
+});
+
+test('TC-UNIT-E-07: Error – update nonexistent unit_id rejected', async () => {
+  // Given: Authenticated user
+  await ensureAuthenticated();
+
+  // When & Then: Updating nonexistent unit throws error
+  await assert.rejects(
+    async () => {
+      await updateProductUnitAction('unit_nonexistent_9999', { unit_name: '新名' });
+    },
+    /Product unit not found/
+  );
+});
+
+test('TC-UNIT-E-08: Error – add unit to nonexistent variant_id rejected', async () => {
+  // Given: Authenticated user
+  await ensureAuthenticated();
+
+  // When & Then: Adding unit to nonexistent variant throws error
+  await assert.rejects(
+    async () => {
+      await addProductUnitAction('var_nonexistent_9999', '盒', 10.0);
+    },
+    /Product variant not found/
+  );
+});
+
+test('TC-UNIT-E-09: Error – demoting the only base unit of a variant rejected', async () => {
+  // Given: Variant with only 1 base unit
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `唯一基準約束品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const baseUnitId = p.units[0].id;
+
+  // When & Then: Demoting only base unit throws error
+  await assert.rejects(
+    async () => {
+      await updateProductUnitAction(baseUnitId, { is_base_unit: false });
+    },
+    /每個變體至少要有一個基準單位/
+  );
+});
+
+test('TC-UNIT-E-10: Error – cross-tenant add unit rejected', async () => {
+  // Given: Product & variant created in Tenant 1
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `跨租戶新增品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const varId = p.variants[0].id;
+
+  // When: Switching to Tenant 2
+  await selectTenantAction('tnt_mock_2');
+
+  // Then: Tenant 2 cannot add unit to Tenant 1 variant
+  await assert.rejects(
+    async () => {
+      await addProductUnitAction(varId, '惡意單位', 10.0);
+    },
+    /Product variant not found/
+  );
+
+  // Restore Tenant 1
+  await selectTenantAction('tnt_mock_1');
+});
+
+test('TC-UNIT-E-11: Error – cross-tenant update unit rejected', async () => {
+  // Given: Product & unit created in Tenant 1
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `跨租戶更新品_${Date.now()}`,
+    category: '轉售商品',
+    unit_name: '原單位'
+  });
+  const unitId = p.units[0].id;
+
+  // When: Switching to Tenant 2
+  await selectTenantAction('tnt_mock_2');
+
+  // Then: Tenant 2 cannot update Tenant 1 unit
+  await assert.rejects(
+    async () => {
+      await updateProductUnitAction(unitId, { unit_name: '竄改單位' });
+    },
+    /Product unit not found/
+  );
+
+  // Restore Tenant 1
+  await selectTenantAction('tnt_mock_1');
 });
 
 

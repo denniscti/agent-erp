@@ -42,6 +42,7 @@
     addProductVariantAction,
     updateProductVariantAction,
     addProductUnitAction,
+    updateProductUnitAction,
     addSupplySourceAction,
     addBomItemAction
   } from './lib/store.svelte.js';
@@ -135,7 +136,16 @@
   let newUnitName = $state('');
   let newUnitRatio = $state(1);
   let newUnitPrice = $state(0);
+  let newUnitIsBase = $state(false);
   let isAddingUnit = $state(false);
+
+  // Edit unit states
+  let editingUnitId = $state(null);
+  let editUnitName = $state('');
+  let editUnitRatio = $state(1);
+  let editUnitPrice = $state(0);
+  let editUnitIsBase = $state(false);
+  let isUpdatingUnit = $state(false);
 
   let newSupplyUnitId = $state('');
   let newSupplyVendorId = $state('');
@@ -552,6 +562,60 @@
     }
   }
 
+  function startEditUnit(unit) {
+    editingUnitId = unit.id;
+    editUnitName = unit.unit_name || '';
+    editUnitRatio = unit.conversion_ratio || 1;
+    editUnitPrice = unit.selling_price || unit.sell_price || 0;
+    editUnitIsBase = !!unit.is_base_unit;
+    productDetailError = '';
+  }
+
+  function cancelEditUnit() {
+    editingUnitId = null;
+    editUnitName = '';
+    editUnitRatio = 1;
+    editUnitPrice = 0;
+    editUnitIsBase = false;
+    productDetailError = '';
+  }
+
+  async function handleUpdateUnit(productId) {
+    if (!editingUnitId) return;
+    const name = editUnitName.trim();
+    if (!name) {
+      productDetailError = '單位名稱不能為空';
+      return;
+    }
+    const ratio = editUnitIsBase ? 1.0 : Number(editUnitRatio);
+    if (isNaN(ratio) || ratio <= 0) {
+      productDetailError = '換算比例必須大於 0';
+      return;
+    }
+    const price = Number(editUnitPrice);
+    if (isNaN(price) || price < 0) {
+      productDetailError = '售價不能為負數';
+      return;
+    }
+    isUpdatingUnit = true;
+    productDetailError = '';
+    try {
+      await updateProductUnitAction(editingUnitId, {
+        unit_name: name,
+        conversion_ratio: ratio,
+        is_base_unit: editUnitIsBase,
+        selling_price: price,
+        productId
+      });
+      cancelEditUnit();
+      expandedProductDetail = await getProductDetailAction(productId);
+    } catch (err) {
+      productDetailError = err?.message || '更新包裝單位失敗';
+    } finally {
+      isUpdatingUnit = false;
+    }
+  }
+
   async function handleAddUnit(productId) {
     if (!newUnitName.trim()) {
       productDetailError = '請輸入包裝單位名稱';
@@ -571,13 +635,14 @@
       await addProductUnitAction(
         variantId,
         newUnitName.trim(),
-        Number(newUnitRatio),
-        false,
+        newUnitIsBase ? 1.0 : Number(newUnitRatio),
+        newUnitIsBase,
         Number(newUnitPrice) || 0
       );
       newUnitName = '';
       newUnitRatio = 1;
       newUnitPrice = 0;
+      newUnitIsBase = false;
       expandedProductDetail = await getProductDetailAction(productId);
     } catch (err) {
       productDetailError = err?.message || '新增包裝單位失敗';
@@ -2192,25 +2257,72 @@
                               <div style="display: flex; flex-direction: column; gap: 8px;">
                                 <div style="display: flex; flex-direction: column; gap: 6px;">
                                   {#each (expandedProductDetail.units || []) as u (u.id)}
-                                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
-                                      <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span style="font-weight: 600;">{u.unit_name}</span>
-                                        {#if (expandedProductDetail.variants || []).length > 1}
-                                          {@const matchedVar = (expandedProductDetail.variants || []).find(v => v.id === u.variant_id)}
-                                          {#if matchedVar}
-                                            <span class="badge" style="font-size: 0.65rem; background: rgba(255,255,255,0.06);">{matchedVar.name}</span>
+                                    {#if editingUnitId === u.id}
+                                      <form onsubmit={(e) => { e.preventDefault(); handleUpdateUnit(product.id); }} style="display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 10px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; align-items: flex-end;">
+                                        <div style="width: 100px;">
+                                          <label for="edit-unit-name-{u.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">單位名稱</label>
+                                          <input id="edit-unit-name-{u.id}" type="text" class="form-input" bind:value={editUnitName} style="width: 100%; padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                        </div>
+                                        <div style="width: 80px;">
+                                          <label for="edit-unit-ratio-{u.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">換算比例</label>
+                                          <input id="edit-unit-ratio-{u.id}" type="number" min="0.0001" step="any" disabled={editUnitIsBase} class="form-input" bind:value={editUnitRatio} style="width: 100%; padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                        </div>
+                                        {#if product.is_sellable}
+                                          <div style="width: 80px;">
+                                            <label for="edit-unit-price-{u.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">售價</label>
+                                            <input id="edit-unit-price-{u.id}" type="number" min="0" step="any" class="form-input" bind:value={editUnitPrice} style="width: 100%; padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                          </div>
+                                        {/if}
+                                        <label style="display: flex; align-items: center; gap: 4px; font-size: 0.75rem; margin-bottom: 6px; cursor: pointer;">
+                                          <input type="checkbox" bind:checked={editUnitIsBase} onchange={(e) => { if (e.target.checked) editUnitRatio = 1.0; }} />
+                                          基準單位 (1:1)
+                                        </label>
+                                        <div style="display: flex; gap: 4px; margin-left: auto;">
+                                          <button type="submit" class="btn btn-primary btn-xs" disabled={isUpdatingUnit} style="padding: 4px 10px; font-size: 0.75rem;">
+                                            {isUpdatingUnit ? '儲存中...' : '儲存'}
+                                          </button>
+                                          <button type="button" class="btn btn-outline btn-xs" onclick={cancelEditUnit} style="padding: 4px 8px; font-size: 0.75rem;">
+                                            取消
+                                          </button>
+                                        </div>
+                                      </form>
+                                    {:else}
+                                      <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
+                                        <div style="display: flex; align-items: center; gap: 8px;">
+                                          <span style="font-weight: 600;">{u.unit_name}</span>
+                                          {#if (expandedProductDetail.variants || []).length > 1}
+                                            {@const matchedVar = (expandedProductDetail.variants || []).find(v => v.id === u.variant_id)}
+                                            {#if matchedVar}
+                                              <span class="badge" style="font-size: 0.65rem; background: rgba(255,255,255,0.06);">{matchedVar.name}</span>
+                                            {/if}
                                           {/if}
-                                        {/if}
-                                        {#if u.is_base_unit}
-                                          <span class="badge badge-cyan" style="font-size: 0.65rem;">基準單位 (1:1)</span>
-                                        {:else}
-                                          <span style="color: var(--text-muted); font-size: 0.72rem;">比例: {u.conversion_ratio}</span>
-                                        {/if}
+                                          {#if u.is_base_unit}
+                                            <span class="badge badge-cyan" style="font-size: 0.65rem;">基準單位 (1:1)</span>
+                                          {:else}
+                                            <span style="color: var(--text-muted); font-size: 0.72rem;">比例: {u.conversion_ratio}</span>
+                                          {/if}
+                                        </div>
+                                        <div style="display: flex; align-items: center; gap: 10px;">
+                                          {#if product.is_sellable}
+                                            <div style="font-weight: 600; color: #10b981;">
+                                              ${u.selling_price}
+                                            </div>
+                                          {:else}
+                                            <div style="font-size: 0.72rem; color: var(--text-muted);">
+                                              不可銷售
+                                            </div>
+                                          {/if}
+                                          <button
+                                            type="button"
+                                            class="btn btn-outline btn-xs"
+                                            style="padding: 1px 7px; font-size: 0.68rem;"
+                                            onclick={() => startEditUnit(u)}
+                                          >
+                                            ✏️ 編輯
+                                          </button>
+                                        </div>
                                       </div>
-                                      <div style="font-weight: 600; color: #10b981;">
-                                        ${u.selling_price}
-                                      </div>
-                                    </div>
+                                    {/if}
                                   {/each}
                                 </div>
                                 <form onsubmit={(e) => { e.preventDefault(); handleAddUnit(product.id); }} style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; align-items: flex-end;">
@@ -2230,12 +2342,18 @@
                                   </div>
                                   <div style="width: 90px;">
                                     <label for="new-unit-ratio-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">換算比率</label>
-                                    <input id="new-unit-ratio-{product.id}" type="number" min="0.0001" step="any" class="form-input" placeholder="10" bind:value={newUnitRatio} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                    <input id="new-unit-ratio-{product.id}" type="number" min="0.0001" step="any" disabled={newUnitIsBase} class="form-input" placeholder="10" bind:value={newUnitRatio} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
                                   </div>
-                                  <div style="width: 90px;">
-                                    <label for="new-unit-price-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">售價</label>
-                                    <input id="new-unit-price-{product.id}" type="number" min="0" step="any" class="form-input" placeholder="0" bind:value={newUnitPrice} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
-                                  </div>
+                                  {#if product.is_sellable}
+                                    <div style="width: 90px;">
+                                      <label for="new-unit-price-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">售價</label>
+                                      <input id="new-unit-price-{product.id}" type="number" min="0" step="any" class="form-input" placeholder="0" bind:value={newUnitPrice} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                    </div>
+                                  {/if}
+                                  <label style="display: flex; align-items: center; gap: 4px; font-size: 0.72rem; color: var(--text-muted); cursor: pointer; margin-bottom: 6px;">
+                                    <input type="checkbox" bind:checked={newUnitIsBase} onchange={(e) => { if (e.target.checked) newUnitRatio = 1.0; }} />
+                                    設為基準單位
+                                  </label>
                                   <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingUnit} style="height: 28px; white-space: nowrap; padding: 0 12px;">
                                     + 新增包裝單位
                                   </button>

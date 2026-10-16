@@ -41,6 +41,7 @@ pub struct ProductUnit {
     pub unit_name: String,
     pub conversion_ratio: f64,
     pub is_base_unit: bool,
+    #[serde(alias = "sell_price")]
     pub selling_price: f64,
     pub created_at: i64,
 }
@@ -655,6 +656,39 @@ pub fn add_product_variant_impl(
     )
     .map_err(|e| format!("Failed to insert variant: {}", e))?;
 
+    // Auto-create base unit for the new variant (satisfying "每個變體至少要有一個基礎單位")
+    let mut default_unit_stmt = conn
+        .prepare(
+            "SELECT u.unit_name, u.selling_price
+             FROM product_units u
+             JOIN product_variants v ON u.variant_id = v.id
+             WHERE v.product_id = ?1 AND u.is_base_unit = 1
+             ORDER BY v.is_default DESC
+             LIMIT 1",
+        )
+        .map_err(|e| format!("Failed to prepare default unit lookup: {}", e))?;
+    let default_unit_row: Result<(String, f64), _> = default_unit_stmt
+        .query_row(params![trimmed_prod_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        });
+
+    let (base_unit_name, base_selling_price) = match default_unit_row {
+        Ok((u_name, u_price)) => (u_name, u_price),
+        Err(_) => ("個".to_string(), 0.0),
+    };
+
+    let base_unit_id = format!(
+        "unit_{}_{}",
+        now,
+        ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    conn.execute(
+        "INSERT INTO product_units (id, variant_id, unit_name, conversion_ratio, is_base_unit, selling_price, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![base_unit_id, var_id, base_unit_name, 1.0, 1, base_selling_price, now],
+    )
+    .map_err(|e| format!("Failed to insert base unit for variant: {}", e))?;
+
     Ok(ProductVariant {
         id: var_id,
         product_id: trimmed_prod_id.to_string(),
@@ -829,6 +863,17 @@ pub fn add_product_unit_impl(
         Err(_) => return Err("Product variant not found".to_string()),
     };
 
+    // Check if duplicate unit_name exists in this variant
+    let mut check_dup_unit = conn
+        .prepare("SELECT 1 FROM product_units WHERE variant_id = ?1 AND LOWER(TRIM(unit_name)) = LOWER(?2) LIMIT 1")
+        .map_err(|e| format!("Failed to prepare unit duplicate check: {}", e))?;
+    let has_dup = check_dup_unit
+        .query_row(params![actual_var_id, trimmed_unit_name], |_| Ok(()))
+        .is_ok();
+    if has_dup {
+        return Err(format!("單位「{}」已存在", trimmed_unit_name));
+    }
+
     let now = current_timestamp();
     let unit_id = format!(
         "unit_{}_{}",
@@ -836,6 +881,15 @@ pub fn add_product_unit_impl(
         ID_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     let is_base = is_base_unit.unwrap_or(false);
+    let effective_ratio = if is_base { 1.0 } else { conversion_ratio };
+
+    if is_base {
+        conn.execute(
+            "UPDATE product_units SET is_base_unit = 0 WHERE variant_id = ?1",
+            params![actual_var_id],
+        )
+        .map_err(|e| format!("Failed to unset other base units: {}", e))?;
+    }
 
     conn.execute(
         "INSERT INTO product_units (id, variant_id, unit_name, conversion_ratio, is_base_unit, selling_price, created_at)
@@ -844,7 +898,7 @@ pub fn add_product_unit_impl(
             unit_id,
             actual_var_id,
             trimmed_unit_name,
-            conversion_ratio,
+            effective_ratio,
             if is_base { 1 } else { 0 },
             selling_price,
             now
@@ -856,10 +910,156 @@ pub fn add_product_unit_impl(
         id: unit_id,
         variant_id: actual_var_id,
         unit_name: trimmed_unit_name.to_string(),
-        conversion_ratio,
+        conversion_ratio: effective_ratio,
         is_base_unit: is_base,
         selling_price,
         created_at: now,
+    })
+}
+
+// Usecase: update_product_unit
+pub fn update_product_unit_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    unit_id: &str,
+    unit_name: Option<String>,
+    conversion_ratio: Option<f64>,
+    is_base_unit: Option<bool>,
+    selling_price: Option<f64>,
+) -> Result<ProductUnit, String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    let trimmed_unit_id = unit_id.trim();
+
+    if trimmed_tenant_id.is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+    if trimmed_unit_id.is_empty() {
+        return Err("Product unit not found".to_string());
+    }
+
+    // Verify unit ownership and fetch current values
+    let mut query_stmt = conn
+        .prepare(
+            "SELECT u.id, u.variant_id, u.unit_name, u.conversion_ratio, u.is_base_unit, u.selling_price, u.created_at, p.id
+             FROM product_units u
+             JOIN product_variants v ON u.variant_id = v.id
+             JOIN products p ON v.product_id = p.id
+             WHERE u.id = ?1 AND p.tenant_id = ?2",
+        )
+        .map_err(|e| format!("Failed to prepare unit lookup: {}", e))?;
+
+    let current = query_stmt.query_row(params![trimmed_unit_id, trimmed_tenant_id], |row| {
+        let is_base_int: i64 = row.get(4)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, f64>(3)?,
+            is_base_int == 1,
+            row.get::<_, f64>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    });
+
+    let (cur_id, var_id, cur_name, cur_ratio, cur_is_base, cur_price, cur_created_at) =
+        match current {
+            Ok(c) => c,
+            Err(_) => return Err("Product unit not found".to_string()),
+        };
+
+    // 1. Process unit_name
+    let effective_name = if let Some(n) = unit_name {
+        let trimmed = n.trim().to_string();
+        if trimmed.is_empty() {
+            return Err("單位名稱不能為空".to_string());
+        }
+        // Duplicate check in same variant excluding self
+        let mut dup_stmt = conn
+            .prepare("SELECT 1 FROM product_units WHERE variant_id = ?1 AND LOWER(TRIM(unit_name)) = LOWER(?2) AND id != ?3 LIMIT 1")
+            .map_err(|e| format!("Failed to prepare duplicate check: {}", e))?;
+        if dup_stmt
+            .query_row(params![var_id, trimmed, cur_id], |_| Ok(()))
+            .is_ok()
+        {
+            return Err(format!("單位「{}」已存在", trimmed));
+        }
+        trimmed
+    } else {
+        cur_name
+    };
+
+    // 2. Process is_base_unit & conversion_ratio
+    let target_is_base = is_base_unit.unwrap_or(cur_is_base);
+
+    // If trying to demote the only base unit
+    if cur_is_base && !target_is_base {
+        let mut count_base = conn
+            .prepare("SELECT COUNT(*) FROM product_units WHERE variant_id = ?1 AND is_base_unit = 1 AND id != ?2")
+            .map_err(|e| format!("Failed to count other base units: {}", e))?;
+        let other_base_count: i64 = count_base
+            .query_row(params![var_id, cur_id], |row| row.get(0))
+            .unwrap_or(0);
+        if other_base_count == 0 {
+            return Err("每個變體至少要有一個基準單位".to_string());
+        }
+    }
+
+    let effective_ratio = if target_is_base {
+        // Base unit ratio is always locked to 1.0
+        if let Some(r) = conversion_ratio {
+            if (r - 1.0).abs() > f64::EPSILON {
+                return Err("基準單位換算比例必須為 1".to_string());
+            }
+        }
+        1.0
+    } else if let Some(r) = conversion_ratio {
+        if r <= 0.0 {
+            return Err("換算比例必須大於 0".to_string());
+        }
+        r
+    } else {
+        cur_ratio
+    };
+
+    // 3. Process selling_price
+    let effective_price = if let Some(p) = selling_price {
+        if p < 0.0 {
+            return Err("售價不能為負數".to_string());
+        }
+        p
+    } else {
+        cur_price
+    };
+
+    // If target is now base unit, unset other units in this variant
+    if target_is_base && !cur_is_base {
+        conn.execute(
+            "UPDATE product_units SET is_base_unit = 0 WHERE variant_id = ?1 AND id != ?2",
+            params![var_id, cur_id],
+        )
+        .map_err(|e| format!("Failed to unset other base units: {}", e))?;
+    }
+
+    conn.execute(
+        "UPDATE product_units SET unit_name = ?1, conversion_ratio = ?2, is_base_unit = ?3, selling_price = ?4 WHERE id = ?5",
+        params![
+            effective_name,
+            effective_ratio,
+            if target_is_base { 1 } else { 0 },
+            effective_price,
+            cur_id
+        ],
+    )
+    .map_err(|e| format!("Failed to update unit: {}", e))?;
+
+    Ok(ProductUnit {
+        id: cur_id,
+        variant_id: var_id,
+        unit_name: effective_name,
+        conversion_ratio: effective_ratio,
+        is_base_unit: target_is_base,
+        selling_price: effective_price,
+        created_at: cur_created_at,
     })
 }
 
@@ -1158,6 +1358,31 @@ pub async fn add_product_unit<R: tauri::Runtime>(
         &conn,
         &active_tid,
         &variant_id,
+        unit_name,
+        conversion_ratio,
+        is_base_unit,
+        selling_price,
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_product_unit<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    unit_id: String,
+    unit_name: Option<String>,
+    conversion_ratio: Option<f64>,
+    is_base_unit: Option<bool>,
+    selling_price: Option<f64>,
+) -> Result<ProductUnit, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn =
+        rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    update_product_unit_impl(
+        &conn,
+        &active_tid,
+        &unit_id,
         unit_name,
         conversion_ratio,
         is_base_unit,
@@ -2505,5 +2730,363 @@ pub mod tests {
 
         // Then: Operation rejected with not found
         assert_eq!(err.unwrap_err(), "Variant not found");
+    }
+
+    #[test]
+    fn test_tc_unit_pos_01_auto_generate_base_unit_on_variant_creation() {
+        // Given: Product created with default variant and base unit "顆"
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "多包裝處理器".into(),
+            "resale".into(),
+            None,
+            Some("顆".into()),
+            Some(200.0),
+        )
+        .unwrap();
+
+        // When: Adding a new variant "512GB"
+        let v = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "512GB".into(),
+            Some("CPU-512G".into()),
+            Some(serde_json::json!({"容量": "512GB"})),
+        )
+        .unwrap();
+
+        // Then: Product detail shows new variant has its own base unit (is_base_unit = true, ratio = 1.0)
+        let detail = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
+        assert_eq!(detail.variants.len(), 2);
+        let v_units: Vec<_> = detail
+            .units
+            .into_iter()
+            .filter(|u| u.variant_id == v.id)
+            .collect();
+        assert_eq!(v_units.len(), 1);
+        assert_eq!(v_units[0].unit_name, "顆");
+        assert_eq!(v_units[0].conversion_ratio, 1.0);
+        assert!(v_units[0].is_base_unit);
+        assert_eq!(v_units[0].selling_price, 200.0);
+
+        // When: Updating secondary variant's unit price to 999.0 and adding a 3rd variant
+        let _ = update_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            &v_units[0].id,
+            None,
+            None,
+            None,
+            Some(999.0),
+        )
+        .unwrap();
+
+        let v3 = add_product_variant_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.product.id,
+            "1TB".into(),
+            Some("CPU-1TB".into()),
+            Some(serde_json::json!({"容量": "1TB"})),
+        )
+        .unwrap();
+
+        // Then: 3rd variant still inherits base unit price from default variant (200.0) via ORDER BY v.is_default DESC
+        let detail3 = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
+        let v3_units: Vec<_> = detail3
+            .units
+            .into_iter()
+            .filter(|u| u.variant_id == v3.id)
+            .collect();
+        assert_eq!(v3_units.len(), 1);
+        assert_eq!(v3_units[0].selling_price, 200.0);
+    }
+
+    #[test]
+    fn test_tc_unit_pos_02_update_product_unit_success() {
+        // Given: Product with base unit
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "包裝測試品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(10.0),
+        )
+        .unwrap();
+        let var_id = &p.variants[0].id;
+        let unit = add_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            var_id,
+            "盒".into(),
+            10.0,
+            Some(false),
+            90.0,
+        )
+        .unwrap();
+
+        // When: Updating packaging unit to "大盒", ratio 12, price 100
+        let updated = update_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            &unit.id,
+            Some("大盒".into()),
+            Some(12.0),
+            Some(false),
+            Some(100.0),
+        )
+        .unwrap();
+
+        // Then: Values updated correctly
+        assert_eq!(updated.unit_name, "大盒");
+        assert_eq!(updated.conversion_ratio, 12.0);
+        assert_eq!(updated.selling_price, 100.0);
+        assert!(!updated.is_base_unit);
+    }
+
+    #[test]
+    fn test_tc_unit_pos_03_switch_base_unit_success() {
+        // Given: Variant with base unit "個" and secondary unit "盒"
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "基準切換品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(5.0),
+        )
+        .unwrap();
+        let var_id = &p.variants[0].id;
+        let original_base_id = &p.units[0].id;
+        let box_unit = add_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            var_id,
+            "盒".into(),
+            10.0,
+            Some(false),
+            45.0,
+        )
+        .unwrap();
+
+        // When: Setting "盒" to base unit
+        let updated_box = update_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            &box_unit.id,
+            None,
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+
+        // Then: "盒" becomes base unit (ratio locked to 1.0), and original "個" is no longer base unit
+        assert!(updated_box.is_base_unit);
+        assert_eq!(updated_box.conversion_ratio, 1.0);
+
+        let detail = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
+        let old_base = detail
+            .units
+            .iter()
+            .find(|u| u.id == *original_base_id)
+            .unwrap();
+        assert!(!old_base.is_base_unit);
+    }
+
+    #[test]
+    fn test_tc_unit_neg_01_update_unit_empty_name_error() {
+        // Given: Product with base unit
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "空名測試品".into(),
+            "resale".into(),
+            None,
+            Some("件".into()),
+            Some(50.0),
+        )
+        .unwrap();
+        let unit_id = &p.units[0].id;
+
+        // When: Updating unit name to whitespace
+        let err = update_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            unit_id,
+            Some("   ".into()),
+            None,
+            None,
+            None,
+        );
+
+        // Then: Empty name error
+        assert_eq!(err.unwrap_err(), "單位名稱不能為空");
+    }
+
+    #[test]
+    fn test_tc_unit_neg_02_update_unit_duplicate_name_error() {
+        // Given: Variant with units "件" and "箱"
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "同名測試品".into(),
+            "resale".into(),
+            None,
+            Some("件".into()),
+            Some(50.0),
+        )
+        .unwrap();
+        let var_id = &p.variants[0].id;
+        let box_unit = add_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            var_id,
+            "箱".into(),
+            20.0,
+            Some(false),
+            950.0,
+        )
+        .unwrap();
+
+        // When: Renaming "箱" to "件"
+        let err = update_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            &box_unit.id,
+            Some("  件  ".into()),
+            None,
+            None,
+            None,
+        );
+
+        // Then: Duplicate name error
+        assert_eq!(err.unwrap_err(), "單位「件」已存在");
+    }
+
+    #[test]
+    fn test_tc_unit_neg_03_update_unit_invalid_ratio_error() {
+        // Given: Secondary unit
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "比率測試品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(10.0),
+        )
+        .unwrap();
+        let var_id = &p.variants[0].id;
+        let unit = add_product_unit_impl(
+            &conn,
+            TEST_TENANT_A,
+            var_id,
+            "盒".into(),
+            10.0,
+            Some(false),
+            90.0,
+        )
+        .unwrap();
+
+        // When: Setting ratio to 0 or negative
+        let err_zero =
+            update_product_unit_impl(&conn, TEST_TENANT_A, &unit.id, None, Some(0.0), None, None);
+        let err_neg =
+            update_product_unit_impl(&conn, TEST_TENANT_A, &unit.id, None, Some(-5.0), None, None);
+
+        // Then: Invalid ratio errors
+        assert_eq!(err_zero.unwrap_err(), "換算比例必須大於 0");
+        assert_eq!(err_neg.unwrap_err(), "換算比例必須大於 0");
+    }
+
+    #[test]
+    fn test_tc_unit_neg_04_update_unit_negative_price_error() {
+        // Given: Unit exists
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "負價測試品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(10.0),
+        )
+        .unwrap();
+        let unit_id = &p.units[0].id;
+
+        // When: Setting price to negative
+        let err =
+            update_product_unit_impl(&conn, TEST_TENANT_A, unit_id, None, None, None, Some(-1.0));
+
+        // Then: Negative price error
+        assert_eq!(err.unwrap_err(), "售價不能為負數");
+    }
+
+    #[test]
+    fn test_tc_unit_neg_05_demote_only_base_unit_error() {
+        // Given: Variant with only 1 base unit
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "唯基測試品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(10.0),
+        )
+        .unwrap();
+        let unit_id = &p.units[0].id;
+
+        // When: Trying to unset is_base_unit without another base unit existing
+        let err =
+            update_product_unit_impl(&conn, TEST_TENANT_A, unit_id, None, None, Some(false), None);
+
+        // Then: Demotion rejected
+        assert_eq!(err.unwrap_err(), "每個變體至少要有一個基準單位");
+    }
+
+    #[test]
+    fn test_tc_unit_iso_01_cross_tenant_unit_update_blocked() {
+        // Given: Tenant A owns product unit
+        let conn = setup_test_db();
+        let p_a = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "A專屬單位品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(10.0),
+        )
+        .unwrap();
+        let unit_id_a = &p_a.units[0].id;
+
+        // When: Tenant B tries to update Tenant A's unit
+        let err = update_product_unit_impl(
+            &conn,
+            TEST_TENANT_B,
+            unit_id_a,
+            Some("惡意改名".into()),
+            None,
+            None,
+            None,
+        );
+
+        // Then: Unit not found error
+        assert_eq!(err.unwrap_err(), "Product unit not found");
     }
 }

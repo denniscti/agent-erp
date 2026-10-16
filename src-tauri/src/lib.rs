@@ -736,6 +736,7 @@ pub fn run() {
             products::add_product_variant,
             products::update_product_variant,
             products::add_product_unit,
+            products::update_product_unit,
             products::add_supply_source,
             products::add_bom_item,
             llm::detect_department_intent,

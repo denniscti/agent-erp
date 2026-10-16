@@ -1295,7 +1295,9 @@ export async function addProductUnitAction(variantId, unitName, conversionRatio,
       is_base_unit: isBaseUnit,
       isBaseUnit,
       selling_price: sellingPrice,
-      sellingPrice
+      sellingPrice,
+      sell_price: sellingPrice,
+      sellPrice: sellingPrice
     });
     if (appState.currentProductDetail) {
       await getProductDetailAction(appState.currentProductDetail.product.id);
@@ -1304,6 +1306,84 @@ export async function addProductUnitAction(variantId, unitName, conversionRatio,
     return unit;
   } catch (err) {
     console.error("Failed to add product unit:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update an existing product sales unit
+ * @param {string} unitId
+ * @param {object} updates
+ * @param {string} [updates.unit_name]
+ * @param {string} [updates.unitName]
+ * @param {number} [updates.conversion_ratio]
+ * @param {number} [updates.conversionRatio]
+ * @param {boolean} [updates.is_base_unit]
+ * @param {boolean} [updates.isBaseUnit]
+ * @param {number} [updates.selling_price]
+ * @param {number} [updates.sellingPrice]
+ * @param {number} [updates.sell_price]
+ * @param {number} [updates.sellPrice]
+ * @param {string} [updates.productId] Optional product ID to reload currentProductDetail
+ * @returns {Promise<any>}
+ */
+export async function updateProductUnitAction(unitId, {
+  unit_name,
+  unitName,
+  conversion_ratio,
+  conversionRatio,
+  is_base_unit,
+  isBaseUnit,
+  selling_price,
+  sellingPrice,
+  sell_price,
+  sellPrice,
+  productId
+} = {}) {
+  const uId = (unitId || '').trim();
+  if (!uId) throw new Error('單位 ID 為必填項目');
+
+  const payload = {
+    unit_id: uId,
+    unitId: uId
+  };
+
+  const name = unit_name !== undefined ? unit_name : unitName;
+  if (name !== undefined) {
+    payload.unit_name = name;
+    payload.unitName = name;
+  }
+
+  const ratio = conversion_ratio !== undefined ? conversion_ratio : conversionRatio;
+  if (ratio !== undefined) {
+    payload.conversion_ratio = Number(ratio);
+    payload.conversionRatio = Number(ratio);
+  }
+
+  const isBase = is_base_unit !== undefined ? is_base_unit : isBaseUnit;
+  if (isBase !== undefined) {
+    payload.is_base_unit = Boolean(isBase);
+    payload.isBaseUnit = Boolean(isBase);
+  }
+
+  const price = selling_price !== undefined ? selling_price : (sellingPrice !== undefined ? sellingPrice : (sell_price !== undefined ? sell_price : sellPrice));
+  if (price !== undefined) {
+    payload.selling_price = Number(price);
+    payload.sellingPrice = Number(price);
+    payload.sell_price = Number(price);
+    payload.sellPrice = Number(price);
+  }
+
+  try {
+    const updated = await invoke('update_product_unit', payload);
+    const prodId = productId || (appState.currentProductDetail?.product?.id);
+    if (prodId) {
+      await getProductDetailAction(prodId);
+    }
+    showToast(`已成功更新包裝單位「${updated.unit_name}」！`);
+    return updated;
+  } catch (err) {
+    console.error("Failed to update product unit:", err);
     throw err;
   }
 }

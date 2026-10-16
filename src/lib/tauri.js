@@ -319,15 +319,21 @@ if (!mockProductVariants || !Array.isArray(mockProductVariants)) {
 }
 
 const defaultMockProductUnits = [
-  { id: "unit_mock_1", variant_id: "var_mock_1", unit_name: "顆", conversion_ratio: 1.0, is_base_unit: true, selling_price: 120.0, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
-  { id: "unit_mock_2", variant_id: "var_mock_2", unit_name: "台", conversion_ratio: 1.0, is_base_unit: true, selling_price: 150000.0, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
-  { id: "unit_mock_3", variant_id: "var_mock_3", unit_name: "片", conversion_ratio: 1.0, is_base_unit: true, selling_price: 15.0, created_at: Math.floor(Date.now() / 1000) - 86400 }
+  { id: "unit_mock_1", variant_id: "var_mock_1", unit_name: "顆", conversion_ratio: 1.0, is_base_unit: true, selling_price: 120.0, sell_price: 120.0, created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+  { id: "unit_mock_2", variant_id: "var_mock_2", unit_name: "台", conversion_ratio: 1.0, is_base_unit: true, selling_price: 150000.0, sell_price: 150000.0, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+  { id: "unit_mock_3", variant_id: "var_mock_3", unit_name: "片", conversion_ratio: 1.0, is_base_unit: true, selling_price: 15.0, sell_price: 15.0, created_at: Math.floor(Date.now() / 1000) - 86400 }
 ];
 
 let mockProductUnits = loadStorage('agent_erp_mock_product_units', defaultMockProductUnits);
 if (!mockProductUnits || !Array.isArray(mockProductUnits)) {
   mockProductUnits = defaultMockProductUnits;
   saveStorage('agent_erp_mock_product_units', mockProductUnits);
+} else {
+  mockProductUnits = mockProductUnits.map(u => ({
+    ...u,
+    sell_price: u.sell_price !== undefined ? u.sell_price : u.selling_price,
+    selling_price: u.selling_price !== undefined ? u.selling_price : (u.sell_price !== undefined ? u.sell_price : 0.0)
+  }));
 }
 
 let mockProductSupplySources = loadStorage('agent_erp_mock_product_supply_sources', []);
@@ -1234,6 +1240,7 @@ export async function invoke(cmd, args = {}) {
         conversion_ratio: 1.0,
         is_base_unit: true,
         selling_price: price,
+        sell_price: price,
         created_at: now
       };
       mockProductUnits.push(baseUnit);
@@ -1362,6 +1369,26 @@ export async function invoke(cmd, args = {}) {
       };
       mockProductVariants.push(newVariant);
       saveStorage('agent_erp_mock_product_variants', mockProductVariants);
+
+      // Auto-create base unit for new variant (satisfying "每個變體至少要有一個基礎單位")
+      const defaultVar = mockProductVariants.find(v => v.product_id === product.id && v.is_default);
+      const defaultUnit = defaultVar ? mockProductUnits.find(u => u.variant_id === defaultVar.id && u.is_base_unit) : null;
+      const baseUnitName = defaultUnit ? defaultUnit.unit_name : '個';
+      const baseUnitPrice = defaultUnit ? (defaultUnit.selling_price || defaultUnit.sell_price || 0.0) : 0.0;
+
+      const newBaseUnit = {
+        id: nextMockUid('unit'),
+        variant_id: newVariant.id,
+        unit_name: baseUnitName,
+        conversion_ratio: 1.0,
+        is_base_unit: true,
+        selling_price: baseUnitPrice,
+        sell_price: baseUnitPrice,
+        created_at: now
+      };
+      mockProductUnits.push(newBaseUnit);
+      saveStorage('agent_erp_mock_product_units', mockProductUnits);
+
       return newVariant;
     }
 
@@ -1437,7 +1464,7 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'add_product_unit': {
-      const { variant_id, variantId, unit_name, unitName, conversion_ratio, conversionRatio, is_base_unit, isBaseUnit, selling_price, sellingPrice } = args || {};
+      const { variant_id, variantId, unit_name, unitName, conversion_ratio, conversionRatio, is_base_unit, isBaseUnit, selling_price, sellingPrice, sell_price, sellPrice } = args || {};
       const targetVarId = variant_id || variantId;
       const targetTenantId = resolveMockActiveTenantId();
       const trimmedUnit = (unit_name || unitName || '').trim();
@@ -1457,17 +1484,35 @@ export async function invoke(cmd, args = {}) {
       if (!trimmedUnit) {
         throw new Error('單位名稱不能為空');
       }
-      const ratio = Number(conversion_ratio !== undefined ? conversion_ratio : conversionRatio);
+
+      // Duplicate unit_name check in same variant
+      const exists = mockProductUnits.some(u => u.variant_id === variant.id && u.unit_name.trim().toLowerCase() === trimmedUnit.toLowerCase());
+      if (exists) {
+        throw new Error(`單位「${trimmedUnit}」已存在`);
+      }
+
+      const isBase = is_base_unit !== undefined ? !!is_base_unit : !!isBaseUnit;
+      const rawRatio = conversion_ratio !== undefined ? conversion_ratio : conversionRatio;
+      const ratio = isBase ? 1.0 : Number(rawRatio);
       if (isNaN(ratio) || ratio <= 0) {
         throw new Error('換算比例必須大於 0');
       }
-      const price = Number(selling_price !== undefined ? selling_price : sellingPrice);
+
+      const rawPrice = selling_price !== undefined ? selling_price : (sellingPrice !== undefined ? sellingPrice : (sell_price !== undefined ? sell_price : sellPrice));
+      const price = rawPrice !== undefined ? Number(rawPrice) : 0.0;
       if (isNaN(price) || price < 0) {
         throw new Error('售價不能為負數');
       }
 
+      if (isBase) {
+        mockProductUnits.forEach(u => {
+          if (u.variant_id === variant.id) {
+            u.is_base_unit = false;
+          }
+        });
+      }
+
       const now = Math.floor(Date.now() / 1000);
-      const isBase = is_base_unit !== undefined ? !!is_base_unit : !!isBaseUnit;
       const newUnit = {
         id: nextMockUid('unit'),
         variant_id: variant.id,
@@ -1475,11 +1520,107 @@ export async function invoke(cmd, args = {}) {
         conversion_ratio: ratio,
         is_base_unit: isBase,
         selling_price: price,
+        sell_price: price,
         created_at: now
       };
       mockProductUnits.push(newUnit);
       saveStorage('agent_erp_mock_product_units', mockProductUnits);
       return newUnit;
+    }
+
+    case 'update_product_unit': {
+      const { unit_id, unitId, id, unit_name, unitName, conversion_ratio, conversionRatio, is_base_unit, isBaseUnit, selling_price, sellingPrice, sell_price, sellPrice } = args || {};
+      const targetUnitId = unit_id || unitId || id;
+      const targetTenantId = resolveMockActiveTenantId();
+
+      if (!targetUnitId) {
+        throw new Error('Product unit not found');
+      }
+
+      const unit = mockProductUnits.find(u => u.id === targetUnitId);
+      if (!unit) {
+        throw new Error('Product unit not found');
+      }
+
+      const variant = mockProductVariants.find(v => v.id === unit.variant_id);
+      if (!variant) {
+        throw new Error('Product unit not found');
+      }
+
+      const product = mockProducts.find(p => p.id === variant.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!product) {
+        throw new Error('Product unit not found');
+      }
+
+      // 1. Name validation & duplicate check
+      const rawName = unit_name !== undefined ? unit_name : unitName;
+      let effectiveName = unit.unit_name;
+      if (rawName !== undefined) {
+        const trimmed = String(rawName).trim();
+        if (!trimmed) {
+          throw new Error('單位名稱不能為空');
+        }
+        const duplicate = mockProductUnits.some(u => u.variant_id === variant.id && u.id !== unit.id && u.unit_name.trim().toLowerCase() === trimmed.toLowerCase());
+        if (duplicate) {
+          throw new Error(`單位「${trimmed}」已存在`);
+        }
+        effectiveName = trimmed;
+      }
+
+      // 2. Base unit and ratio
+      const rawIsBase = is_base_unit !== undefined ? is_base_unit : isBaseUnit;
+      const targetIsBase = rawIsBase !== undefined ? !!rawIsBase : unit.is_base_unit;
+
+      if (unit.is_base_unit && !targetIsBase) {
+        const otherBase = mockProductUnits.some(u => u.variant_id === variant.id && u.id !== unit.id && u.is_base_unit);
+        if (!otherBase) {
+          throw new Error('每個變體至少要有一個基準單位');
+        }
+      }
+
+      const rawRatio = conversion_ratio !== undefined ? conversion_ratio : conversionRatio;
+      let effectiveRatio = unit.conversion_ratio;
+      if (targetIsBase) {
+        if (rawRatio !== undefined && Number(rawRatio) !== 1.0) {
+          throw new Error('基準單位換算比例必須為 1');
+        }
+        effectiveRatio = 1.0;
+      } else if (rawRatio !== undefined) {
+        const r = Number(rawRatio);
+        if (isNaN(r) || r <= 0) {
+          throw new Error('換算比例必須大於 0');
+        }
+        effectiveRatio = r;
+      }
+
+      // 3. Selling price
+      const rawPrice = selling_price !== undefined ? selling_price : (sellingPrice !== undefined ? sellingPrice : (sell_price !== undefined ? sell_price : sellPrice));
+      let effectivePrice = unit.selling_price;
+      if (rawPrice !== undefined) {
+        const p = Number(rawPrice);
+        if (isNaN(p) || p < 0) {
+          throw new Error('售價不能為負數');
+        }
+        effectivePrice = p;
+      }
+
+      // If switched to base unit, unset others
+      if (targetIsBase && !unit.is_base_unit) {
+        mockProductUnits.forEach(u => {
+          if (u.variant_id === variant.id && u.id !== unit.id) {
+            u.is_base_unit = false;
+          }
+        });
+      }
+
+      unit.unit_name = effectiveName;
+      unit.conversion_ratio = effectiveRatio;
+      unit.is_base_unit = targetIsBase;
+      unit.selling_price = effectivePrice;
+      unit.sell_price = effectivePrice;
+
+      saveStorage('agent_erp_mock_product_units', mockProductUnits);
+      return { ...unit };
     }
 
     case 'add_supply_source': {
