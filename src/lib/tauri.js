@@ -1295,7 +1295,12 @@ export async function invoke(cmd, args = {}) {
 
       const units = mockProductUnits.filter(u => variantIds.has(u.variant_id));
       const unitIds = new Set(units.map(u => u.id));
-      const supply_sources = mockProductSupplySources.filter(s => unitIds.has(s.unit_id));
+      const supply_sources = mockProductSupplySources
+        .filter(s => unitIds.has(s.unit_id))
+        .map(s => ({
+          ...s,
+          cost: s.cost !== undefined ? s.cost : s.purchase_cost
+        }));
       const bom_items = mockProductBomItems
         .filter(b => variantIds.has(b.parent_variant_id))
         .map(b => {
@@ -1663,9 +1668,19 @@ export async function invoke(cmd, args = {}) {
         throw new Error('供應商不存在或無效');
       }
 
-      const cost = Number(purchase_cost !== undefined ? purchase_cost : purchaseCost);
+      const rawCost = purchase_cost !== undefined ? purchase_cost : (purchaseCost !== undefined ? purchaseCost : args?.cost);
+      const cost = Number(rawCost);
       if (isNaN(cost) || cost < 0) {
         throw new Error('採購成本不能為負數');
+      }
+
+      const targetIsPrimary = is_primary !== undefined ? !!is_primary : !!isPrimary;
+      if (targetIsPrimary) {
+        mockProductSupplySources.forEach(s => {
+          if (s.unit_id === unit.id) {
+            s.is_primary = false;
+          }
+        });
       }
 
       const now = Math.floor(Date.now() / 1000);
@@ -1674,13 +1689,101 @@ export async function invoke(cmd, args = {}) {
         unit_id: unit.id,
         vendor_partner_id: vendor.id,
         purchase_cost: cost,
+        cost: cost,
         currency: (currency || 'TWD').trim(),
-        is_primary: is_primary !== undefined ? !!is_primary : !!isPrimary,
+        is_primary: targetIsPrimary,
         created_at: now
       };
       mockProductSupplySources.push(newSource);
       saveStorage('agent_erp_mock_product_supply_sources', mockProductSupplySources);
       return newSource;
+    }
+
+    case 'update_supply_source': {
+      const {
+        source_id,
+        sourceId,
+        id,
+        purchase_cost,
+        purchaseCost,
+        cost: argCost,
+        vendor_partner_id,
+        vendorPartnerId,
+        currency,
+        is_primary,
+        isPrimary
+      } = args || {};
+
+      const targetSourceId = (source_id || sourceId || id || '').trim();
+      if (!targetSourceId) {
+        throw new Error('供應來源 ID 不能為空');
+      }
+
+      const targetTenantId = resolveMockActiveTenantId();
+      const source = mockProductSupplySources.find(s => s.id === targetSourceId);
+      if (!source) {
+        throw new Error('供應來源不存在');
+      }
+
+      // Verify source belongs to active tenant
+      const unit = mockProductUnits.find(u => u.id === source.unit_id);
+      if (!unit) {
+        throw new Error('供應來源不存在');
+      }
+      const variant = mockProductVariants.find(v => v.id === unit.variant_id);
+      if (!variant) {
+        throw new Error('供應來源不存在');
+      }
+      const product = mockProducts.find(p => p.id === variant.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!product) {
+        throw new Error('供應來源不存在');
+      }
+
+      // If updating cost, validate >= 0
+      const rawCost = purchase_cost !== undefined ? purchase_cost : (purchaseCost !== undefined ? purchaseCost : argCost);
+      if (rawCost !== undefined) {
+        const costNum = Number(rawCost);
+        if (isNaN(costNum) || costNum < 0) {
+          throw new Error('採購成本不能為負數');
+        }
+        source.purchase_cost = costNum;
+        source.cost = costNum;
+      }
+
+      // If updating vendor, validate vendor in active tenant with is_vendor = true
+      const targetVendorId = vendor_partner_id !== undefined ? vendor_partner_id : vendorPartnerId;
+      if (targetVendorId !== undefined) {
+        const trimmedVendor = (targetVendorId || '').trim();
+        if (!trimmedVendor) {
+          throw new Error('供應商不存在或無效');
+        }
+        const vendor = mockPartners.find(p => p.id === trimmedVendor && (p.tenant_id || 'tnt_mock_1') === targetTenantId && p.is_vendor === true);
+        if (!vendor) {
+          throw new Error('供應商不存在或無效');
+        }
+        source.vendor_partner_id = vendor.id;
+      }
+
+      if (currency !== undefined) {
+        const cur = (currency || '').trim();
+        source.currency = cur || 'TWD';
+      }
+
+      const prim = is_primary !== undefined ? is_primary : isPrimary;
+      if (prim !== undefined) {
+        const targetIsPrimary = !!prim;
+        if (targetIsPrimary) {
+          mockProductSupplySources.forEach(s => {
+            if (s.unit_id === source.unit_id && s.id !== source.id) {
+              s.is_primary = false;
+            }
+          });
+        }
+        source.is_primary = targetIsPrimary;
+      }
+
+      saveStorage('agent_erp_mock_product_supply_sources', mockProductSupplySources);
+      return { ...source };
     }
 
     case 'add_bom_item': {

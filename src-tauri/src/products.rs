@@ -51,6 +51,7 @@ pub struct ProductSupplySource {
     pub id: String,
     pub unit_id: String,
     pub vendor_partner_id: String,
+    #[serde(alias = "cost")]
     pub purchase_cost: f64,
     pub currency: String,
     pub is_primary: bool,
@@ -1135,6 +1136,15 @@ pub fn add_supply_source_impl(
         .unwrap_or_else(|| "TWD".to_string());
     let is_prim = is_primary.unwrap_or(false);
 
+    // If promoting to primary, demote other existing primary sources for this unit
+    if is_prim {
+        conn.execute(
+            "UPDATE product_supply_sources SET is_primary = 0 WHERE unit_id = ?1",
+            params![actual_unit_id],
+        )
+        .map_err(|e| format!("Failed to demote existing primary supply sources: {}", e))?;
+    }
+
     conn.execute(
         "INSERT INTO product_supply_sources (id, unit_id, vendor_partner_id, purchase_cost, currency, is_primary, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1158,6 +1168,145 @@ pub fn add_supply_source_impl(
         currency: cur,
         is_primary: is_prim,
         created_at: now,
+    })
+}
+
+// Usecase: update_supply_source
+pub fn update_supply_source_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    source_id: &str,
+    purchase_cost: Option<f64>,
+    vendor_partner_id: Option<String>,
+    currency: Option<String>,
+    is_primary: Option<bool>,
+) -> Result<ProductSupplySource, String> {
+    let trimmed_tenant_id = tenant_id.trim();
+    let trimmed_source_id = source_id.trim();
+
+    if trimmed_tenant_id.is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+    if trimmed_source_id.is_empty() {
+        return Err("供應來源 ID 不能為空".to_string());
+    }
+
+    // Verify source exists and belongs to active tenant
+    let mut check_source = conn
+        .prepare(
+            "SELECT s.id, s.unit_id, s.vendor_partner_id, s.purchase_cost, s.currency, s.is_primary, s.created_at \
+             FROM product_supply_sources s \
+             JOIN product_units u ON s.unit_id = u.id \
+             JOIN product_variants v ON u.variant_id = v.id \
+             JOIN products p ON v.product_id = p.id \
+             WHERE s.id = ?1 AND p.tenant_id = ?2 \
+             LIMIT 1",
+        )
+        .map_err(|e| format!("Failed to prepare supply source ownership check: {}", e))?;
+
+    let existing: Result<(String, String, String, f64, String, i64, i64), _> = check_source
+        .query_row(params![trimmed_source_id, trimmed_tenant_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            ))
+        });
+
+    let (
+        id,
+        unit_id,
+        current_vendor,
+        current_cost,
+        current_currency,
+        current_primary_int,
+        created_at,
+    ) = match existing {
+        Ok(tuple) => tuple,
+        Err(_) => return Err("供應來源不存在".to_string()),
+    };
+
+    // If cost provided, validate >= 0.0
+    let effective_cost = match purchase_cost {
+        Some(cost) => {
+            if cost < 0.0 {
+                return Err("採購成本不能為負數".to_string());
+            }
+            cost
+        }
+        None => current_cost,
+    };
+
+    // If vendor provided, validate exists in same tenant and is_vendor = 1
+    let effective_vendor = match vendor_partner_id {
+        Some(v) => {
+            let trimmed_v = v.trim().to_string();
+            if trimmed_v.is_empty() {
+                return Err("供應商不存在或無效".to_string());
+            }
+            let mut check_vendor = conn
+                .prepare("SELECT 1 FROM partners WHERE id = ?1 AND tenant_id = ?2 AND is_vendor = 1 LIMIT 1")
+                .map_err(|e| format!("Failed to prepare vendor check: {}", e))?;
+            let has_vendor = check_vendor
+                .query_row(params![trimmed_v, trimmed_tenant_id], |_| Ok(()))
+                .is_ok();
+            if !has_vendor {
+                return Err("供應商不存在或無效".to_string());
+            }
+            trimmed_v
+        }
+        None => current_vendor,
+    };
+
+    let effective_currency = match currency {
+        Some(c) => {
+            let tr = c.trim().to_string();
+            if tr.is_empty() {
+                "TWD".to_string()
+            } else {
+                tr
+            }
+        }
+        None => current_currency,
+    };
+
+    let effective_primary = is_primary.unwrap_or(current_primary_int == 1);
+
+    // If promoting to primary, demote other supply sources under the same unit
+    if effective_primary {
+        conn.execute(
+            "UPDATE product_supply_sources SET is_primary = 0 WHERE unit_id = ?1 AND id != ?2",
+            params![unit_id, id],
+        )
+        .map_err(|e| format!("Failed to demote existing primary supply sources: {}", e))?;
+    }
+
+    conn.execute(
+        "UPDATE product_supply_sources \
+         SET purchase_cost = ?1, vendor_partner_id = ?2, currency = ?3, is_primary = ?4 \
+         WHERE id = ?5",
+        params![
+            effective_cost,
+            effective_vendor,
+            effective_currency,
+            if effective_primary { 1 } else { 0 },
+            id
+        ],
+    )
+    .map_err(|e| format!("Failed to update supply source: {}", e))?;
+
+    Ok(ProductSupplySource {
+        id,
+        unit_id,
+        vendor_partner_id: effective_vendor,
+        purchase_cost: effective_cost,
+        currency: effective_currency,
+        is_primary: effective_primary,
+        created_at,
     })
 }
 
@@ -1410,6 +1559,31 @@ pub async fn add_supply_source<R: tauri::Runtime>(
         &unit_id,
         &vendor_partner_id,
         purchase_cost,
+        currency,
+        is_primary,
+    )
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_supply_source<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    source_id: String,
+    purchase_cost: Option<f64>,
+    vendor_partner_id: Option<String>,
+    currency: Option<String>,
+    is_primary: Option<bool>,
+) -> Result<ProductSupplySource, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn =
+        rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    update_supply_source_impl(
+        &conn,
+        &active_tid,
+        &source_id,
+        purchase_cost,
+        vendor_partner_id,
         currency,
         is_primary,
     )
@@ -3088,5 +3262,474 @@ pub mod tests {
 
         // Then: Unit not found error
         assert_eq!(err.unwrap_err(), "Product unit not found");
+    }
+
+    #[test]
+    fn test_tc_src_pos_01_multiple_vendors_same_unit() {
+        // Given: Resale product and 2 vendor partners in same tenant
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "多供應商筆電".into(),
+            "resale".into(),
+            None,
+            Some("台".into()),
+            Some(30000.0),
+        )
+        .unwrap();
+        let v1 = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "華碩原廠".into(),
+            None,
+            Some(true),
+            Some("12345678".into()),
+        )
+        .unwrap();
+        let v2 = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "聯強代理".into(),
+            None,
+            Some(true),
+            Some("87654321".into()),
+        )
+        .unwrap();
+        let unit_id = &p.units[0].id;
+
+        // When: Adding 2 supply sources for the exact same unit with different costs
+        let src1 = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            unit_id,
+            &v1.id,
+            24000.0,
+            Some("TWD".into()),
+            Some(true),
+        )
+        .unwrap();
+        let src2 = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            unit_id,
+            &v2.id,
+            24500.0,
+            Some("TWD".into()),
+            Some(false),
+        )
+        .unwrap();
+
+        // Then: Both sources are registered under the unit
+        assert_eq!(src1.unit_id, *unit_id);
+        assert_eq!(src1.vendor_partner_id, v1.id);
+        assert_eq!(src1.purchase_cost, 24000.0);
+        assert!(src1.is_primary);
+
+        assert_eq!(src2.unit_id, *unit_id);
+        assert_eq!(src2.vendor_partner_id, v2.id);
+        assert_eq!(src2.purchase_cost, 24500.0);
+        assert!(!src2.is_primary);
+
+        let detail = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
+        assert_eq!(detail.supply_sources.len(), 2);
+    }
+
+    #[test]
+    fn test_tc_src_pos_02_update_supply_source() {
+        // Given: Product, vendor 1, vendor 2, and existing supply source
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "成本調價品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(50.0),
+        )
+        .unwrap();
+        let v1 = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "舊供應商".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let v2 = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "新供應商".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let src = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.units[0].id,
+            &v1.id,
+            30.0,
+            Some("TWD".into()),
+            Some(false),
+        )
+        .unwrap();
+
+        // When: Updating cost, vendor, and primary status
+        let updated = update_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            &src.id,
+            Some(28.5),
+            Some(v2.id.clone()),
+            Some("USD".into()),
+            Some(true),
+        )
+        .unwrap();
+
+        // Then: Values are updated
+        assert_eq!(updated.id, src.id);
+        assert_eq!(updated.purchase_cost, 28.5);
+        assert_eq!(updated.vendor_partner_id, v2.id);
+        assert_eq!(updated.currency, "USD");
+        assert!(updated.is_primary);
+
+        let detail = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
+        assert_eq!(detail.supply_sources[0].purchase_cost, 28.5);
+        assert_eq!(detail.supply_sources[0].vendor_partner_id, v2.id);
+    }
+
+    #[test]
+    fn test_tc_src_pos_03_primary_source_exclusivity() {
+        // Given: Product and 2 vendors in Tenant A
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "主廠商互斥品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            Some(100.0),
+        )
+        .unwrap();
+        let unit_id = &p.units[0].id;
+        let v1 = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "供應商甲".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let v2 = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "供應商乙".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+
+        // When: Adding src1 as primary
+        let src1 = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            unit_id,
+            &v1.id,
+            10.0,
+            None,
+            Some(true),
+        )
+        .unwrap();
+        assert!(src1.is_primary);
+
+        // When: Adding src2 as primary
+        let src2 = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            unit_id,
+            &v2.id,
+            12.0,
+            None,
+            Some(true),
+        )
+        .unwrap();
+        assert!(src2.is_primary);
+
+        // Then: src1 was demoted in DB and only src2 is primary
+        let detail1 = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
+        let s1_db = detail1
+            .supply_sources
+            .iter()
+            .find(|s| s.id == src1.id)
+            .unwrap();
+        let s2_db = detail1
+            .supply_sources
+            .iter()
+            .find(|s| s.id == src2.id)
+            .unwrap();
+        assert!(!s1_db.is_primary);
+        assert!(s2_db.is_primary);
+
+        // When: Updating src1 to become primary again
+        let updated1 =
+            update_supply_source_impl(&conn, TEST_TENANT_A, &src1.id, None, None, None, Some(true))
+                .unwrap();
+        assert!(updated1.is_primary);
+
+        // Then: src2 was demoted and only src1 is primary
+        let detail2 = get_product_detail_impl(&conn, TEST_TENANT_A, &p.product.id).unwrap();
+        let s1_db2 = detail2
+            .supply_sources
+            .iter()
+            .find(|s| s.id == src1.id)
+            .unwrap();
+        let s2_db2 = detail2
+            .supply_sources
+            .iter()
+            .find(|s| s.id == src2.id)
+            .unwrap();
+        assert!(s1_db2.is_primary);
+        assert!(!s2_db2.is_primary);
+    }
+
+    #[test]
+    fn test_tc_src_bnd_01_zero_cost() {
+        // Given: Product and vendor
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "零成本樣品".into(),
+            "raw_material".into(),
+            None,
+            Some("包".into()),
+            None,
+        )
+        .unwrap();
+        let v = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "樣品廠商".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+
+        // When: Setting purchase cost to 0.0
+        let src =
+            add_supply_source_impl(&conn, TEST_TENANT_A, &p.units[0].id, &v.id, 0.0, None, None)
+                .unwrap();
+
+        // Then: 0.0 cost is allowed
+        assert_eq!(src.purchase_cost, 0.0);
+
+        // When: Updating cost to 0.0001 (minimal fractional positive)
+        let updated = update_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            &src.id,
+            Some(0.0001),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Then: Fractional precision preserved
+        assert_eq!(updated.purchase_cost, 0.0001);
+    }
+
+    #[test]
+    fn test_tc_src_neg_01_negative_cost() {
+        // Given: Product, vendor, and existing source
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "負成本防禦品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            None,
+        )
+        .unwrap();
+        let v = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "測試商".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let src = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.units[0].id,
+            &v.id,
+            10.0,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Updating with negative cost
+        let err =
+            update_supply_source_impl(&conn, TEST_TENANT_A, &src.id, Some(-5.0), None, None, None);
+
+        // Then: Rejection with validation message
+        assert_eq!(err.unwrap_err(), "採購成本不能為負數");
+    }
+
+    #[test]
+    fn test_tc_src_neg_02_non_vendor_partner() {
+        // Given: Partner with is_vendor = false
+        let conn = setup_test_db();
+        let p = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "客戶防禦品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            None,
+        )
+        .unwrap();
+        let v = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "純客戶廠商".into(),
+            None,
+            Some(false),
+            None,
+        )
+        .unwrap();
+        let src_vendor = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "真供應商".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let src = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p.units[0].id,
+            &src_vendor.id,
+            10.0,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Updating source vendor to a non-vendor partner
+        let err =
+            update_supply_source_impl(&conn, TEST_TENANT_A, &src.id, None, Some(v.id), None, None);
+
+        // Then: Rejected
+        assert_eq!(err.unwrap_err(), "供應商不存在或無效");
+    }
+
+    #[test]
+    fn test_tc_src_neg_03_and_04_source_id_errors() {
+        // Given: DB connection
+        let conn = setup_test_db();
+
+        // When: Empty source ID
+        let err_empty =
+            update_supply_source_impl(&conn, TEST_TENANT_A, "   ", Some(10.0), None, None, None);
+        assert_eq!(err_empty.unwrap_err(), "供應來源 ID 不能為空");
+
+        // When: Nonexistent source ID
+        let err_not_found = update_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            "src_nonexistent_999",
+            Some(10.0),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(err_not_found.unwrap_err(), "供應來源不存在");
+    }
+
+    #[test]
+    fn test_tc_src_iso_01_and_02_cross_tenant_guards() {
+        // Given: Product & vendor in Tenant A
+        let conn = setup_test_db();
+        let p_a = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "A專屬品".into(),
+            "resale".into(),
+            None,
+            Some("個".into()),
+            None,
+        )
+        .unwrap();
+        let v_a = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_A,
+            "A供應商".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+        let src_a = add_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            &p_a.units[0].id,
+            &v_a.id,
+            100.0,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // And vendor in Tenant B
+        let v_b = crate::partners::create_partner_impl(
+            &conn,
+            TEST_TENANT_B,
+            "B供應商".into(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+
+        // When: Tenant B tries to update Tenant A's supply source
+        let err_cross_update = update_supply_source_impl(
+            &conn,
+            TEST_TENANT_B,
+            &src_a.id,
+            Some(50.0),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(err_cross_update.unwrap_err(), "供應來源不存在");
+
+        // When: Tenant A tries to bind Tenant B's vendor
+        let err_cross_vendor = update_supply_source_impl(
+            &conn,
+            TEST_TENANT_A,
+            &src_a.id,
+            None,
+            Some(v_b.id),
+            None,
+            None,
+        );
+        assert_eq!(err_cross_vendor.unwrap_err(), "供應商不存在或無效");
     }
 }

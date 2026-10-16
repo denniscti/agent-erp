@@ -74,6 +74,17 @@
  * | TC-UNIT-E-09 | Update unit to duplicate unit_name with sibling unit | Error – Duplicate unit name in update | Rejects with duplicate unit error | Uniqueness guard |
  * | TC-UNIT-E-10 | Update base unit to have conversion_ratio != 1.0 | Error – Base unit ratio constraint | Rejects or enforces ratio 1.0 | Integrity check |
  * | TC-UNIT-E-11 | Demote base unit when no other base unit exists | Error – Lone base unit demotion | Rejects demotion to preserve variant's base unit | Invariant guard |
+ * | TC-SRC-N-01 | Multi-vendor registration with distinct costs for same unit | Equivalence – Multi-vendor support | Both sources registered with distinct pricing | Multi-vendor |
+ * | TC-SRC-N-02 | Update supply source purchase cost | Equivalence – Cost update | Cost updated in store and detail | Update action |
+ * | TC-SRC-N-03 | Update vendor and toggle primary flag | Equivalence – Vendor & primary update | Vendor and is_primary updated | Relation update |
+ * | TC-SRC-N-04 | Support cost alias in add and update | Equivalence – Dual alias compatibility | cost and purchase_cost both synchronized | Alias compatibility |
+ * | TC-SRC-N-05 | Primary supply source exclusivity on add and update | Equivalence – Exclusivity & auto-demote | Demotes other sources in same unit so only 1 primary remains | Invariant guard |
+ * | TC-SRC-B-01 | Zero purchase cost (0.0) allowed | Boundary – Zero cost | Allowed and stored as 0.0 | Lower bound |
+ * | TC-SRC-B-02 | Whitespace trimming on vendor ID and currency | Boundary – Whitespace trimming | Automatically trimmed in store and mock | Normalization |
+ * | TC-SRC-E-01 | Negative purchase cost rejected | Error – Negative cost validation | Rejects with validation error | Number validation |
+ * | TC-SRC-E-02 | Non-vendor partner cannot be supply source | Error – Non-vendor partner | Rejects with vendor error | Relation check |
+ * | TC-SRC-E-03 | Update nonexistent or empty source ID rejected | Error – Invalid source ID | Rejects with not found | Primary key check |
+ * | TC-SRC-E-04 | Cross-tenant supply source update rejected | Error – Tenant isolation | Rejects cross-tenant mutation | Security guard |
  */
 
 import test from 'node:test';
@@ -96,6 +107,7 @@ const {
   addProductUnitAction,
   updateProductUnitAction,
   addSupplySourceAction,
+  updateSupplySourceAction,
   addBomItemAction,
   resolveCategoryFlags,
   createPartnerAction
@@ -1577,6 +1589,375 @@ test('TC-UNIT-E-11: Error – cross-tenant update unit rejected', async () => {
 
   // Restore Tenant 1
   await selectTenantAction('tnt_mock_1');
+});
+
+test('TC-SRC-N-01: Equivalence – Multi-vendor registration with distinct costs for same unit', async () => {
+  // Given: Resale product with default unit, and two vendor partners
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `多商比價品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const v1 = await createPartnerAction({
+    name: `華碩原廠_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+  const v2 = await createPartnerAction({
+    name: `聯強代理_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+  const unitId = p.units[0].id;
+
+  // When: Adding 2 supply sources for the exact same packaging unit
+  const src1 = await addSupplySourceAction(unitId, v1.id, 12000.0, 'TWD', true);
+  const src2 = await addSupplySourceAction(unitId, v2.id, 12500.0, 'TWD', false);
+
+  // Then: Both sources are registered under the unit with distinct pricing
+  assert.ok(src1.id);
+  assert.equal(src1.unit_id, unitId);
+  assert.equal(src1.vendor_partner_id, v1.id);
+  assert.equal(src1.purchase_cost, 12000.0);
+  assert.equal(src1.is_primary, true);
+
+  assert.ok(src2.id);
+  assert.equal(src2.unit_id, unitId);
+  assert.equal(src2.vendor_partner_id, v2.id);
+  assert.equal(src2.purchase_cost, 12500.0);
+  assert.equal(src2.is_primary, false);
+
+  const detail = await getProductDetailAction(p.product.id);
+  assert.equal(detail.supply_sources.length, 2);
+});
+
+test('TC-SRC-N-02: Equivalence – Update supply source purchase cost via updateSupplySourceAction', async () => {
+  // Given: Product, vendor, and existing supply source
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `成本變更品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const vendor = await createPartnerAction({
+    name: `既有廠商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+  const src = await addSupplySourceAction(p.units[0].id, vendor.id, 100.0, 'TWD', false);
+
+  // When: Updating purchase cost from 100.0 to 88.5
+  const updated = await updateSupplySourceAction(src.id, { purchase_cost: 88.5 });
+
+  // Then: Cost is updated in store and detail
+  assert.equal(updated.id, src.id);
+  assert.equal(updated.purchase_cost, 88.5);
+
+  const detail = await getProductDetailAction(p.product.id);
+  const found = detail.supply_sources.find(s => s.id === src.id);
+  assert.ok(found);
+  assert.equal(found.purchase_cost, 88.5);
+});
+
+test('TC-SRC-N-03: Equivalence – Update supply source vendor and toggle primary status', async () => {
+  // Given: Product, vendor 1, vendor 2, and existing source
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `換廠測試品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const v1 = await createPartnerAction({
+    name: `原廠A_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+  const v2 = await createPartnerAction({
+    name: `新廠B_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+  const src = await addSupplySourceAction(p.units[0].id, v1.id, 50.0, 'TWD', false);
+
+  // When: Updating vendor to v2 and setting is_primary: true
+  const updated = await updateSupplySourceAction(src.id, {
+    vendor_partner_id: v2.id,
+    is_primary: true,
+    currency: 'USD'
+  });
+
+  // Then: Vendor and primary status are updated
+  assert.equal(updated.vendor_partner_id, v2.id);
+  assert.equal(updated.is_primary, true);
+  assert.equal(updated.currency, 'USD');
+
+  const detail = await getProductDetailAction(p.product.id);
+  const found = detail.supply_sources.find(s => s.id === src.id);
+  assert.equal(found.vendor_partner_id, v2.id);
+  assert.equal(found.is_primary, true);
+});
+
+test('TC-SRC-N-04: Equivalence – Support cost alias in addSupplySourceAction and updateSupplySourceAction', async () => {
+  // Given: Product and vendor
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `別名相容品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const v = await createPartnerAction({
+    name: `別名供應商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+
+  // When: Calling addSupplySourceAction with cost alias in options object
+  const src = await addSupplySourceAction({
+    unit_id: p.units[0].id,
+    vendor_partner_id: v.id,
+    cost: 45.0
+  });
+
+  // Then: Both cost and purchase_cost are present
+  assert.ok(src.id);
+  assert.equal(src.cost, 45.0);
+  assert.equal(src.purchase_cost, 45.0);
+
+  // When: Calling updateSupplySourceAction with cost alias
+  const updated = await updateSupplySourceAction(src.id, { cost: 42.0 });
+
+  // Then: Both cost and purchase_cost reflect 42.0
+  assert.equal(updated.cost, 42.0);
+  assert.equal(updated.purchase_cost, 42.0);
+});
+
+test('TC-SRC-N-05: Equivalence – Single primary supply source exclusivity on add and update', async () => {
+  // Given: Product with base unit and 2 vendors
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `唯一主廠測試品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const unitId = p.units[0].id;
+  const v1 = await createPartnerAction({
+    name: `主廠A_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+  const v2 = await createPartnerAction({
+    name: `主廠B_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+
+  // When: Adding first source (v1) with is_primary: true
+  const src1 = await addSupplySourceAction(unitId, v1.id, 100.0, 'TWD', true);
+  assert.equal(src1.is_primary, true);
+
+  // When: Adding second source (v2) with is_primary: true
+  const src2 = await addSupplySourceAction(unitId, v2.id, 95.0, 'TWD', true);
+  assert.equal(src2.is_primary, true);
+
+  // Then: First source (src1) is automatically demoted to is_primary: false
+  let detail = await getProductDetailAction(p.product.id);
+  let s1 = detail.supply_sources.find(s => s.id === src1.id);
+  let s2 = detail.supply_sources.find(s => s.id === src2.id);
+  assert.equal(s1.is_primary, false);
+  assert.equal(s2.is_primary, true);
+  assert.equal(detail.supply_sources.filter(s => s.unit_id === unitId && s.is_primary).length, 1);
+
+  // When: Promoting first source (src1) back to is_primary: true via update
+  const updated1 = await updateSupplySourceAction(src1.id, { is_primary: true });
+  assert.equal(updated1.is_primary, true);
+
+  // Then: Second source (src2) is automatically demoted to is_primary: false
+  detail = await getProductDetailAction(p.product.id);
+  s1 = detail.supply_sources.find(s => s.id === src1.id);
+  s2 = detail.supply_sources.find(s => s.id === src2.id);
+  assert.equal(s1.is_primary, true);
+  assert.equal(s2.is_primary, false);
+  assert.equal(detail.supply_sources.filter(s => s.unit_id === unitId && s.is_primary).length, 1);
+
+  // When: Explicitly setting src1 to is_primary: false
+  await updateSupplySourceAction(src1.id, { is_primary: false });
+  detail = await getProductDetailAction(p.product.id);
+  assert.equal(detail.supply_sources.filter(s => s.unit_id === unitId && s.is_primary).length, 0);
+});
+
+test('TC-SRC-B-01: Boundary – Zero purchase cost (0.0) allowed for free item/sample', async () => {
+  // Given: Product and vendor
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `零成本品_${Date.now()}`,
+    category: '原物料'
+  });
+  const v = await createPartnerAction({
+    name: `贈品商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+
+  // When: Adding source with cost 0.0
+  const src = await addSupplySourceAction(p.units[0].id, v.id, 0.0);
+
+  // Then: 0.0 cost is recorded
+  assert.equal(src.purchase_cost, 0.0);
+
+  // When: Updating to 0.0001 (minimal fractional cost)
+  const updated = await updateSupplySourceAction(src.id, { purchase_cost: 0.0001 });
+  assert.equal(updated.purchase_cost, 0.0001);
+});
+
+test('TC-SRC-B-02: Boundary – Whitespace trimming on vendor ID and currency', async () => {
+  // Given: Product and vendor
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `修剪測試品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const v = await createPartnerAction({
+    name: `修剪商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+
+  // When: Adding source with padded currency
+  const src = await addSupplySourceAction(p.units[0].id, `  ${v.id}  `, 10.0, '  USD  ');
+
+  // Then: Trimming applied
+  assert.equal(src.vendor_partner_id, v.id);
+  assert.equal(src.currency, 'USD');
+});
+
+test('TC-SRC-E-01: Error – Negative purchase cost rejected in add and update', async () => {
+  // Given: Product and vendor
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `負成本測試品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const v = await createPartnerAction({
+    name: `合格商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+
+  // When / Then: Negative cost on add rejected
+  await assert.rejects(
+    async () => {
+      await addSupplySourceAction(p.units[0].id, v.id, -10.0);
+    },
+    /採購成本不能為負數/
+  );
+
+  const src = await addSupplySourceAction(p.units[0].id, v.id, 10.0);
+
+  // When / Then: Negative cost on update rejected
+  await assert.rejects(
+    async () => {
+      await updateSupplySourceAction(src.id, { purchase_cost: -0.5 });
+    },
+    /採購成本不能為負數/
+  );
+});
+
+test('TC-SRC-E-02: Error – Non-vendor partner cannot be bound as supply source', async () => {
+  // Given: Partner with isCustomer=true, isVendor=false
+  await ensureAuthenticated();
+  const p = await createProductAction({
+    name: `客戶來源測試品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const customerOnly = await createPartnerAction({
+    name: `純客戶_${Date.now()}`,
+    isCustomer: true,
+    isVendor: false
+  });
+  const validVendor = await createPartnerAction({
+    name: `有效廠商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+
+  // When / Then: Adding non-vendor partner rejected
+  await assert.rejects(
+    async () => {
+      await addSupplySourceAction(p.units[0].id, customerOnly.id, 100.0);
+    },
+    /供應商不存在或無效/
+  );
+
+  const src = await addSupplySourceAction(p.units[0].id, validVendor.id, 100.0);
+
+  // When / Then: Updating to non-vendor partner rejected
+  await assert.rejects(
+    async () => {
+      await updateSupplySourceAction(src.id, { vendor_partner_id: customerOnly.id });
+    },
+    /供應商不存在或無效/
+  );
+});
+
+test('TC-SRC-E-03: Error – Update nonexistent or empty supply source ID rejected', async () => {
+  // Given: Authenticated session
+  await ensureAuthenticated();
+
+  // When / Then: Empty source ID rejected
+  await assert.rejects(
+    async () => {
+      await updateSupplySourceAction('   ', { purchase_cost: 50.0 });
+    },
+    /供應來源 ID 為必填項目/
+  );
+
+  // When / Then: Non-existent source ID rejected
+  await assert.rejects(
+    async () => {
+      await updateSupplySourceAction('src_nonexistent_9999', { purchase_cost: 50.0 });
+    },
+    /供應來源不存在/
+  );
+});
+
+test('TC-SRC-E-04: Error – Cross-tenant supply source update and vendor binding rejected', async () => {
+  // Given: Tenant 1 owns product, unit, vendor, and supply source
+  await ensureAuthenticated();
+  const p1 = await createProductAction({
+    name: `T1來源品_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const v1 = await createPartnerAction({
+    name: `T1廠商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+  const src1 = await addSupplySourceAction(p1.units[0].id, v1.id, 100.0);
+
+  // When: Switching to Tenant 2
+  await selectTenantAction('tnt_mock_2');
+
+  // Then: Tenant 2 cannot update Tenant 1 supply source
+  await assert.rejects(
+    async () => {
+      await updateSupplySourceAction(src1.id, { purchase_cost: 50.0 });
+    },
+    /供應來源不存在/
+  );
+
+  // Create vendor in Tenant 2
+  const v2 = await createPartnerAction({
+    name: `T2廠商_${Date.now()}`,
+    isCustomer: false,
+    isVendor: true
+  });
+
+  // Switch back to Tenant 1
+  await selectTenantAction('tnt_mock_1');
+
+  // Then: Tenant 1 cannot bind Tenant 2 vendor
+  await assert.rejects(
+    async () => {
+      await updateSupplySourceAction(src1.id, { vendor_partner_id: v2.id });
+    },
+    /供應商不存在或無效/
+  );
 });
 
 

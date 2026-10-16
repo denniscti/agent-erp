@@ -1390,16 +1390,32 @@ export async function updateProductUnitAction(unitId, {
 
 /**
  * Add a vendor supply source to a product sales unit
- * @param {string} unitId
- * @param {string} vendorPartnerId
- * @param {number} purchaseCost
+ * @param {string|any} unitId - Unit ID string or source options object
+ * @param {string} [vendorPartnerId]
+ * @param {number} [purchaseCost]
  * @param {string} [currency='TWD']
  * @param {boolean} [isPrimary=false]
  * @returns {Promise<any>}
  */
-export async function addSupplySourceAction(unitId, vendorPartnerId, purchaseCost, currency = 'TWD', isPrimary = false) {
-  const uId = (unitId || '').trim();
-  const vendorId = (vendorPartnerId || '').trim();
+export async function addSupplySourceAction(unitId, vendorPartnerId, purchaseCost = 0, currency = 'TWD', isPrimary = false) {
+  let uId = '';
+  let vendorId = '';
+  let cost = 0;
+  let cur = currency;
+  let prim = isPrimary;
+
+  if (typeof unitId === 'object' && unitId !== null) {
+    uId = (unitId.unit_id || unitId.unitId || '').trim();
+    vendorId = (unitId.vendor_partner_id || unitId.vendorPartnerId || '').trim();
+    cost = unitId.purchase_cost !== undefined ? unitId.purchase_cost : (unitId.cost !== undefined ? unitId.cost : 0);
+    cur = unitId.currency || 'TWD';
+    prim = unitId.is_primary !== undefined ? unitId.is_primary : (unitId.isPrimary || false);
+  } else {
+    uId = (unitId || '').trim();
+    vendorId = (vendorPartnerId || '').trim();
+    cost = purchaseCost !== undefined ? purchaseCost : 0;
+  }
+
   if (!uId) throw new Error('包裝銷售單位 ID 為必填項目');
   if (!vendorId) throw new Error('供應商 ID 為必填項目');
 
@@ -1411,11 +1427,12 @@ export async function addSupplySourceAction(unitId, vendorPartnerId, purchaseCos
       variantId: uId,
       vendor_partner_id: vendorId,
       vendorPartnerId: vendorId,
-      purchase_cost: purchaseCost,
-      purchaseCost,
-      currency,
-      is_primary: isPrimary,
-      isPrimary
+      purchase_cost: cost,
+      purchaseCost: cost,
+      cost,
+      currency: cur,
+      is_primary: prim,
+      isPrimary: prim
     });
     if (appState.currentProductDetail) {
       await getProductDetailAction(appState.currentProductDetail.product.id);
@@ -1424,6 +1441,44 @@ export async function addSupplySourceAction(unitId, vendorPartnerId, purchaseCos
     return src;
   } catch (err) {
     console.error("Failed to add supply source:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update an existing product supply source
+ * @param {string} sourceId
+ * @param {Object} [updates={}]
+ * @returns {Promise<any>}
+ */
+export async function updateSupplySourceAction(sourceId, updates = {}) {
+  const sId = (sourceId || '').trim();
+  if (!sId) throw new Error('供應來源 ID 為必填項目');
+
+  const effectiveCost = updates.purchase_cost !== undefined ? updates.purchase_cost : updates.cost;
+  const payload = {
+    source_id: sId,
+    sourceId: sId,
+    id: sId,
+    purchase_cost: effectiveCost !== undefined ? Number(effectiveCost) : undefined,
+    purchaseCost: effectiveCost !== undefined ? Number(effectiveCost) : undefined,
+    cost: effectiveCost !== undefined ? Number(effectiveCost) : undefined,
+    vendor_partner_id: updates.vendor_partner_id !== undefined ? updates.vendor_partner_id : updates.vendorPartnerId,
+    vendorPartnerId: updates.vendor_partner_id !== undefined ? updates.vendor_partner_id : updates.vendorPartnerId,
+    currency: updates.currency,
+    is_primary: updates.is_primary !== undefined ? updates.is_primary : updates.isPrimary,
+    isPrimary: updates.is_primary !== undefined ? updates.is_primary : updates.isPrimary
+  };
+
+  try {
+    const updated = await invoke('update_supply_source', payload);
+    if (appState.currentProductDetail) {
+      await getProductDetailAction(appState.currentProductDetail.product.id);
+    }
+    showToast('已成功更新供應來源！');
+    return updated;
+  } catch (err) {
+    console.error("Failed to update supply source:", err);
     throw err;
   }
 }

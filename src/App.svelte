@@ -44,6 +44,7 @@
     addProductUnitAction,
     updateProductUnitAction,
     addSupplySourceAction,
+    updateSupplySourceAction,
     addBomItemAction
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
@@ -152,6 +153,14 @@
   let newSupplyCost = $state(0);
   let newSupplyCode = $state('');
   let isAddingSupply = $state(false);
+
+  // Edit supply source states (Issue #141)
+  let editingSupplySourceId = $state(null);
+  let editSupplyVendorId = $state('');
+  let editSupplyCost = $state(0);
+  let editSupplyCurrency = $state('TWD');
+  let editSupplyIsPrimary = $state(false);
+  let isUpdatingSupply = $state(false);
 
   let newBomParentVariantId = $state('');
   let newBomChildVariantId = $state('');
@@ -677,6 +686,53 @@
       productDetailError = err?.message || '新增採購來源失敗';
     } finally {
       isAddingSupply = false;
+    }
+  }
+
+  function startEditSupplySource(source) {
+    editingSupplySourceId = source.id;
+    editSupplyVendorId = source.vendor_partner_id;
+    editSupplyCost = source.purchase_cost !== undefined ? source.purchase_cost : (source.cost !== undefined ? source.cost : 0);
+    editSupplyCurrency = source.currency || 'TWD';
+    editSupplyIsPrimary = !!source.is_primary;
+    productDetailError = '';
+  }
+
+  function cancelEditSupplySource() {
+    editingSupplySourceId = null;
+    editSupplyVendorId = '';
+    editSupplyCost = 0;
+    editSupplyCurrency = 'TWD';
+    editSupplyIsPrimary = false;
+    productDetailError = '';
+  }
+
+  async function handleUpdateSupplySource(productId) {
+    if (!editingSupplySourceId) return;
+    if (!editSupplyVendorId) {
+      productDetailError = '請選擇供應商';
+      return;
+    }
+    if (Number(editSupplyCost) < 0) {
+      productDetailError = '採購成本不能為負數';
+      return;
+    }
+
+    isUpdatingSupply = true;
+    productDetailError = '';
+    try {
+      await updateSupplySourceAction(editingSupplySourceId, {
+        vendor_partner_id: editSupplyVendorId,
+        purchase_cost: Number(editSupplyCost) || 0,
+        currency: editSupplyCurrency,
+        is_primary: editSupplyIsPrimary
+      });
+      cancelEditSupplySource();
+      expandedProductDetail = await getProductDetailAction(productId);
+    } catch (err) {
+      productDetailError = err?.message || '更新供應來源失敗';
+    } finally {
+      isUpdatingSupply = false;
     }
   }
 
@@ -2257,6 +2313,7 @@
                               <div style="display: flex; flex-direction: column; gap: 8px;">
                                 <div style="display: flex; flex-direction: column; gap: 6px;">
                                   {#each (expandedProductDetail.units || []) as u (u.id)}
+                                    {@const unitSources = (expandedProductDetail.supply_sources || []).filter(s => s.unit_id === u.id)}
                                     {#if editingUnitId === u.id}
                                       <form onsubmit={(e) => { e.preventDefault(); handleUpdateUnit(product.id); }} style="display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 10px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; align-items: flex-end;">
                                         <div style="width: 100px;">
@@ -2300,6 +2357,11 @@
                                             <span class="badge badge-cyan" style="font-size: 0.65rem;">基準單位 (1:1)</span>
                                           {:else}
                                             <span style="color: var(--text-muted); font-size: 0.72rem;">比例: {u.conversion_ratio}</span>
+                                          {/if}
+                                          {#if unitSources.length > 0}
+                                            <span class="badge" style="font-size: 0.65rem; background: rgba(245, 158, 11, 0.15); color: #fbbf24;" title={unitSources.map(s => `${getVendorName(s.vendor_partner_id)} ($${s.purchase_cost ?? s.cost})`).join(', ')}>
+                                              🏭 {unitSources.length} 間供應商
+                                            </span>
                                           {/if}
                                         </div>
                                         <div style="display: flex; align-items: center; gap: 10px;">
@@ -2363,6 +2425,11 @@
                             <!-- Tab: Sources -->
                             {:else if productDetailTab === 'sources'}
                               <div style="display: flex; flex-direction: column; gap: 8px;">
+                                {#if !product.is_purchasable}
+                                  <div style="padding: 6px 10px; background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 4px; font-size: 0.75rem; color: #fbbf24;">
+                                    ℹ️ 此商品類別非採購品（is_purchasable = false），若為自製成品或純轉售，此區供應商採購成本僅供參考。
+                                  </div>
+                                {/if}
                                 <div style="display: flex; flex-direction: column; gap: 6px;">
                                   {#if (expandedProductDetail.supply_sources || []).length === 0}
                                     <div style="font-size: 0.75rem; color: var(--text-muted); padding: 4px 0;">尚未綁定任何採購供應商。</div>
@@ -2370,25 +2437,71 @@
                                     {#each expandedProductDetail.supply_sources as s (s.id)}
                                       {@const matchedUnit = (expandedProductDetail.units || []).find(u => u.id === s.unit_id)}
                                       {@const matchedVar = matchedUnit ? (expandedProductDetail.variants || []).find(v => v.id === matchedUnit.variant_id) : null}
-                                      <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
-                                        <div>
-                                          <span style="font-weight: 600;">🏭 {getVendorName(s.vendor_partner_id)}</span>
-                                          {#if matchedUnit}
-                                            <span class="badge" style="font-size: 0.65rem; margin-left: 6px; background: rgba(59, 130, 246, 0.15); color: #60a5fa;">
-                                              單位: {matchedUnit.unit_name} (x{matchedUnit.conversion_ratio})
-                                            </span>
-                                          {/if}
-                                          {#if matchedVar && (expandedProductDetail.variants || []).length > 1}
-                                            <span class="badge" style="font-size: 0.65rem; margin-left: 6px; background: rgba(255,255,255,0.06);">{matchedVar.name}</span>
-                                          {/if}
-                                          {#if s.vendor_product_code}
-                                            <span style="color: var(--text-muted); font-size: 0.72rem; margin-left: 6px;">(廠商型號: {s.vendor_product_code})</span>
-                                          {/if}
+                                      {#if editingSupplySourceId === s.id}
+                                        <form onsubmit={(e) => { e.preventDefault(); handleUpdateSupplySource(product.id); }} style="display: flex; gap: 8px; flex-wrap: wrap; padding: 8px 10px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 6px; align-items: flex-end;">
+                                          <div style="flex: 1.5; min-width: 140px;">
+                                            <label for="edit-supply-vendor-{s.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">供應商</label>
+                                            <select id="edit-supply-vendor-{s.id}" bind:value={editSupplyVendorId} class="form-input" style="width: 100%; padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
+                                              {#each vendorPartners as vp}
+                                                <option value={vp.id}>{vp.name}</option>
+                                              {/each}
+                                            </select>
+                                          </div>
+                                          <div style="width: 90px;">
+                                            <label for="edit-supply-cost-{s.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">採購成本</label>
+                                            <input id="edit-supply-cost-{s.id}" type="number" min="0" step="any" class="form-input" bind:value={editSupplyCost} style="width: 100%; padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                          </div>
+                                          <div style="width: 80px;">
+                                            <label for="edit-supply-currency-{s.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">幣別</label>
+                                            <input id="edit-supply-currency-{s.id}" type="text" class="form-input" bind:value={editSupplyCurrency} style="width: 100%; padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
+                                          </div>
+                                          <label style="display: flex; align-items: center; gap: 4px; font-size: 0.75rem; margin-bottom: 6px; cursor: pointer;">
+                                            <input type="checkbox" bind:checked={editSupplyIsPrimary} />
+                                            主要來源
+                                          </label>
+                                          <div style="display: flex; gap: 4px; margin-left: auto;">
+                                            <button type="submit" class="btn btn-primary btn-xs" disabled={isUpdatingSupply} style="padding: 4px 10px; font-size: 0.75rem;">
+                                              {isUpdatingSupply ? '儲存中...' : '儲存'}
+                                            </button>
+                                            <button type="button" class="btn btn-outline btn-xs" onclick={cancelEditSupplySource} style="padding: 4px 8px; font-size: 0.75rem;">
+                                              取消
+                                            </button>
+                                          </div>
+                                        </form>
+                                      {:else}
+                                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; font-size: 0.8rem;">
+                                          <div>
+                                            <span style="font-weight: 600;">🏭 {getVendorName(s.vendor_partner_id)}</span>
+                                            {#if s.is_primary}
+                                              <span class="badge badge-amber" style="font-size: 0.65rem; margin-left: 6px;">主要來源</span>
+                                            {/if}
+                                            {#if matchedUnit}
+                                              <span class="badge" style="font-size: 0.65rem; margin-left: 6px; background: rgba(59, 130, 246, 0.15); color: #60a5fa;">
+                                                單位: {matchedUnit.unit_name} (x{matchedUnit.conversion_ratio})
+                                              </span>
+                                            {/if}
+                                            {#if matchedVar && (expandedProductDetail.variants || []).length > 1}
+                                              <span class="badge" style="font-size: 0.65rem; margin-left: 6px; background: rgba(255,255,255,0.06);">{matchedVar.name}</span>
+                                            {/if}
+                                            {#if s.vendor_product_code}
+                                              <span style="color: var(--text-muted); font-size: 0.72rem; margin-left: 6px;">(廠商型號: {s.vendor_product_code})</span>
+                                            {/if}
+                                          </div>
+                                          <div style="display: flex; align-items: center; gap: 10px;">
+                                            <div style="font-weight: 600; color: #f59e0b;">
+                                              採購成本: ${s.purchase_cost ?? s.cost} {s.currency}
+                                            </div>
+                                            <button
+                                              type="button"
+                                              class="btn btn-outline btn-xs"
+                                              style="padding: 1px 7px; font-size: 0.68rem;"
+                                              onclick={() => startEditSupplySource(s)}
+                                            >
+                                              ✏️ 編輯
+                                            </button>
+                                          </div>
                                         </div>
-                                        <div style="font-weight: 600; color: #f59e0b;">
-                                          採購成本: ${s.purchase_cost} {s.currency}
-                                        </div>
-                                      </div>
+                                      {/if}
                                     {/each}
                                   {/if}
                                 </div>
