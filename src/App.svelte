@@ -106,6 +106,17 @@
   let isAddingProduct = $state(false);
   let productError = $state('');
   let productFilter = $state('all'); // 'all' | 'resale' | 'manufactured' | 'raw_material'
+  let newProductBomSelections = $state({}); // { [candidateId]: { selected: boolean, quantity: number } }
+
+  let purchasableCandidates = $derived(
+    appState.products
+  );
+
+  let detailBomCandidates = $derived(
+    expandedProductId
+      ? appState.products.filter(p => p.id !== expandedProductId)
+      : []
+  );
 
   let filteredProducts = $derived(
     appState.products.filter(p => {
@@ -433,17 +444,29 @@
     isAddingProduct = true;
     productError = '';
     try {
+      const initialBomItems = newProductCategory === 'manufactured'
+        ? Object.entries(newProductBomSelections)
+            .filter(([_, item]) => item && item.selected && Number(item.quantity) > 0)
+            .map(([materialVariantId, item]) => ({
+              materialVariantId,
+              quantity: Number(item.quantity)
+            }))
+        : [];
+
       await createProductAction({
         name: newProductName.trim(),
         category: newProductCategory,
         baseUnit: newProductUnit.trim() || '件',
-        sellingPrice: Number(newProductPrice) || 0
+        sellingPrice: Number(newProductPrice) || 0,
+        initialBomItems
       });
       newProductName = '';
       newProductUnit = '件';
       newProductPrice = 0;
+      newProductBomSelections = {};
     } catch (err) {
-      productError = err?.message || '新增商品失敗';
+      productError = typeof err === 'string' ? err : (err?.message || '新增商品失敗');
+      await fetchProducts();
     } finally {
       isAddingProduct = false;
     }
@@ -467,9 +490,11 @@
       }
       if (expandedProductDetail?.units?.length > 0) {
         newSupplyUnitId = expandedProductDetail.units[0].id;
+      } else {
+        newSupplyUnitId = '';
       }
     } catch (err) {
-      productDetailError = err?.message || '載入商品明細失敗';
+      productDetailError = (typeof err === 'string' ? err : err?.message) || '載入商品明細失敗';
     } finally {
       isLoadingProductDetail = false;
     }
@@ -683,7 +708,7 @@
       newSupplyCode = '';
       expandedProductDetail = await getProductDetailAction(productId);
     } catch (err) {
-      productDetailError = err?.message || '新增採購來源失敗';
+      productDetailError = (typeof err === 'string' ? err : err?.message) || '新增採購來源失敗';
     } finally {
       isAddingSupply = false;
     }
@@ -762,7 +787,7 @@
       newBomLossRate = 0;
       expandedProductDetail = await getProductDetailAction(productId);
     } catch (err) {
-      productDetailError = err?.message || '新增 BOM 組成失敗';
+      productDetailError = (typeof err === 'string' ? err : err?.message) || '新增 BOM 組成失敗';
     } finally {
       isAddingBom = false;
     }
@@ -2011,6 +2036,69 @@
                       >
                         {#if isAddingProduct}建立中...{:else}+ 建立商品{/if}
                       </button>
+
+                      {#if newProductCategory === 'manufactured'}
+                        <div style="width: 100%; margin-top: 10px; padding: 12px; background: rgba(168, 85, 247, 0.05); border: 1px dashed rgba(168, 85, 247, 0.25); border-radius: 6px;">
+                          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-size: 0.8rem; font-weight: 600; color: #c084fc;">
+                              🧩 組成原物料（選填・多選並指定用量）
+                            </span>
+                            <span style="font-size: 0.7rem; color: var(--text-muted);">
+                              可先跳過，建立後亦可隨時至詳情補登
+                            </span>
+                          </div>
+
+                          {#if purchasableCandidates.length > 0}
+                            <div style="display: flex; flex-direction: column; gap: 8px; max-height: 180px; overflow-y: auto; padding-right: 4px;">
+                              {#each purchasableCandidates as candidate (candidate.id)}
+                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.8rem;">
+                                  <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; flex: 1;">
+                                    <input
+                                      type="checkbox"
+                                      checked={!!newProductBomSelections[candidate.id]?.selected}
+                                      onchange={(e) => {
+                                        const checked = e.currentTarget.checked;
+                                        newProductBomSelections[candidate.id] = {
+                                          selected: checked,
+                                          quantity: newProductBomSelections[candidate.id]?.quantity || 1
+                                        };
+                                      }}
+                                    />
+                                    <span style="font-weight: 500; color: var(--text-primary);">{candidate.name}</span>
+                                    <span class="badge {candidate.category === 'raw_material' ? 'badge-amber' : 'badge-cyan'}" style="font-size: 0.68rem;">
+                                      {candidate.category === 'raw_material' ? '原物料' : '轉售/可採購品'}
+                                    </span>
+                                  </label>
+                                  {#if newProductBomSelections[candidate.id]?.selected}
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                      <span style="font-size: 0.72rem; color: var(--text-muted);">用量:</span>
+                                      <input
+                                        type="number"
+                                        min="0.0001"
+                                        step="any"
+                                        class="form-input"
+                                        style="width: 70px; padding: 3px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                        value={newProductBomSelections[candidate.id]?.quantity || 1}
+                                        oninput={(e) => {
+                                          const val = Number(e.currentTarget.value);
+                                          newProductBomSelections[candidate.id] = {
+                                            selected: true,
+                                            quantity: val
+                                          };
+                                        }}
+                                      />
+                                    </div>
+                                  {/if}
+                                </div>
+                              {/each}
+                            </div>
+                          {:else}
+                            <div style="font-size: 0.75rem; color: var(--text-muted); padding: 4px 0;">
+                              💡 目前系統尚無可採購原物料，此步驟已略過（建立完成後可隨時至詳情補登）。
+                            </div>
+                          {/if}
+                        </div>
+                      {/if}
                     </form>
                   {/snippet}
 
@@ -2590,8 +2678,8 @@
                                     <label for="new-bom-child-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">選擇原料或子規格</label>
                                     <select id="new-bom-child-{product.id}" bind:value={newBomChildVariantId} class="form-input" style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);">
                                       <option value="">-- 請選擇原料/物料 --</option>
-                                      {#each appState.products.filter(p => p.id !== product.id) as otherProd}
-                                        <option value={otherProd.id}>{otherProd.name} ({otherProd.category === 'raw_material' ? '原物料' : '半成品/轉售'})</option>
+                                      {#each detailBomCandidates as otherProd}
+                                        <option value={otherProd.id}>{otherProd.name} ({otherProd.category === 'raw_material' ? '原物料' : (otherProd.category === 'manufactured' ? '半成品/自製品' : '轉售/可採購品')})</option>
                                       {/each}
                                     </select>
                                   </div>
@@ -2599,9 +2687,14 @@
                                     <label for="new-bom-qty-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">用量</label>
                                     <input id="new-bom-qty-{product.id}" type="number" min="0.0001" step="any" class="form-input" placeholder="1" bind:value={newBomQuantity} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
                                   </div>
-                                  <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingBom} style="height: 28px; white-space: nowrap; padding: 0 12px;">
+                                  <button type="submit" class="btn btn-outline btn-xs" disabled={isAddingBom || detailBomCandidates.length === 0} style="height: 28px; white-space: nowrap; padding: 0 12px;">
                                     + 加入 BOM
                                   </button>
+                                  {#if detailBomCandidates.length === 0}
+                                    <div style="width: 100%; font-size: 0.75rem; color: #f59e0b; margin-top: 4px;">
+                                      ⚠️ 目前系統尚無其他可作為組成材料的商品，請先建立其他商品。
+                                    </div>
+                                  {/if}
                                 </form>
                               </div>
                             {/if}

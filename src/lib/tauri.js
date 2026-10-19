@@ -362,6 +362,38 @@ function resolveMockCategoryFlags(rawCategory) {
   throw new Error(`無效的商品類別「${rawCategory}」，僅允許：轉售商品、自製成品、原物料`);
 }
 
+function checkMockBomCycle(parentProdId, childProdId) {
+  if (parentProdId === childProdId) return true;
+  const visited = new Set();
+  const queue = [childProdId];
+  visited.add(childProdId);
+
+  while (queue.length > 0) {
+    const currPid = queue.shift();
+    const currVarIds = new Set(
+      mockProductVariants.filter(v => v.product_id === currPid).map(v => v.id)
+    );
+    const childVarIds = mockProductBomItems
+      .filter(b => currVarIds.has(b.parent_variant_id))
+      .map(b => b.child_variant_id);
+
+    for (const cVarId of childVarIds) {
+      const cVar = mockProductVariants.find(v => v.id === cVarId);
+      if (cVar?.product_id) {
+        if (cVar.product_id === parentProdId) {
+          return true;
+        }
+        if (!visited.has(cVar.product_id)) {
+          visited.add(cVar.product_id);
+          queue.push(cVar.product_id);
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 let mockLlmProviders = [
   { id: "openai", label: "OpenAI GPT-4o", base_url: "https://api.openai.com/v1", model_name: "gpt-4o", requires_key: true, has_key: false, active: true },
   { id: "deepseek", label: "DeepSeek V3 (BYOK)", base_url: "https://api.deepseek.com/v1", model_name: "deepseek-chat", requires_key: true, has_key: false, active: false },
@@ -1302,12 +1334,14 @@ export async function invoke(cmd, args = {}) {
           cost: s.cost !== undefined ? s.cost : s.purchase_cost
         }));
       const bom_items = mockProductBomItems
-        .filter(b => variantIds.has(b.parent_variant_id))
+        .filter(b => b.product_id === product.id || variantIds.has(b.parent_variant_id))
         .map(b => {
-          const childVar = mockProductVariants.find(v => v.id === b.child_variant_id);
+          const childVar = mockProductVariants.find(v => v.id === (b.child_variant_id || b.material_variant_id));
           const childProd = childVar ? mockProducts.find(p => p.id === childVar.product_id) : null;
           return {
             ...b,
+            product_id: b.product_id || product.id,
+            material_variant_id: b.material_variant_id || b.child_variant_id,
             child_product_name: b.child_product_name || (childProd ? childProd.name : null),
             child_variant_name: b.child_variant_name || (childVar ? childVar.name : null),
             child_sku: b.child_sku || (childVar ? childVar.sku : null)
@@ -1787,9 +1821,15 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'add_bom_item': {
-      const { parent_variant_id, parentVariantId, child_variant_id, childVariantId, quantity } = args || {};
-      const targetParentVid = parent_variant_id || parentVariantId;
-      const targetChildVid = child_variant_id || childVariantId;
+      const {
+        parent_variant_id, parentVariantId,
+        child_variant_id, childVariantId,
+        product_id, productId,
+        material_variant_id, materialVariantId,
+        quantity
+      } = args || {};
+      const targetParentVid = parent_variant_id || parentVariantId || product_id || productId;
+      const targetChildVid = child_variant_id || childVariantId || material_variant_id || materialVariantId;
       const targetTenantId = resolveMockActiveTenantId();
 
       const qty = Number(quantity);
@@ -1830,8 +1870,12 @@ export async function invoke(cmd, args = {}) {
         throw new Error('子物料變體不存在或不屬於同一租戶');
       }
 
-      if (parentVar.id === childVar.id) {
+      if (parentVar.id === childVar.id || parentProd.id === childProd.id) {
         throw new Error('BOM 子物料不能為自身');
+      }
+
+      if (checkMockBomCycle(parentProd.id, childProd.id)) {
+        throw new Error('BOM 子物料不能形成循環引用');
       }
 
       const now = Math.floor(Date.now() / 1000);
@@ -1839,6 +1883,8 @@ export async function invoke(cmd, args = {}) {
         id: nextMockUid('bom'),
         parent_variant_id: parentVar.id,
         child_variant_id: childVar.id,
+        product_id: parentProd.id,
+        material_variant_id: childVar.id,
         quantity: qty,
         created_at: now,
         child_product_name: childProd.name,

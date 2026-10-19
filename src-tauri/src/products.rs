@@ -71,6 +71,10 @@ pub struct ProductBomItem {
     pub child_variant_name: Option<String>,
     #[serde(default)]
     pub child_sku: Option<String>,
+    #[serde(default)]
+    pub product_id: Option<String>,
+    #[serde(default)]
+    pub material_variant_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -170,6 +174,10 @@ pub fn create_products_tables(conn: &rusqlite::Connection) -> Result<(), rusqlit
         [],
     );
     let _ = conn.execute("DROP INDEX IF EXISTS idx_supply_variant", []);
+    let _ = conn.execute(
+        "ALTER TABLE product_supply_sources DROP COLUMN variant_id",
+        [],
+    );
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_supply_unit ON product_supply_sources (unit_id)",
@@ -522,15 +530,18 @@ pub fn get_product_detail_impl(
                 .map_err(|e| format!("Failed to prepare bom query: {}", e))?;
             let b_rows = bom_stmt
                 .query_map(params![vid], |row| {
+                    let child_vid: String = row.get(2)?;
                     Ok(ProductBomItem {
                         id: row.get(0)?,
                         parent_variant_id: row.get(1)?,
-                        child_variant_id: row.get(2)?,
+                        child_variant_id: child_vid.clone(),
                         quantity: row.get(3)?,
                         created_at: row.get(4)?,
                         child_product_name: row.get(5)?,
                         child_variant_name: row.get(6)?,
                         child_sku: row.get(7)?,
+                        product_id: Some(product.id.clone()),
+                        material_variant_id: Some(child_vid),
                     })
                 })
                 .map_err(|e| format!("Failed to query bom items: {}", e))?;
@@ -1106,11 +1117,11 @@ pub fn add_supply_source_impl(
              LIMIT 1",
         )
         .map_err(|e| format!("Failed to prepare unit ownership check: {}", e))?;
-    let resolved_unit_id: Result<String, _> = check_unit
+    let resolved_unit: Result<String, _> = check_unit
         .query_row(params![trimmed_unit_id, trimmed_tenant_id], |row| {
             row.get(0)
         });
-    let actual_unit_id = match resolved_unit_id {
+    let actual_unit_id = match resolved_unit {
         Ok(id) => id,
         Err(_) => return Err("Product unit not found".to_string()),
     };
@@ -1310,6 +1321,47 @@ pub fn update_supply_source_impl(
     })
 }
 
+fn check_bom_cycle(
+    conn: &rusqlite::Connection,
+    parent_prod_id: &str,
+    child_prod_id: &str,
+) -> Result<bool, rusqlite::Error> {
+    use std::collections::{HashSet, VecDeque};
+
+    if parent_prod_id == child_prod_id {
+        return Ok(true);
+    }
+
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    visited.insert(child_prod_id.to_string());
+    queue.push_back(child_prod_id.to_string());
+
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT v_child.product_id \
+         FROM product_bom_items b \
+         JOIN product_variants v_parent ON b.parent_variant_id = v_parent.id \
+         JOIN product_variants v_child ON b.child_variant_id = v_child.id \
+         WHERE v_parent.product_id = ?1",
+    )?;
+
+    while let Some(curr_pid) = queue.pop_front() {
+        let mut rows = stmt.query(params![curr_pid])?;
+        while let Some(row) = rows.next()? {
+            let next_pid: String = row.get(0)?;
+            if next_pid == parent_prod_id {
+                return Ok(true);
+            }
+            if visited.insert(next_pid.clone()) {
+                queue.push_back(next_pid);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 // Usecase: add_bom_item
 pub fn add_bom_item_impl(
     conn: &rusqlite::Connection,
@@ -1334,14 +1386,14 @@ pub fn add_bom_item_impl(
 
     // Verify parent variant belongs to manufactured product in active tenant (support variant_id or fallback to default variant if prod_id)
     let mut check_parent = conn
-        .prepare("SELECT v.id, p.category FROM product_variants v JOIN products p ON v.product_id = p.id WHERE (v.id = ?1 OR v.product_id = ?1) AND p.tenant_id = ?2 ORDER BY v.is_default DESC LIMIT 1")
+        .prepare("SELECT v.id, p.category, p.id FROM product_variants v JOIN products p ON v.product_id = p.id WHERE (v.id = ?1 OR v.product_id = ?1) AND p.tenant_id = ?2 ORDER BY v.is_default DESC LIMIT 1")
         .map_err(|e| format!("Failed to prepare parent variant check: {}", e))?;
-    let parent_info: Result<(String, String), _> = check_parent
+    let parent_info: Result<(String, String, String), _> = check_parent
         .query_row(params![trimmed_parent_vid, trimmed_tenant_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         });
 
-    let (actual_parent_vid, cat) = match parent_info {
+    let (actual_parent_vid, cat, parent_prod_id) = match parent_info {
         Ok(info) => info,
         Err(_) => return Err("母規格變體不存在".to_string()),
     };
@@ -1359,20 +1411,35 @@ pub fn add_bom_item_impl(
 
     // Verify child variant belongs to product in active tenant (support variant_id or product_id or synthetic ID)
     let mut check_child = conn
-        .prepare("SELECT v.id, p.name, v.name, v.sku FROM product_variants v JOIN products p ON v.product_id = p.id WHERE (v.id = ?1 OR v.product_id = ?1 OR v.product_id = ?2) AND p.tenant_id = ?3 ORDER BY v.is_default DESC LIMIT 1")
+        .prepare("SELECT v.id, p.name, v.name, v.sku, p.id FROM product_variants v JOIN products p ON v.product_id = p.id WHERE (v.id = ?1 OR v.product_id = ?1 OR v.product_id = ?2) AND p.tenant_id = ?3 ORDER BY v.is_default DESC LIMIT 1")
         .map_err(|e| format!("Failed to prepare child variant check: {}", e))?;
-    let resolved_child: Result<(String, String, String, Option<String>), _> = check_child
+    let resolved_child: Result<(String, String, String, Option<String>, String), _> = check_child
         .query_row(
             params![trimmed_child_vid, potential_child_pid, trimmed_tenant_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         );
-    let (actual_child_vid, child_pname, child_vname, child_sku) = match resolved_child {
-        Ok(info) => info,
-        Err(_) => return Err("子物料變體不存在或不屬於同一租戶".to_string()),
-    };
+    let (actual_child_vid, child_pname, child_vname, child_sku, child_prod_id) =
+        match resolved_child {
+            Ok(info) => info,
+            Err(_) => return Err("子物料變體不存在或不屬於同一租戶".to_string()),
+        };
 
-    if actual_parent_vid == actual_child_vid {
+    if actual_parent_vid == actual_child_vid || parent_prod_id == child_prod_id {
         return Err("BOM 子物料不能為自身".to_string());
+    }
+
+    if check_bom_cycle(conn, &parent_prod_id, &child_prod_id)
+        .map_err(|e| format!("Failed to check BOM cycle: {}", e))?
+    {
+        return Err("BOM 子物料不能形成循環引用".to_string());
     }
 
     let now = current_timestamp();
@@ -1388,12 +1455,14 @@ pub fn add_bom_item_impl(
     Ok(ProductBomItem {
         id: bom_id,
         parent_variant_id: actual_parent_vid,
-        child_variant_id: actual_child_vid,
+        child_variant_id: actual_child_vid.clone(),
         quantity,
         created_at: now,
         child_product_name: Some(child_pname),
         child_variant_name: Some(child_vname),
         child_sku,
+        product_id: Some(parent_prod_id),
+        material_variant_id: Some(actual_child_vid),
     })
 }
 
@@ -1593,21 +1662,19 @@ pub async fn update_supply_source<R: tauri::Runtime>(
 #[specta::specta]
 pub async fn add_bom_item<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    parent_variant_id: String,
-    child_variant_id: String,
+    parent_variant_id: Option<String>,
+    child_variant_id: Option<String>,
+    product_id: Option<String>,
+    material_variant_id: Option<String>,
     quantity: f64,
 ) -> Result<ProductBomItem, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    add_bom_item_impl(
-        &conn,
-        &active_tid,
-        &parent_variant_id,
-        &child_variant_id,
-        quantity,
-    )
+    let p_vid = parent_variant_id.or(product_id).unwrap_or_default();
+    let c_vid = child_variant_id.or(material_variant_id).unwrap_or_default();
+    add_bom_item_impl(&conn, &active_tid, &p_vid, &c_vid, quantity)
 }
 
 #[cfg(test)]
@@ -1950,12 +2017,22 @@ pub mod tests {
         // Then: BOM item is linked with correct quantity and child names
         assert_eq!(bom.parent_variant_id, parent.variants[0].id);
         assert_eq!(bom.child_variant_id, child.variants[0].id);
+        assert_eq!(bom.product_id, Some(parent.product.id.clone()));
+        assert_eq!(bom.material_variant_id, Some(child.variants[0].id.clone()));
         assert_eq!(bom.quantity, 4.0);
         assert_eq!(bom.child_product_name, Some("散熱片".to_string()));
         assert_eq!(bom.child_variant_name, Some("標準".to_string()));
 
         let detail = get_product_detail_impl(&conn, TEST_TENANT_A, &parent.product.id).unwrap();
         assert_eq!(detail.bom_items.len(), 1);
+        assert_eq!(
+            detail.bom_items[0].product_id,
+            Some(parent.product.id.clone())
+        );
+        assert_eq!(
+            detail.bom_items[0].material_variant_id,
+            Some(child.variants[0].id.clone())
+        );
         assert_eq!(
             detail.bom_items[0].child_product_name,
             Some("散熱片".to_string())
@@ -2258,6 +2335,162 @@ pub mod tests {
 
         // Then: Self reference error
         assert_eq!(err.unwrap_err(), "BOM 子物料不能為自身");
+    }
+
+    #[test]
+    fn test_tc_prod_pos_09_multilevel_bom_manufactured_child() {
+        // Given: Manufactured parent and manufactured child (sub-assembly)
+        let conn = setup_test_db();
+        let parent = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "伺服器主機".into(),
+            "manufactured".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let sub_assembly = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "自製主機板模組".into(),
+            "manufactured".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Adding manufactured product as BOM child (multi-level BOM)
+        let bom = add_bom_item_impl(
+            &conn,
+            TEST_TENANT_A,
+            &parent.variants[0].id,
+            &sub_assembly.variants[0].id,
+            2.0,
+        )
+        .unwrap();
+
+        // Then: Successfully added to BOM
+        assert_eq!(bom.quantity, 2.0);
+        assert_eq!(bom.child_variant_id, sub_assembly.variants[0].id);
+        assert_eq!(bom.child_product_name, Some("自製主機板模組".to_string()));
+    }
+
+    #[test]
+    fn test_tc_prod_neg_15_bom_cycle_detection() {
+        // Given: Manufactured parent A, child B, and grandchild C
+        let conn = setup_test_db();
+        let prod_a = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "成品A".into(),
+            "manufactured".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let prod_b = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "組件B".into(),
+            "manufactured".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let prod_c = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "組件C".into(),
+            "manufactured".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: A contains B (1-level)
+        add_bom_item_impl(
+            &conn,
+            TEST_TENANT_A,
+            &prod_a.variants[0].id,
+            &prod_b.variants[0].id,
+            1.0,
+        )
+        .unwrap();
+
+        // Then: Attempting B contains A (2-level direct cycle) is rejected
+        let err_direct = add_bom_item_impl(
+            &conn,
+            TEST_TENANT_A,
+            &prod_b.variants[0].id,
+            &prod_a.variants[0].id,
+            1.0,
+        );
+        assert_eq!(err_direct.unwrap_err(), "BOM 子物料不能形成循環引用");
+
+        // When: B contains C (2-level chain: A -> B -> C)
+        add_bom_item_impl(
+            &conn,
+            TEST_TENANT_A,
+            &prod_b.variants[0].id,
+            &prod_c.variants[0].id,
+            1.0,
+        )
+        .unwrap();
+
+        // Then: Attempting C contains A (3-level indirect cycle) is rejected
+        let err_indirect = add_bom_item_impl(
+            &conn,
+            TEST_TENANT_A,
+            &prod_c.variants[0].id,
+            &prod_a.variants[0].id,
+            1.0,
+        );
+        assert_eq!(err_indirect.unwrap_err(), "BOM 子物料不能形成循環引用");
+    }
+
+    #[test]
+    fn test_tc_prod_bnd_bom_min_quantity() {
+        // Given: Manufactured parent and raw material child
+        let conn = setup_test_db();
+        let parent = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "微型晶片組".into(),
+            "manufactured".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let child = create_product_impl(
+            &conn,
+            TEST_TENANT_A,
+            "微量銲錫".into(),
+            "raw_material".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // When: Adding BOM with minimal positive quantity (0.0001)
+        let bom = add_bom_item_impl(
+            &conn,
+            TEST_TENANT_A,
+            &parent.variants[0].id,
+            &child.variants[0].id,
+            0.0001,
+        )
+        .unwrap();
+
+        // Then: Successfully recorded
+        assert_eq!(bom.quantity, 0.0001);
     }
 
     #[test]

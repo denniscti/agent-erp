@@ -74,6 +74,32 @@
  * | TC-UNIT-E-09 | Update unit to duplicate unit_name with sibling unit | Error – Duplicate unit name in update | Rejects with duplicate unit error | Uniqueness guard |
  * | TC-UNIT-E-10 | Update base unit to have conversion_ratio != 1.0 | Error – Base unit ratio constraint | Rejects or enforces ratio 1.0 | Integrity check |
  * | TC-UNIT-E-11 | Demote base unit when no other base unit exists | Error – Lone base unit demotion | Rejects demotion to preserve variant's base unit | Invariant guard |
+ * | TC-BOM-N-01 | Manufactured parent, purchasable child material, qty 2.5 | Equivalence – Normal BOM creation | BOM item created and linked | Happy path |
+ * | TC-BOM-N-02 | Create product with initialBomItems array | Equivalence – Batch initial BOM creation | Automatically links all BOM items upon creation | Form batch creation |
+ * | TC-BOM-N-03 | Create manufactured product with no purchasable goods | Equivalence – Empty candidates skip | Successfully creates product, bom_items empty | Empty skip DoD |
+ * | TC-BOM-N-04 | Skip BOM during creation and add later | Equivalence – Deferred BOM creation | Product created without BOM, later successfully added | Deferred addition |
+ * | TC-BOM-N-05 | Object options with product_id and material_variant_id | Equivalence – Dual alias compatibility | BOM created and populated with dual aliases | Spec compatibility |
+ * | TC-BOM-B-01 | BOM quantity = 0.0001 | Boundary – Minimum positive quantity | Accurately recorded | Lower bound |
+ * | TC-BOM-B-02 | BOM quantity = 1 | Boundary – Default unit baseline | Accurately recorded | Baseline bound |
+ * | TC-BOM-B-03 | Product without BOM querying detail | Boundary – Empty BOM list | Returns empty array [] | Empty collection |
+ * | TC-BOM-E-01 | BOM quantity = 0 | Boundary / Error – Zero quantity | Rejects with validation error | Invalid quantity |
+ * | TC-BOM-E-02 | BOM quantity = -1.5 | Boundary / Error – Negative quantity | Rejects with validation error | Invalid quantity |
+ * | TC-BOM-E-03 | Resale product parent attempting BOM | Error – Non-manufactured product | Rejects with validation error | Category check |
+ * | TC-BOM-E-04 | Raw material parent attempting BOM | Error – Raw material product | Rejects with validation error | Category check |
+ * | TC-BOM-MULTI-01 | Manufactured product used as BOM child | Equivalence – Multi-level nested BOM | BOM item created successfully | Hierarchy support |
+ * | TC-BOM-MULTI-02 | Same product variant used as BOM child | Boundary / Error – Product self-loop | Rejects with validation error | Cycle prevention |
+ * | TC-BOM-BATCH-01 | Parallel initial BOM items creation | Equivalence – Batch Promise.all | All BOM items created in parallel | Concurrency check |
+ * | TC-BOM-CYC-01 | 2-level cycle: Add A into B when A already contains B | Error – Direct BOM cycle | Rejects with "BOM 子物料不能形成循環引用" | Cycle guard |
+ * | TC-BOM-CYC-02 | 3-level cycle: Add A into C when A->B->C | Error – Indirect BOM cycle | Rejects with "BOM 子物料不能形成循環引用" | Cycle guard |
+ * | TC-BOM-CYC-03 | Shared sub-component DAG (diamond dependency): B and C both contain D | Equivalence – DAG non-cycle | Successfully added, no false cycle | DAG support |
+ * | TC-UNIT-ALIAS-01 | baseUnit camelCase parameter in createProductAction | Equivalence – baseUnit alias | Unit name recorded as specified | Field alias |
+ * | TC-UNIT-ALIAS-02 | base_unit snake_case parameter in createProductAction | Equivalence – base_unit alias | Unit name recorded as specified | Field alias |
+ * | TC-UNIT-ALIAS-03 | Whitespace baseUnit in createProductAction | Boundary – Whitespace baseUnit | Falls back cleanly to default '個' | Boundary fallback |
+ * | TC-BOM-E-06 | BOM child material is parent variant (self reference) | Boundary / Error – Self loop | Rejects with validation error | Loop prevention |
+ * | TC-BOM-E-07 | Empty or whitespace parent variant ID | Boundary / Error – Empty parent ID | Rejects with validation error | Required field |
+ * | TC-BOM-E-08 | Empty, NULL, or nonexistent child variant ID | Boundary / Error – Empty or invalid child ID | Rejects with validation error | Required field |
+ * | TC-BOM-ISO-01 | Link another tenant's material into current tenant product | Security – Cross-tenant material injection | Rejects with validation error | Tenant boundary |
+ * | TC-BOM-ISO-02 | Add BOM item into another tenant's manufactured product | Security – Cross-tenant parent modification | Rejects with validation error | Tenant boundary |
  * | TC-SRC-N-01 | Multi-vendor registration with distinct costs for same unit | Equivalence – Multi-vendor support | Both sources registered with distinct pricing | Multi-vendor |
  * | TC-SRC-N-02 | Update supply source purchase cost | Equivalence – Cost update | Cost updated in store and detail | Update action |
  * | TC-SRC-N-03 | Update vendor and toggle primary flag | Equivalence – Vendor & primary update | Vendor and is_primary updated | Relation update |
@@ -1591,6 +1617,437 @@ test('TC-UNIT-E-11: Error – cross-tenant update unit rejected', async () => {
   await selectTenantAction('tnt_mock_1');
 });
 
+// ==========================================
+// Issue #142: Manufactured Product BOM Composition Test Suite
+// ==========================================
+
+test('TC-BOM-N-01: Equivalence – Add BOM item (quantity: 2.5) to manufactured product linking purchasable raw material', async () => {
+  // Given: Authenticated tenant user, manufactured product and purchasable raw material
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `伺服器主機_${Date.now()}`,
+    category: '自製成品',
+    baseUnit: '台',
+    sellingPrice: 50000
+  });
+  const material = await createProductAction({
+    name: `晶片零件_${Date.now()}`,
+    category: '原物料',
+    baseUnit: '顆'
+  });
+
+  // When: Adding BOM item with positive quantity
+  const bom = await addBomItemAction(parent.variants[0].id, material.variants[0].id, 2.5);
+
+  // Then: BOM item is created and linked with parent and child variants
+  assert.ok(bom.id);
+  assert.equal(bom.parent_variant_id, parent.variants[0].id);
+  assert.equal(bom.child_variant_id, material.variants[0].id);
+  assert.equal(bom.product_id, parent.product.id);
+  assert.equal(bom.material_variant_id, material.variants[0].id);
+  assert.equal(bom.quantity, 2.5);
+  assert.equal(bom.child_product_name, material.product.name);
+
+  // And Then: Product detail reflects newly added BOM item
+  const detail = await getProductDetailAction(parent.product.id);
+  assert.equal(detail.bom_items.length, 1);
+  assert.equal(detail.bom_items[0].product_id, parent.product.id);
+  assert.equal(detail.bom_items[0].material_variant_id, material.variants[0].id);
+  assert.equal(detail.bom_items[0].quantity, 2.5);
+});
+
+test('TC-BOM-N-02: Equivalence – Batch initial BOM creation via initialBomItems on product creation', async () => {
+  // Given: Existing purchasable raw materials
+  await ensureAuthenticated();
+  const mat1 = await createProductAction({
+    name: `外殼鋼板_${Date.now()}`,
+    category: '原物料',
+    baseUnit: '片'
+  });
+  const mat2 = await createProductAction({
+    name: `散熱風扇_${Date.now()}`,
+    category: '原物料',
+    baseUnit: '組'
+  });
+
+  // When: Creating manufactured product with initialBomItems
+  const parent = await createProductAction({
+    name: `整合機箱_${Date.now()}`,
+    category: '自製成品',
+    baseUnit: '台',
+    sellingPrice: 12000,
+    initialBomItems: [
+      { materialVariantId: mat1.variants[0].id, quantity: 2 },
+      { materialVariantId: mat2.variants[0].id, quantity: 4 }
+    ]
+  });
+
+  // Then: Detail contains both BOM items automatically linked
+  const detail = await getProductDetailAction(parent.product.id);
+  assert.equal(detail.bom_items.length, 2);
+  const foundMat1 = detail.bom_items.find(b => b.material_variant_id === mat1.variants[0].id);
+  const foundMat2 = detail.bom_items.find(b => b.material_variant_id === mat2.variants[0].id);
+  assert.ok(foundMat1);
+  assert.equal(foundMat1.quantity, 2);
+  assert.ok(foundMat2);
+  assert.equal(foundMat2.quantity, 4);
+});
+
+test('TC-BOM-N-03: Equivalence – Creating manufactured product when no purchasable goods exist skips BOM cleanly without blocking', async () => {
+  // Given: Authenticated tenant user
+  await ensureAuthenticated();
+
+  // When: Creating a manufactured product with empty initialBomItems
+  const p = await createProductAction({
+    name: `空料號成品_${Date.now()}`,
+    category: '自製成品',
+    baseUnit: '組',
+    sellingPrice: 8800,
+    initialBomItems: []
+  });
+
+  // Then: Product is successfully created and detail bom_items is empty array
+  assert.ok(p.product.id);
+  assert.equal(p.product.category, 'manufactured');
+  const detail = await getProductDetailAction(p.product.id);
+  assert.ok(Array.isArray(detail.bom_items));
+  assert.equal(detail.bom_items.length, 0);
+});
+
+test('TC-BOM-N-04: Equivalence – Skip BOM during creation and add BOM items later via detail', async () => {
+  // Given: Manufactured product created without initial BOM
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `事後補登成品_${Date.now()}`,
+    category: '自製成品',
+    baseUnit: '套',
+    sellingPrice: 6600
+  });
+  const detailBefore = await getProductDetailAction(parent.product.id);
+  assert.equal(detailBefore.bom_items.length, 0);
+
+  const mat = await createProductAction({
+    name: `延遲物料_${Date.now()}`,
+    category: '原物料',
+    baseUnit: '件'
+  });
+
+  // When: Adding BOM item later
+  const bom = await addBomItemAction(parent.variants[0].id, mat.variants[0].id, 10);
+
+  // Then: BOM item is successfully attached
+  assert.ok(bom.id);
+  assert.equal(bom.quantity, 10);
+  const detailAfter = await getProductDetailAction(parent.product.id);
+  assert.equal(detailAfter.bom_items.length, 1);
+  assert.equal(detailAfter.bom_items[0].material_variant_id, mat.variants[0].id);
+});
+
+test('TC-BOM-N-05: Equivalence – Support product_id and material_variant_id dual aliases in object options', async () => {
+  // Given: Manufactured parent and purchasable child material
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `規格相容成品_${Date.now()}`,
+    category: '自製成品'
+  });
+  const mat = await createProductAction({
+    name: `規格相容物料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When: Calling addBomItemAction using Issue #142 options format { product_id, material_variant_id, quantity }
+  const bom = await addBomItemAction({
+    product_id: parent.product.id,
+    material_variant_id: mat.variants[0].id,
+    quantity: 3.5
+  });
+
+  // Then: BOM item resolves and stores dual aliases
+  assert.ok(bom.id);
+  assert.equal(bom.product_id, parent.product.id);
+  assert.equal(bom.material_variant_id, mat.variants[0].id);
+  assert.equal(bom.quantity, 3.5);
+});
+
+test('TC-BOM-B-01: Boundary – BOM minimal positive quantity (0.0001)', async () => {
+  // Given: Manufactured parent and raw material child
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `極限微量成品_${Date.now()}`,
+    category: '自製成品'
+  });
+  const mat = await createProductAction({
+    name: `微量原料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When: Adding BOM item with quantity = 0.0001
+  const bom = await addBomItemAction(parent.variants[0].id, mat.variants[0].id, 0.0001);
+
+  // Then: Accurately recorded
+  assert.equal(bom.quantity, 0.0001);
+});
+
+test('TC-BOM-B-02: Boundary – BOM quantity = 1 (default unit baseline)', async () => {
+  // Given: Manufactured parent and raw material child
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `基準用量成品_${Date.now()}`,
+    category: '自製成品'
+  });
+  const mat = await createProductAction({
+    name: `基準物料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When: Adding BOM item with quantity = 1
+  const bom = await addBomItemAction(parent.variants[0].id, mat.variants[0].id, 1);
+
+  // Then: Stored as 1
+  assert.equal(bom.quantity, 1);
+});
+
+test('TC-BOM-B-03: Boundary – Product with empty BOM returns empty array bom_items: []', async () => {
+  // Given: Manufactured product without any BOM items
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `無BOM清單成品_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // When: Fetching product detail
+  const detail = await getProductDetailAction(parent.product.id);
+
+  // Then: bom_items is empty array
+  assert.ok(Array.isArray(detail.bom_items));
+  assert.equal(detail.bom_items.length, 0);
+});
+
+test('TC-BOM-E-01: Boundary / Error – BOM quantity = 0 rejected', async () => {
+  // Given: Manufactured parent and raw material child
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `零用量防禦成品_${Date.now()}`,
+    category: '自製成品'
+  });
+  const mat = await createProductAction({
+    name: `零用量防禦物料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When & Then: Adding BOM item with quantity = 0 throws error
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(parent.variants[0].id, mat.variants[0].id, 0);
+    },
+    /BOM 用量必須大於 0/
+  );
+});
+
+test('TC-BOM-E-02: Boundary / Error – BOM negative quantity (-1.5) rejected', async () => {
+  // Given: Manufactured parent and raw material child
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `負用量防禦成品_${Date.now()}`,
+    category: '自製成品'
+  });
+  const mat = await createProductAction({
+    name: `負用量防禦物料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When & Then: Adding BOM item with negative quantity throws error
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(parent.variants[0].id, mat.variants[0].id, -1.5);
+    },
+    /BOM 用量必須大於 0/
+  );
+});
+
+test('TC-BOM-E-03: Error – Parent product category = resale cannot have BOM items', async () => {
+  // Given: Resale product
+  await ensureAuthenticated();
+  const resale = await createProductAction({
+    name: `轉售不建BOM_${Date.now()}`,
+    category: '轉售商品'
+  });
+  const mat = await createProductAction({
+    name: `隨附零件_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When & Then: Adding BOM item to resale product is rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(resale.variants[0].id, mat.variants[0].id, 1);
+    },
+    /非自製成品不可建立 BOM 組成/
+  );
+});
+
+test('TC-BOM-E-04: Error – Parent product category = raw_material cannot have BOM items', async () => {
+  // Given: Raw material product
+  await ensureAuthenticated();
+  const raw = await createProductAction({
+    name: `純原料品_${Date.now()}`,
+    category: '原物料'
+  });
+  const mat = await createProductAction({
+    name: `子原料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When & Then: Adding BOM item to raw material product is rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(raw.variants[0].id, mat.variants[0].id, 1);
+    },
+    /非自製成品不可建立 BOM 組成/
+  );
+});
+
+test('TC-BOM-MULTI-01: Equivalence – Manufactured sub-component can be added as BOM child (multi-level BOM)', async () => {
+  // Given: Manufactured parent product and another manufactured product (sub-assembly)
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `母成品主機_${Date.now()}`,
+    category: '自製成品'
+  });
+  const subAssembly = await createProductAction({
+    name: `自製主機板模組_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // When: Adding manufactured sub-assembly as BOM child
+  const bom = await addBomItemAction(parent.variants[0].id, subAssembly.variants[0].id, 2);
+
+  // Then: Successfully added to BOM with quantity recorded
+  assert.equal(bom.quantity, 2);
+  assert.equal(bom.child_variant_id, subAssembly.variants[0].id);
+  const detail = await getProductDetailAction(parent.product.id);
+  assert.equal(detail.bom_items.length, 1);
+  assert.equal(detail.bom_items[0].child_product_name, subAssembly.product.name);
+});
+
+
+test('TC-BOM-E-06: Boundary / Error – BOM item self-referencing loop rejected', async () => {
+  // Given: Manufactured product
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `自引用防禦成品_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // When & Then: Adding itself as BOM child item is rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(parent.variants[0].id, parent.variants[0].id, 1);
+    },
+    /BOM 子物料不能為自身/
+  );
+});
+
+test('TC-BOM-E-07: Boundary / Error – Empty or whitespace parent variant ID rejected', async () => {
+  // Given: Valid raw material child
+  await ensureAuthenticated();
+  const mat = await createProductAction({
+    name: `合法子物料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When & Then: Calling with empty parent variant ID throws error
+  await assert.rejects(
+    async () => {
+      await addBomItemAction('', mat.variants[0].id, 1);
+    },
+    /母規格變體與子物料變體為必填項目/
+  );
+  await assert.rejects(
+    async () => {
+      await addBomItemAction('   ', mat.variants[0].id, 1);
+    },
+    /母規格變體與子物料變體為必填項目/
+  );
+});
+
+test('TC-BOM-E-08: Boundary / Error – Empty, NULL, or nonexistent child variant ID rejected', async () => {
+  // Given: Valid manufactured parent
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `合法母產品_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // When & Then: Calling with empty or nonexistent child variant ID throws error
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(parent.variants[0].id, '', 1);
+    },
+    /母規格變體與子物料變體為必填項目/
+  );
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(parent.variants[0].id, 'var_nonexistent_99999', 1);
+    },
+    /子物料變體不存在或不屬於同一租戶/
+  );
+});
+
+test('TC-BOM-ISO-01: Multi-tenant Security – Adding child material from another tenant to current tenant product rejected', async () => {
+  // Given: Raw material created in Tenant 2
+  await ensureAuthenticated();
+  await selectTenantAction('tnt_mock_2');
+  const tenant2Material = await createProductAction({
+    name: `租戶2專屬原料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When: Switching back to Tenant 1 and creating manufactured product
+  await selectTenantAction('tnt_mock_1');
+  const tenant1Parent = await createProductAction({
+    name: `租戶1自製成品_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // Then: Attempting to link Tenant 2 material into Tenant 1 BOM is rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(tenant1Parent.variants[0].id, tenant2Material.variants[0].id, 5);
+    },
+    /子物料變體不存在或不屬於同一租戶/
+  );
+});
+
+test('TC-BOM-ISO-02: Multi-tenant Security – Adding BOM item into another tenant manufactured product rejected', async () => {
+  // Given: Manufactured product created in Tenant 2
+  await ensureAuthenticated();
+  await selectTenantAction('tnt_mock_2');
+  const tenant2Parent = await createProductAction({
+    name: `租戶2機密主機_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // When: Switching to Tenant 1 and having Tenant 1 material
+  await selectTenantAction('tnt_mock_1');
+  const tenant1Material = await createProductAction({
+    name: `租戶1物料_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // Then: Attempting to attach BOM item to Tenant 2 product while in Tenant 1 is rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(tenant2Parent.variants[0].id, tenant1Material.variants[0].id, 1);
+    },
+    /母規格變體不存在/
+  );
+});
+
+// ==========================================
+// Issue #158: Multi-Vendor Supply Sources Test Suite
+// ==========================================
+
 test('TC-SRC-N-01: Equivalence – Multi-vendor registration with distinct costs for same unit', async () => {
   // Given: Resale product with default unit, and two vendor partners
   await ensureAuthenticated();
@@ -1959,5 +2416,185 @@ test('TC-SRC-E-04: Error – Cross-tenant supply source update and vendor bindin
     /供應商不存在或無效/
   );
 });
+
+test('TC-UNIT-ALIAS-01: Equivalence – baseUnit camelCase parameter in createProductAction preserves unit name', async () => {
+  // Given: Authenticated session
+  await ensureAuthenticated();
+
+  // When: Creating product with baseUnit: '台'
+  const p = await createProductAction({
+    name: `台計商品_${Date.now()}`,
+    category: '自製成品',
+    baseUnit: '台'
+  });
+
+  // Then: Base unit name is '台' instead of default '個'
+  assert.equal(p.units[0].unit_name, '台');
+  const detail = await getProductDetailAction(p.product.id);
+  assert.equal(detail.units[0].unit_name, '台');
+});
+
+test('TC-UNIT-ALIAS-02: Equivalence – base_unit snake_case parameter in createProductAction preserves unit name', async () => {
+  // Given: Authenticated session
+  await ensureAuthenticated();
+
+  // When: Creating product with base_unit: '箱'
+  const p = await createProductAction({
+    name: `箱計商品_${Date.now()}`,
+    category: '轉售商品',
+    base_unit: '箱'
+  });
+
+  // Then: Base unit name is '箱'
+  assert.equal(p.units[0].unit_name, '箱');
+});
+
+test('TC-UNIT-ALIAS-03: Boundary – Whitespace baseUnit falls back cleanly to default "個"', async () => {
+  // Given: Authenticated session
+  await ensureAuthenticated();
+
+  // When: Creating product with whitespace-only baseUnit
+  const p = await createProductAction({
+    name: `空白單位品_${Date.now()}`,
+    category: '轉售商品',
+    baseUnit: '   '
+  });
+
+  // Then: Falls back to default '個'
+  assert.equal(p.units[0].unit_name, '個');
+});
+
+test('TC-BOM-MULTI-02: Boundary / Error – Same product self-referencing BOM rejected', async () => {
+  // Given: Manufactured product with 2 variants
+  await ensureAuthenticated();
+  const parent = await createProductAction({
+    name: `同品自環品_${Date.now()}`,
+    category: '自製成品'
+  });
+  const var2 = await addProductVariantAction(parent.product.id, '次規格');
+
+  // When / Then: Adding variant from same product into its own BOM is rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(parent.variants[0].id, var2.id, 1);
+    },
+    /BOM 子物料不能為自身/
+  );
+});
+
+test('TC-BOM-BATCH-01: Equivalence – Parallel initial BOM items creation on product creation', async () => {
+  // Given: 3 distinct raw materials
+  await ensureAuthenticated();
+  const m1 = await createProductAction({ name: `材料A_${Date.now()}`, category: '原物料' });
+  const m2 = await createProductAction({ name: `材料B_${Date.now()}`, category: '原物料' });
+  const m3 = await createProductAction({ name: `材料C_${Date.now()}`, category: '原物料' });
+
+  // When: Creating manufactured product with 3 initial BOM items (parallel execution)
+  const product = await createProductAction({
+    name: `三材料成品_${Date.now()}`,
+    category: '自製成品',
+    baseUnit: '組',
+    initialBomItems: [
+      { materialVariantId: m1.variants[0].id, quantity: 1.5 },
+      { materialVariantId: m2.variants[0].id, quantity: 2.0 },
+      { materialVariantId: m3.variants[0].id, quantity: 0.5 }
+    ]
+  });
+
+  // Then: Base unit is '組' and all 3 BOM items are linked
+  assert.equal(product.units[0].unit_name, '組');
+  const detail = await getProductDetailAction(product.product.id);
+  assert.equal(detail.bom_items.length, 3);
+  const quantities = detail.bom_items.map(b => b.quantity).sort();
+  assert.deepEqual(quantities, [0.5, 1.5, 2.0]);
+});
+
+test('TC-BOM-CYC-01: Error – 2-level direct BOM cycle (A -> B -> A) is rejected', async () => {
+  // Given: Manufactured product A and manufactured product B; A already contains B in BOM
+  await ensureAuthenticated();
+  const prodA = await createProductAction({
+    name: `循環成品A_${Date.now()}`,
+    category: '自製成品'
+  });
+  const prodB = await createProductAction({
+    name: `循環組件B_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // When: A contains B
+  await addBomItemAction(prodA.variants[0].id, prodB.variants[0].id, 1);
+
+  // Then: Attempting to add A as child of B (B -> A) forms a 2-level cycle and must be rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(prodB.variants[0].id, prodA.variants[0].id, 1);
+    },
+    /BOM 子物料不能形成循環引用/
+  );
+});
+
+test('TC-BOM-CYC-02: Error – 3-level indirect BOM cycle (A -> B -> C -> A) is rejected', async () => {
+  // Given: Manufactured products A, B, and C; A contains B, B contains C
+  await ensureAuthenticated();
+  const prodA = await createProductAction({
+    name: `三階循環A_${Date.now()}`,
+    category: '自製成品'
+  });
+  const prodB = await createProductAction({
+    name: `三階循環B_${Date.now()}`,
+    category: '自製成品'
+  });
+  const prodC = await createProductAction({
+    name: `三階循環C_${Date.now()}`,
+    category: '自製成品'
+  });
+
+  // When: A contains B, B contains C
+  await addBomItemAction(prodA.variants[0].id, prodB.variants[0].id, 1);
+  await addBomItemAction(prodB.variants[0].id, prodC.variants[0].id, 1);
+
+  // Then: Attempting to add A as child of C (C -> A) forms a 3-level cycle (A -> B -> C -> A) and must be rejected
+  await assert.rejects(
+    async () => {
+      await addBomItemAction(prodC.variants[0].id, prodA.variants[0].id, 1);
+    },
+    /BOM 子物料不能形成循環引用/
+  );
+});
+
+test('TC-BOM-CYC-03: Equivalence – Shared sub-component DAG (diamond dependency) is allowed', async () => {
+  // Given: Manufactured root A, manufactured branches B and C, shared raw material D
+  await ensureAuthenticated();
+  const prodA = await createProductAction({
+    name: `菱形成品A_${Date.now()}`,
+    category: '自製成品'
+  });
+  const prodB = await createProductAction({
+    name: `菱形支線B_${Date.now()}`,
+    category: '自製成品'
+  });
+  const prodC = await createProductAction({
+    name: `菱形支線C_${Date.now()}`,
+    category: '自製成品'
+  });
+  const prodD = await createProductAction({
+    name: `共享零件D_${Date.now()}`,
+    category: '原物料'
+  });
+
+  // When: A contains B & C; B and C both contain D (DAG diamond, no cycle)
+  await addBomItemAction(prodA.variants[0].id, prodB.variants[0].id, 1);
+  await addBomItemAction(prodA.variants[0].id, prodC.variants[0].id, 1);
+  await addBomItemAction(prodB.variants[0].id, prodD.variants[0].id, 2);
+  const bomCtoD = await addBomItemAction(prodC.variants[0].id, prodD.variants[0].id, 3);
+
+  // Then: Both B and C successfully reference D without false positive cycle rejection
+  assert.ok(bomCtoD.id);
+  const detailB = await getProductDetailAction(prodB.product.id);
+  const detailC = await getProductDetailAction(prodC.product.id);
+  assert.equal(detailB.bom_items.length, 1);
+  assert.equal(detailC.bom_items.length, 1);
+});
+
 
 

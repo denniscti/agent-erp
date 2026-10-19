@@ -1150,7 +1150,7 @@ export async function getProductDetailAction(productId) {
 
 /**
  * Create a new product
- * @param {{ name: string, category: string, sku?: string, unit_name?: string, unitName?: string, selling_price?: number, sellingPrice?: number }} input
+ * @param {{ name: string, category: string, sku?: string, unit_name?: string, unitName?: string, baseUnit?: string, base_unit?: string, selling_price?: number, sellingPrice?: number, initialBomItems?: any[], initial_bom_items?: any[], bomItems?: any[], bom_items?: any[] }} input
  * @returns {Promise<any>}
  */
 export async function createProductAction(input) {
@@ -1166,7 +1166,7 @@ export async function createProductAction(input) {
     throw new Error('商品類別為必填項目');
   }
   const sku = input.sku ? String(input.sku).trim() : undefined;
-  const unitName = (input.unit_name || input.unitName || '').trim() || undefined;
+  const unitName = (input.unit_name || input.unitName || input.baseUnit || input.base_unit || '').trim() || undefined;
   const sellingPrice = input.selling_price !== undefined ? input.selling_price : input.sellingPrice;
 
   try {
@@ -1179,6 +1179,27 @@ export async function createProductAction(input) {
       selling_price: sellingPrice,
       sellingPrice
     });
+
+    const initialBom = input.initialBomItems || input.initial_bom_items || input.bomItems || input.bom_items;
+    if (Array.isArray(initialBom) && initialBom.length > 0) {
+      const parentVarId = (created.variants && created.variants[0]) ? created.variants[0].id : (created.product ? created.product.id : created.id);
+      const validItems = initialBom
+        .map(item => ({
+          childId: item.materialVariantId || item.material_variant_id || item.childVariantId || item.child_variant_id,
+          qty: Number(item.quantity)
+        }))
+        .filter(item => item.childId && !isNaN(item.qty) && item.qty > 0);
+
+      if (validItems.length > 0) {
+        try {
+          await Promise.all(validItems.map(item => addBomItemAction(parentVarId, item.childId, item.qty)));
+        } catch (bomErr) {
+          await fetchProducts();
+          throw bomErr;
+        }
+      }
+    }
+
     await fetchProducts();
     showToast(`已成功建立商品「${name}」！`);
     return created;
@@ -1485,23 +1506,38 @@ export async function updateSupplySourceAction(sourceId, updates = {}) {
 
 /**
  * Add a BOM item to a manufactured product variant
- * @param {string} parentVariantId
- * @param {string} childVariantId
- * @param {number} quantity
+ * @param {string|object} parentVariantIdOrOptions Parent variant ID (or product ID) or options object
+ * @param {string} [childVariantId] Child variant ID (or material variant ID)
+ * @param {number} [quantity] BOM quantity
  * @returns {Promise<any>}
  */
-export async function addBomItemAction(parentVariantId, childVariantId, quantity) {
-  const parentVid = (parentVariantId || '').trim();
-  const childVid = (childVariantId || '').trim();
+export async function addBomItemAction(parentVariantIdOrOptions, childVariantId, quantity) {
+  let parentVid = '';
+  let childVid = '';
+  let qty = quantity;
+
+  if (typeof parentVariantIdOrOptions === 'object' && parentVariantIdOrOptions !== null) {
+    parentVid = (parentVariantIdOrOptions.parent_variant_id || parentVariantIdOrOptions.parentVariantId || parentVariantIdOrOptions.product_id || parentVariantIdOrOptions.productId || '').trim();
+    childVid = (parentVariantIdOrOptions.child_variant_id || parentVariantIdOrOptions.childVariantId || parentVariantIdOrOptions.material_variant_id || parentVariantIdOrOptions.materialVariantId || '').trim();
+    qty = parentVariantIdOrOptions.quantity;
+  } else {
+    parentVid = (parentVariantIdOrOptions || '').trim();
+    childVid = (childVariantId || '').trim();
+  }
+
   if (!parentVid || !childVid) throw new Error('母規格變體與子物料變體為必填項目');
 
   try {
     const bom = await invoke('add_bom_item', {
       parent_variant_id: parentVid,
       parentVariantId: parentVid,
+      product_id: parentVid,
+      productId: parentVid,
       child_variant_id: childVid,
       childVariantId: childVid,
-      quantity
+      material_variant_id: childVid,
+      materialVariantId: childVid,
+      quantity: Number(qty)
     });
     if (appState.currentProductDetail) {
       await getProductDetailAction(appState.currentProductDetail.product.id);
