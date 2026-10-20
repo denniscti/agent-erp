@@ -68,43 +68,6 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
 
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS modules (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            version TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            sha256 TEXT NOT NULL,
-            workspace TEXT NOT NULL,
-            icon_svg TEXT NOT NULL DEFAULT '',
-            installed_at INTEGER NOT NULL
-        )",
-        [],
-    )
-    .map_err(|e| format!("Failed to create modules table: {}", e))?;
-
-    // Migration to add icon_svg column to modules if it does not exist
-    let _ = conn.execute(
-        "ALTER TABLE modules ADD COLUMN icon_svg TEXT NOT NULL DEFAULT ''",
-        [],
-    );
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS mirrored_orders (
-            so_id TEXT PRIMARY KEY,
-            customer_name TEXT NOT NULL,
-            po_reference TEXT NOT NULL,
-            items_json TEXT NOT NULL,
-            total_amount REAL NOT NULL,
-            profit_margin REAL NOT NULL,
-            capacity_usage REAL NOT NULL,
-            status TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        )",
-        [],
-    )
-    .map_err(|e| format!("Failed to create mirrored_orders table: {}", e))?;
-
-    conn.execute(
         "CREATE TABLE IF NOT EXISTS audit_logs (
             id TEXT PRIMARY KEY,
             action_type TEXT NOT NULL,
@@ -370,23 +333,24 @@ pub fn resolve_active_tenant_id(conn: &rusqlite::Connection) -> Result<String, S
 // Removed 'pub' to resolve E0255 re-import macro name collisions in lib.rs
 #[tauri::command]
 async fn simulate_agent_chat(
-    _workspace: String,
-    _message: String,
+    workspace: String,
+    message: String,
     channel: tauri::ipc::Channel<ChatResponseChunk>,
 ) -> Result<(), String> {
+    let _ = workspace;
+    let _ = message;
     tokio::spawn(async move {
-        let response_text = "智能助理已就緒。隨時可以為您服務，請告訴我您需要什麼協助。";
+        let response_text = "一般對話尚未串接 LLM 模型。如需體驗智能助理，請由上方或列表選擇具體業務任務（如部門、客戶、供應商、商品管理）。";
 
-        // Split text by space and stream back
-        let words: Vec<&str> = response_text.split_whitespace().collect();
-        for (i, word) in words.iter().enumerate() {
-            let is_last = i == words.len() - 1;
+        let chars: Vec<char> = response_text.chars().collect();
+        for (i, chunk_chars) in chars.chunks(3).enumerate() {
+            let is_last = (i + 1) * 3 >= chars.len();
             let chunk = ChatResponseChunk {
-                token: format!("{} ", word),
+                token: chunk_chars.iter().collect(),
                 done: is_last,
             };
             let _ = channel.send(chunk);
-            tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(40)).await;
         }
     });
     Ok(())

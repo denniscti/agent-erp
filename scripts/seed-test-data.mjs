@@ -91,34 +91,6 @@ export const SEED_DATA = {
     }
   ],
 
-  orders: [
-    {
-      so_id: "SO-9921",
-      customer_name: "A 公司 (Customer A)",
-      po_reference: "PO-2026-0091",
-      items_json: JSON.stringify([{ name: "智能核心晶片 (AI Core Chip)", qty: 500, price: 120 }]),
-      total_amount: 60000.0,
-      profit_margin: 0.25,
-      capacity_usage: 0.85,
-      status: "pending",
-      created_at: now - 7200
-    },
-    {
-      so_id: "SO-9922",
-      customer_name: "B 企業 (Enterprise B)",
-      po_reference: "PO-2026-0092",
-      items_json: JSON.stringify([
-        { name: "高階邊緣伺服器 (Edge Server X1)", qty: 10, price: 4500 },
-        { name: "專用安全模組 (TPM v2.0)", qty: 20, price: 350 }
-      ]),
-      total_amount: 52000.0,
-      profit_margin: 0.32,
-      capacity_usage: 0.60,
-      status: "pending",
-      created_at: now - 3600
-    }
-  ],
-
   auditLogs: [
     {
       id: `LOG-${now - 3600 * 2}`,
@@ -177,7 +149,6 @@ BEGIN TRANSACTION;
 CREATE TABLE IF NOT EXISTS departments (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, parent_task_id TEXT, module_id TEXT NOT NULL, assignee TEXT NOT NULL, skill_id TEXT, created_at INTEGER NOT NULL, completed_at INTEGER);
 CREATE TABLE IF NOT EXISTS task_messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, timestamp INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS mirrored_orders (so_id TEXT PRIMARY KEY, customer_name TEXT NOT NULL, po_reference TEXT NOT NULL, items_json TEXT NOT NULL, total_amount REAL NOT NULL, profit_margin REAL NOT NULL, capacity_usage REAL NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, action_type TEXT NOT NULL, arguments TEXT NOT NULL, decision TEXT NOT NULL, operator TEXT NOT NULL, timestamp INTEGER NOT NULL);
 `;
 
@@ -193,9 +164,6 @@ CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, action_type TEXT NOT
         sqlScript += `INSERT OR REPLACE INTO task_messages (id, task_id, role, content, timestamp) VALUES ('${m.id.replace(/'/g, "''")}', '${m.task_id.replace(/'/g, "''")}', '${m.role.replace(/'/g, "''")}', '${m.content.replace(/'/g, "''")}', ${m.timestamp});\n`;
       }
 
-      for (const o of SEED_DATA.orders) {
-        sqlScript += `INSERT OR REPLACE INTO mirrored_orders (so_id, customer_name, po_reference, items_json, total_amount, profit_margin, capacity_usage, status, created_at) VALUES ('${o.so_id.replace(/'/g, "''")}', '${o.customer_name.replace(/'/g, "''")}', '${o.po_reference.replace(/'/g, "''")}', '${o.items_json.replace(/'/g, "''")}', ${o.total_amount}, ${o.profit_margin}, ${o.capacity_usage}, '${o.status.replace(/'/g, "''")}', ${o.created_at});\n`;
-      }
 
       for (const a of SEED_DATA.auditLogs) {
         sqlScript += `INSERT OR REPLACE INTO audit_logs (id, action_type, arguments, decision, operator, timestamp) VALUES ('${a.id.replace(/'/g, "''")}', '${a.action_type.replace(/'/g, "''")}', '${a.arguments.replace(/'/g, "''")}', '${a.decision.replace(/'/g, "''")}', '${a.operator.replace(/'/g, "''")}', ${a.timestamp});\n`;
@@ -204,7 +172,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, action_type TEXT NOT
       sqlScript += `COMMIT;\n`;
 
       execSync(`sqlite3 "${foundDb}"`, { input: sqlScript, stdio: ['pipe', 'pipe', 'pipe'] });
-      console.log(`\x1b[32m✅ 成功將 ${SEED_DATA.departments.length} 筆部門、${SEED_DATA.tasks.length} 筆任務、${SEED_DATA.orders.length} 筆訂單寫入 SQLite 資料庫！\x1b[0m\n`);
+      console.log(`\x1b[32m✅ 成功將 ${SEED_DATA.departments.length} 筆部門、${SEED_DATA.tasks.length} 筆任務寫入 SQLite 資料庫！\x1b[0m\n`);
     } catch (e) {
       console.log(`\x1b[33m⚠️ 本地未安裝 sqlite3 指令或無法寫入檔案 (${e.message})，可使用前端自動 Mock 或執行 Tauri 應用程式自動載入。\x1b[0m\n`);
     }
@@ -217,7 +185,6 @@ CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, action_type TEXT NOT
   console.log(`   - 組織部門: ${SEED_DATA.departments.length} 筆 (包含一級部門與二級子小組)`);
   console.log(`   - 待辦任務: ${SEED_DATA.tasks.length} 筆 (包含起步主任務與子任務)`);
   console.log(`   - 對話紀錄: ${SEED_DATA.taskMessages.length} 筆`);
-  console.log(`   - 孿生訂單: ${SEED_DATA.orders.length} 筆`);
   console.log(`   - 審計日誌: ${SEED_DATA.auditLogs.length} 筆`);
   console.log("\x1b[36m==============================================================================\x1b[0m");
 }

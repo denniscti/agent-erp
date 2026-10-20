@@ -1,3 +1,5 @@
+import { Channel as TauriChannel } from '@tauri-apps/api/core';
+
 // Detect if we are in Tauri runtime
 export const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
 
@@ -389,14 +391,28 @@ let mockLlmProviders = [
 
 const listeners = {};
 
-// Mock Channel implementation for streaming chat in browser
+// Mock Channel implementation for streaming chat in browser / test runner
 class MockChannel {
   constructor(onmessage) {
     this.onmessage = onmessage || null;
   }
 }
 
-export const Channel = MockChannel;
+// Environment-aware Channel implementation:
+// Uses native Tauri IPC Channel with transformCallback and toJSON() in Tauri runtime,
+// and MockChannel in browser or node test runner.
+export class Channel {
+  constructor(onmessage) {
+    const inTauri = (typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__) || isTauri;
+    if (inTauri) {
+      if (typeof window !== 'undefined' && window.__TAURI__?.core?.Channel) {
+        return new window.__TAURI__.core.Channel(onmessage);
+      }
+      return new TauriChannel(onmessage);
+    }
+    return new MockChannel(onmessage);
+  }
+}
 
 // 1. Invoke wrapper
 export async function invoke(cmd, args = {}) {
@@ -434,14 +450,14 @@ export async function invoke(cmd, args = {}) {
     case 'simulate_agent_chat': {
       const { channel } = args;
       if (channel && typeof channel.onmessage === 'function') {
-        const responseText = "智能助理已就緒。隨時可以為您服務，請告訴我您需要什麼協助。";
+        const responseText = "一般對話尚未串接 LLM 模型。如需體驗智能助理，請由上方或列表選擇具體業務任務（如部門、客戶、供應商、商品管理）。";
 
-        const words = responseText.split(' ');
+        const chunks = responseText.match(/[\s\S]{1,3}/g) || [responseText];
         let idx = 0;
         const interval = setInterval(() => {
-          if (idx < words.length) {
-            const isLast = idx === words.length - 1;
-            channel.onmessage({ token: `${words[idx]} `, done: isLast });
+          if (idx < chunks.length) {
+            const isLast = idx === chunks.length - 1;
+            channel.onmessage({ token: chunks[idx], done: isLast });
             idx++;
             if (isLast) {
               clearInterval(interval);
