@@ -1,34 +1,40 @@
 /**
  * @file onboarding-greeting.test.js
- * @description Test suite for Tenant Onboarding Tasks & Initial Greetings (Issue #118, Issue #120, Issue #133).
+ * @description Test suite for Tenant Onboarding Tasks & Initial Greetings (Issue #118, Issue #120, Issue #133, Issue #143).
  *
  * ## Test Perspective Table (Equivalence Partitioning & Boundary Values)
  * | Case ID | Input / Precondition | Perspective (Equivalence / Boundary) | Expected Result | Notes |
  * |---|---|---|---|---|
- * | TC-ONB-N-01 | tenantName = '台積電研發中心' | Equivalence – Normal tenant onboarding seed | Creates '新租戶起步' parent task and '設定部門', '建立第一個客戶', '建立第一個供應商' subtasks with respective skillId, guidance messages and main welcome greeting | Main flow |
+ * | TC-ONB-N-01 | tenantName = '台積電研發中心' | Equivalence – Normal tenant onboarding seed | Creates '新租戶起步' parent task and '設定部門', '建立第一個客戶', '建立第一個供應商', '建立第一個商品' subtasks with respective skillId, guidance messages and main welcome greeting | Main flow |
  * | TC-ONB-N-02 | Call getAgentProfileForTask on '建立第一個客戶' task with skillId | Equivalence – Workflow AgentProfile resolution via skillId | Resolves to customer.create_basic_profile AgentProfile with customer domain & tools | Skill binding |
  * | TC-ONB-N-03 | Customer subtask execution with runAgentTurn & confirmation | Equivalence – End-to-end customer creation in onboarding task | Triggers create_partner confirmation card, confirmation creates partner and updates store | Workflow loop |
  * | TC-ONB-N-04 | Call getAgentProfileForTask on '建立第一個供應商' task with skillId | Equivalence – Workflow AgentProfile resolution via skillId | Resolves to vendor.create_basic_profile AgentProfile with vendor domain & tools | Vendor skill binding |
  * | TC-ONB-N-05 | Vendor subtask execution with runAgentTurn & confirmation | Equivalence – End-to-end vendor creation in onboarding task | Triggers create_vendor confirmation card, confirmation creates partner (is_vendor: true) and updates store | Vendor workflow loop |
+ * | TC-ONB-N-06 | Call getAgentProfileForTask on '建立第一個商品' task with skillId | Equivalence – Workflow AgentProfile resolution via skillId | Resolves to productManagementAgentProfile with product domain & tools | Product skill binding |
+ * | TC-ONB-N-07 | Product subtask execution with runAgentTurn & confirmation | Equivalence – End-to-end product creation in onboarding task | Triggers create_product confirmation card, confirmation creates product and updates store | Product workflow loop |
  * | TC-SKILL-N-01 | task.skillId = 'customer.create_basic_profile', non-keyword title | Equivalence – skillId resolution without relying on title | Resolves to customerCreateBasicProfileAgentProfile | Skill decoupling |
  * | TC-SKILL-N-02 | task.skillId = 'department.manage', non-keyword title | Equivalence – skillId resolution for department | Resolves to departmentAgentProfile | Skill decoupling |
  * | TC-SKILL-N-03 | task.skillId = 'vendor.create_basic_profile', non-keyword title | Equivalence – skillId resolution for vendor | Resolves to vendorCreateBasicProfileAgentProfile | Skill decoupling |
  * | TC-SKILL-N-04 | task.skill_id = 'customer.create_basic_profile' (snake_case) | Equivalence – snake_case skill_id resolution | Resolves to customerCreateBasicProfileAgentProfile | DB/Rust compatibility |
  * | TC-SKILL-N-05 | task.skillId = 'customer.create_basic_profile', title = '設定部門' | Equivalence – Priority: skillId precedes title matching | Resolves to customerCreateBasicProfileAgentProfile | Precedence check |
  * | TC-SKILL-N-06 | Custom registered profile with custom skillId | Equivalence – Custom skill registration and resolution | Resolves to custom profile | Extensibility |
+ * | TC-SKILL-N-07 | task.skillId = 'product.create_basic_profile', non-keyword title | Equivalence – skillId resolution for product | Resolves to productManagementAgentProfile | Product skill decoupling |
  * | TC-SKILL-FB-01 | task without skillId, title = '設定部門' | Boundary – Fallback to title matching (department) | Resolves to departmentAgentProfile | Backward compatibility |
  * | TC-SKILL-FB-02 | task without skillId, title = '建立第一個供應商' | Boundary – Fallback to title matching (vendor) | Resolves to vendorCreateBasicProfileAgentProfile | Backward compatibility |
  * | TC-SKILL-FB-03 | task without skillId, title = '新增客戶基本資料' | Boundary – Fallback to title matching (customer) | Resolves to customerCreateBasicProfileAgentProfile | Backward compatibility |
+ * | TC-SKILL-FB-04 | task without skillId, title = '建立第一個商品' | Boundary – Fallback to title matching (product) | Resolves to productManagementAgentProfile | Backward compatibility |
  * | TC-SKILL-B-01 | task is null or undefined | Boundary – Null task input | Returns null | Null safety |
  * | TC-SKILL-B-02 | task with empty/whitespace skillId and non-matching title | Boundary – Empty/whitespace skillId | Returns null | Whitespace normalization |
  * | TC-SKILL-B-03 | task with unknown skillId and non-matching title | Boundary – Unknown skillId | Returns null | Unrecognized skill |
  * | TC-SKILL-B-04 | task with unknown skillId but matching fallback title | Boundary – Unknown skillId fallbacks to title match | Resolves to matching profile via fallback | Fallback resilience |
- * | TC-ONB-STEPS-01 | Inspect ONBOARDING_STEPS export array | Equivalence – Declarative onboarding steps configuration | Contains 3 steps with title, skillId, moduleId, assignee, and guidanceMessage function | Declarative schema |
+ * | TC-ONB-STEPS-01 | Inspect ONBOARDING_STEPS export array | Equivalence – Declarative onboarding steps configuration | Contains 4 steps with title, skillId, moduleId, assignee, and guidanceMessage function | Declarative schema |
  * | TC-ONB-ACT-01 | createTaskAction with skillId parameter | Equivalence – createTaskAction stores skill_id | Task object contains skill_id and skillId | Action parameter |
  * | TC-ONB-ACT-02 | createTaskAction without skillId parameter | Boundary – createTaskAction with default null skillId | Task object contains skill_id == null | Default parameter |
- * | TC-ONB-B-01 | tenantName = 'Acme-Corp 123_Special' | Equivalence – English and special characters in tenant name | Special tenant name is safely embedded in all subtasks (dept, customer, vendor) and main welcome | Encoding safety |
- * | TC-ONB-B-02 | tenantName = '' (empty string) | Boundary – Empty tenant name | Executed safely without throwing unhandled exceptions, all 3 subtasks created | Empty boundary |
- * | TC-ONB-B-03 | tenantName = '   ' (whitespace string) | Boundary – Whitespace tenant name | Executed safely without throwing unhandled exceptions, all 3 subtasks created | Whitespace boundary |
+ * | TC-ONB-B-01 | tenantName = 'Acme-Corp 123_Special' | Equivalence – English and special characters in tenant name | Special tenant name is safely embedded in all 4 subtasks (dept, customer, vendor, product) and main welcome | Encoding safety |
+ * | TC-ONB-B-02 | tenantName = '' (empty string) | Boundary – Empty tenant name | Executed safely without throwing unhandled exceptions, all 4 subtasks created | Empty boundary |
+ * | TC-ONB-B-03 | tenantName = '   ' (whitespace string) | Boundary – Whitespace tenant name | Executed safely without throwing unhandled exceptions, all 4 subtasks created | Whitespace boundary |
+ * | TC-ONB-B-04 | tenantName = null (NULL reference) | Boundary – NULL tenant name | Executed safely without throwing unhandled exceptions, all 4 subtasks created | NULL boundary |
+ * | TC-ONB-B-05 | tenantName = undefined (omitted reference) | Boundary – undefined tenant name | Executed safely without throwing unhandled exceptions, all 4 subtasks created | undefined boundary |
  * | TC-ONB-E-01 | Internal error during onboarding task creation | Error – Exception handling & logging | Caught gracefully by try-catch and logged via console.warn | Error resilience |
  */
 
@@ -116,7 +122,7 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and departme
     'Vendor subtask message should include example guidance text'
   );
 
-  // 4. Verify '建立第一個商品' subtask (Issue #139)
+  // 4. Verify '建立第一個商品' subtask (Issue #143)
   const productSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品' && t.parent_task_id === parentTask.id);
   assert.ok(productSubTasks.length > 0, 'Subtask 建立第一個商品 should be created under parent task');
   const productSubTask = productSubTasks[productSubTasks.length - 1];
@@ -292,10 +298,11 @@ test('TC-ONB-N-05: Normal case - End-to-end vendor creation in 建立第一個�
 });
 
 test('TC-ONB-N-06: Normal case - getAgentProfileForTask resolves productManagementAgentProfile for 建立第一個商品', () => {
-  // Given: Preconditions - An onboarding subtask with title '建立第一個商品'
+  // Given: Preconditions - An onboarding subtask with skillId 'product.create_basic_profile'
   const task = {
     id: 'task_sub_product_1',
     title: '建立第一個商品',
+    skillId: 'product.create_basic_profile',
     parent_task_id: 'task_parent_1',
     module_id: 'sales'
   };
@@ -322,6 +329,7 @@ test('TC-ONB-N-07: Normal case - End-to-end product creation in 建立第一個�
   const task = {
     id: `task_sub_prod_${Date.now()}`,
     title: '建立第一個商品',
+    skillId: 'product.create_basic_profile',
     status: 'pending'
   };
   const profile = getAgentProfileForTask(task);
@@ -462,21 +470,40 @@ test('TC-SKILL-N-06: Normal case - Custom declared skillId registered in workflo
   assert.equal(resolvedProfile, customProfile);
 });
 
-test('TC-SKILL-FB-01 to FB-03: Boundary - Fallback to title matching when skillId is absent', () => {
+test('TC-SKILL-N-07: Normal case - skillId resolves product profile with non-keyword title', () => {
+  // Given: Preconditions - A task with product skillId but non-keyword title
+  const task = {
+    id: 'task_prod_custom_1',
+    title: '登記首批物料規格清單',
+    skillId: 'product.create_basic_profile'
+  };
+
+  // When:  Operation to execute - Resolve AgentProfile for task
+  const resolvedProfile = getAgentProfileForTask(task);
+
+  // Then:  Expected result - Directly resolves to productManagementAgentProfile
+  assert.equal(resolvedProfile, productManagementAgentProfile);
+  assert.equal(resolvedProfile.id, 'product.create_basic_profile');
+});
+
+test('TC-SKILL-FB-01 to FB-04: Boundary - Fallback to title matching when skillId is absent', () => {
   // Given: Preconditions - Legacy tasks without skillId
   const deptTask = { id: 't_legacy_1', title: '設定部門' };
   const vendorTask = { id: 't_legacy_2', title: '建立第一個供應商' };
   const customerTask = { id: 't_legacy_3', title: '新增客戶基本資料' };
+  const productTask = { id: 't_legacy_4', title: '建立第一個商品' };
 
   // When:  Operation to execute - Resolve profiles
   const deptResolved = getAgentProfileForTask(deptTask);
   const vendorResolved = getAgentProfileForTask(vendorTask);
   const customerResolved = getAgentProfileForTask(customerTask);
+  const productResolved = getAgentProfileForTask(productTask);
 
   // Then:  Expected result - All legacy tasks successfully resolve via fallback
   assert.equal(deptResolved, departmentAgentProfile);
   assert.equal(vendorResolved, vendorCreateBasicProfileAgentProfile);
   assert.equal(customerResolved, customerCreateBasicProfileAgentProfile);
+  assert.equal(productResolved, productManagementAgentProfile);
 });
 
 test('TC-SKILL-B-01 to B-04: Boundary values - Null, whitespace, and unknown skillIds', () => {
@@ -640,6 +667,50 @@ test('TC-ONB-B-03: Boundary value - Whitespace string tenant name handled safely
   assert.ok(prodSubTasks.length > 0, 'Product subtask created');
   const vendorMsgs = appState.taskMessages[vendorSubTasks[vendorSubTasks.length - 1].id] || [];
   assert.ok(vendorMsgs.length > 0);
+});
+
+test('TC-ONB-B-04: Boundary value - NULL tenant name handled safely', async () => {
+  // Given: Preconditions - Reset appState
+  appState.tasks = [];
+  appState.taskMessages = {};
+  appState.chatMessages = [];
+
+  // When:  Operation to execute - Seed onboarding with null
+  await seedOnboardingTasks(null);
+
+  // Then:  Expected result - Should execute safely without throwing exceptions
+  const deptSubTasks = appState.tasks.filter(t => t.title === '設定部門');
+  assert.ok(deptSubTasks.length > 0, 'Department subtask created');
+  const customerSubTasks = appState.tasks.filter(t => t.title === '建立第一個客戶');
+  assert.ok(customerSubTasks.length > 0, 'Customer subtask created');
+  const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商');
+  assert.ok(vendorSubTasks.length > 0, 'Vendor subtask created');
+  const prodSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品');
+  assert.ok(prodSubTasks.length > 0, 'Product subtask created');
+  const prodMsgs = appState.taskMessages[prodSubTasks[prodSubTasks.length - 1].id] || [];
+  assert.ok(prodMsgs.length > 0, 'Product subtask should have guidance message');
+});
+
+test('TC-ONB-B-05: Boundary value - undefined tenant name handled safely', async () => {
+  // Given: Preconditions - Reset appState
+  appState.tasks = [];
+  appState.taskMessages = {};
+  appState.chatMessages = [];
+
+  // When:  Operation to execute - Seed onboarding with undefined
+  await seedOnboardingTasks(undefined);
+
+  // Then:  Expected result - Should execute safely without throwing exceptions
+  const deptSubTasks = appState.tasks.filter(t => t.title === '設定部門');
+  assert.ok(deptSubTasks.length > 0, 'Department subtask created');
+  const customerSubTasks = appState.tasks.filter(t => t.title === '建立第一個客戶');
+  assert.ok(customerSubTasks.length > 0, 'Customer subtask created');
+  const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商');
+  assert.ok(vendorSubTasks.length > 0, 'Vendor subtask created');
+  const prodSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品');
+  assert.ok(prodSubTasks.length > 0, 'Product subtask created');
+  const prodMsgs = appState.taskMessages[prodSubTasks[prodSubTasks.length - 1].id] || [];
+  assert.ok(prodMsgs.length > 0, 'Product subtask should have guidance message');
 });
 
 test('TC-ONB-E-01: Error case - Failure during onboarding seeding is caught gracefully with warning logged', async () => {

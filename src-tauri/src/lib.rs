@@ -318,14 +318,25 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
                 [now],
             ).map_err(|e| format!("Failed to seed tasks: {}", e))?;
 
+            let pending_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE tenant_id = 'tnt_mock_1' AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            ).map_err(|e| format!("Failed to query pending task count: {}", e))?;
+
+            let welcome_content = format!(
+                "你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 {} 筆待處理任務、1 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：",
+                pending_count
+            );
+
             conn.execute(
                 "INSERT INTO task_messages (id, task_id, role, content, timestamp) VALUES
-                 ('msg_1', 'main', 'assistant', '你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 3 筆待處理任務、1 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：', ?1),
-                 ('msg_2', 'task_sub_1', 'assistant', '您好！我是部門設定助理。新租戶建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？（您可以直接輸入「我想新增行銷部」或詢問「目前有哪些部門」）', ?1),
-                 ('msg_3', 'task_sub_2', 'assistant', '您好！我是客戶管理助理。新租戶建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）', ?1),
-                 ('msg_4', 'task_sub_3', 'assistant', '您好！我是供應商管理助理。新租戶建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）', ?1),
-                 ('msg_5', 'task_sub_4', 'assistant', '您好！我是商品資料管理助理。新租戶建立完成後，讓我們來建立第一筆商品基本資料。請問您想先新增哪一項商品？（例如：「我想新增智能核心晶片 分類 轉售商品 售價 120」）', ?1)",
-                [now],
+                 ('msg_1', 'main', 'assistant', ?1, ?2),
+                 ('msg_2', 'task_sub_1', 'assistant', '您好！我是部門設定助理。新租戶建立完成後，首要步驟是建立組織部門。請問您想先新增哪一個部門？（您可以直接輸入「我想新增行銷部」或詢問「目前有哪些部門」）', ?2),
+                 ('msg_3', 'task_sub_2', 'assistant', '您好！我是客戶管理助理。新租戶建立完成後，讓我們來建立第一筆客戶基本資料。請問您想先新增哪一位客戶？（例如：「我想新增台積電 統編 22099131」）', ?2),
+                 ('msg_4', 'task_sub_3', 'assistant', '您好！我是供應商管理助理。新租戶建立完成後，讓我們來建立第一筆供應商基本資料。請問您想先新增哪一家供應商？（例如：「我想新增欣興電子 統編 11223344」）', ?2),
+                 ('msg_5', 'task_sub_4', 'assistant', '您好！我是商品資料管理助理。新租戶建立完成後，讓我們來建立第一筆商品基本資料。請問您想先新增哪一項商品？（例如：「我想新增智能核心晶片 分類 轉售商品 售價 120」）', ?2)",
+                rusqlite::params![welcome_content, now],
             ).map_err(|e| format!("Failed to seed task messages: {}", e))?;
         }
     }

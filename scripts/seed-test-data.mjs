@@ -14,6 +14,51 @@ console.log("\x1b[36m===========================================================
 // 1. 定義豐富的測試資料集
 const now = Math.floor(Date.now() / 1000);
 
+const seedTasks = [
+  {
+    id: "task_parent_1",
+    title: "新租戶起步",
+    status: "in_progress",
+    parent_task_id: null,
+    module_id: "sales",
+    assignee: "主管",
+    created_at: now - 3600 * 4,
+    completed_at: null
+  },
+  {
+    id: "task_sub_1",
+    title: "設定部門",
+    status: "pending",
+    parent_task_id: "task_parent_1",
+    module_id: "sales",
+    assignee: "主管",
+    created_at: now - 3600 * 4,
+    completed_at: null
+  },
+  {
+    id: "task_sub_2",
+    title: "邀請團隊成員",
+    status: "pending",
+    parent_task_id: "task_parent_1",
+    module_id: "sales",
+    assignee: "主管",
+    created_at: now - 3600 * 3,
+    completed_at: null
+  },
+  {
+    id: "task_sub_3",
+    title: "配置財務審核規則",
+    status: "pending",
+    parent_task_id: "task_parent_1",
+    module_id: "finance",
+    assignee: "財務長",
+    created_at: now - 3600 * 2,
+    completed_at: null
+  }
+];
+
+const pendingSeedTasksCount = seedTasks.filter(t => t.status === 'pending').length;
+
 export const SEED_DATA = {
   departments: [
     { id: "dept_1001", name: "總經理室", parent_id: null, created_at: now - 86400 * 5 },
@@ -27,55 +72,14 @@ export const SEED_DATA = {
     { id: "dept_1009", name: "財務會計處", parent_id: null, created_at: now - 86400 * 4 }
   ],
 
-  tasks: [
-    {
-      id: "task_parent_1",
-      title: "新租戶起步",
-      status: "in_progress",
-      parent_task_id: null,
-      module_id: "sales",
-      assignee: "主管",
-      created_at: now - 3600 * 4,
-      completed_at: null
-    },
-    {
-      id: "task_sub_1",
-      title: "設定部門",
-      status: "pending",
-      parent_task_id: "task_parent_1",
-      module_id: "sales",
-      assignee: "主管",
-      created_at: now - 3600 * 4,
-      completed_at: null
-    },
-    {
-      id: "task_sub_2",
-      title: "邀請團隊成員",
-      status: "pending",
-      parent_task_id: "task_parent_1",
-      module_id: "sales",
-      assignee: "主管",
-      created_at: now - 3600 * 3,
-      completed_at: null
-    },
-    {
-      id: "task_sub_3",
-      title: "配置財務審核規則",
-      status: "pending",
-      parent_task_id: "task_parent_1",
-      module_id: "finance",
-      assignee: "財務長",
-      created_at: now - 3600 * 2,
-      completed_at: null
-    }
-  ],
+  tasks: seedTasks,
 
   taskMessages: [
     {
       id: "msg_1",
       task_id: "main",
       role: "assistant",
-      content: "你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 4 筆待處理任務、2 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：",
+      content: `你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 ${pendingSeedTasksCount} 筆待處理任務、2 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：`,
       timestamp: now - 3600 * 4
     },
     {

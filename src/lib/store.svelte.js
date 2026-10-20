@@ -714,6 +714,60 @@ export async function createTenantAction(tenantName, companyName, tenantCode, ta
   return res;
 }
 
+let isSyncingOnboarding = false;
+
+/**
+ * Ensures all declarative ONBOARDING_STEPS subtasks exist under any '新租戶起步' parent task.
+ * Self-heals existing databases and tenants that were created before newer onboarding subtasks were added.
+ * @param {any[]} tasks
+ * @returns {Promise<any[]>}
+ */
+export async function ensureOnboardingTasksSynced(tasks) {
+  if (isSyncingOnboarding) return tasks;
+  if (!Array.isArray(tasks) || tasks.length === 0) return tasks;
+
+  const parentTask = tasks.find(t => t.title === '新租戶起步');
+  if (!parentTask) return tasks;
+
+  const missingSteps = ONBOARDING_STEPS.filter(step => {
+    return !tasks.some(t => 
+      t.parent_task_id === parentTask.id && 
+      (t.title === step.title || (step.skillId && (t.skill_id === step.skillId || t.skillId === step.skillId)))
+    );
+  });
+
+  if (missingSteps.length === 0) return tasks;
+
+  isSyncingOnboarding = true;
+  try {
+    for (const step of missingSteps) {
+      const subTask = await invoke('create_task', {
+        title: step.title,
+        moduleId: step.moduleId || 'sales',
+        assignee: step.assignee || '主管',
+        parentTaskId: parentTask.id,
+        parent_task_id: parentTask.id,
+        skillId: step.skillId,
+        skill_id: step.skillId,
+        skills: step.skills || (step.skillId ? [step.skillId] : null)
+      });
+      if (step.guidanceMessage && subTask?.id) {
+        const msg = typeof step.guidanceMessage === 'function'
+          ? step.guidanceMessage(appState.activeTenant?.name || '')
+          : step.guidanceMessage;
+        await appendTaskMessageAction(subTask.id, 'assistant', msg);
+      }
+    }
+    const refreshed = await invoke('list_tasks', { moduleId: '' });
+    return refreshed || tasks;
+  } catch (err) {
+    console.warn("Failed to sync onboarding tasks:", err);
+    return tasks;
+  } finally {
+    isSyncingOnboarding = false;
+  }
+}
+
 /**
  * Fetch tasks from SQLite
  * @param {string | null} [moduleId]
@@ -724,7 +778,11 @@ export async function fetchTasks(moduleId = null) {
     const list = await invoke('list_tasks', {
       moduleId: moduleId ? moduleId.trim() : ''
     });
-    appState.tasks = list || [];
+    let tasks = list || [];
+    if (!moduleId) {
+      tasks = await ensureOnboardingTasksSynced(tasks);
+    }
+    appState.tasks = tasks;
     return appState.tasks;
   } catch (err) {
     console.error("Failed to fetch tasks:", err);

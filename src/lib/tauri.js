@@ -146,12 +146,14 @@ const defaultMockTasks = [
   }
 ];
 
+const defaultMockPendingTasksCount = defaultMockTasks.filter(t => t.status === 'pending').length;
+
 const defaultMockTaskMessages = [
   {
     id: "msg_main_1",
     task_id: "main",
     role: "assistant",
-    content: "你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 3 筆待處理任務、1 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：",
+    content: `你好，我是 AgentERP 智能助理。已載入本地安全邊緣工作站上下文。您目前有 ${defaultMockPendingTasksCount} 筆待處理任務、1 則未讀通知。想從下面的常用任務開始，或直接跟我說您需要什麼協助：`,
     timestamp: Math.floor(Date.now() / 1000) - 3600
   },
   {
