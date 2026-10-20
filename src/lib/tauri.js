@@ -1,24 +1,8 @@
 // Detect if we are in Tauri runtime
 export const isTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__;
 
-// Local mock states for browser context
-let mockOrders = [
-  {
-    so_id: "SO-9921",
-    customer_name: "A 公司 (Customer A)",
-    po_reference: "PO-2026-0091",
-    items: [{ name: "智能核心晶片 (AI Core Chip)", qty: 500, price: 120 }],
-    total_amount: 60000.0,
-    profit_margin: 0.25,
-    capacity_usage: 0.85,
-    status: "pending",
-    created_at: Math.floor(Date.now() / 1000) - 3600
-  }
-];
-
 let mockAuditLogs = loadStorage('agent_erp_mock_audit_logs', []);
 let mockLlmTraces = loadStorage('agent_erp_mock_llm_traces', []);
-let mockInstalledModules = [];
 
 function loadStorage(key, defaultVal) {
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -427,36 +411,7 @@ export async function invoke(cmd, args = {}) {
   }
 
   switch (cmd) {
-    case 'get_mirrored_orders':
-      return [...mockOrders];
-      
-    case 'get_audit_logs':
-      return [...mockAuditLogs];
-      
-    case 'get_installed_modules':
-      return [...mockInstalledModules];
-      
-    case 'install_module': {
-      const { moduleId, name, version, iconSvg, downloadUrl, sha256 } = args;
-      if (!mockInstalledModules.some(m => m.id === moduleId)) {
-        mockInstalledModules.push({
-          id: moduleId,
-          name,
-          version,
-          file_path: moduleId === 'crm' ? `/mock_cdn/${moduleId}_module.html` : `/mock_cdn/${moduleId}_module.js`,
-          sha256,
-          workspace: moduleId === 'sales_bi' ? 'finance' : moduleId,
-          icon_svg: iconSvg
-        });
-      }
-      return null;
-    }
-    
-    case 'uninstall_module': {
-      const { moduleId } = args;
-      mockInstalledModules = mockInstalledModules.filter(m => m.id !== moduleId);
-      return null;
-    }
+
     
     case 'list_llm_providers':
       return [...mockLlmProviders];
@@ -473,99 +428,13 @@ export async function invoke(cmd, args = {}) {
       return null;
     }
     
-    case 'simulate_webhook_order': {
-      const exists = mockOrders.some(o => o.so_id === 'SO-9922');
-      if (!exists) {
-        const newOrder = {
-          so_id: "SO-9922",
-          customer_name: "A 公司 (Customer A)",
-          po_reference: "PO-2026-0092",
-          items: [{ name: "智能核心晶片 (AI Core Chip)", qty: 500, price: 120 }],
-          total_amount: 60000.0,
-          profit_margin: 0.25,
-          capacity_usage: 0.85,
-          status: "pending",
-          created_at: Math.floor(Date.now() / 1000)
-        };
-        mockOrders.unshift(newOrder);
-      }
-      
-      // Simulate event emission after 1.5 seconds
-      setTimeout(() => {
-        const payload = {
-          id: "SO-9922",
-          title: "A 公司採購單已送入",
-          message: "系統已建立孿生訂單 SO-9922，等待安全確認。",
-          workspace: "sales"
-        };
-        
-        if (listeners['notification-hub']) {
-          listeners['notification-hub'].forEach(cb => cb({ payload }));
-        }
-      }, 1500);
-      
-      return null;
-    }
-    
-    case 'confirm_mutation': {
-      const { mutationId, approved, operator } = args;
-      const status = approved ? "approved" : "rejected";
-      
-      mockOrders = mockOrders.map(o => o.so_id === mutationId ? { ...o, status } : o);
-      
-      const timestamp = Math.floor(Date.now() / 1000);
-      mockAuditLogs.unshift({
-        id: `LOG-${timestamp}`,
-        action_type: "confirm_order",
-        arguments: { so_id: mutationId },
-        decision: status,
-        operator: operator || "Unknown",
-        timestamp
-      });
-      return null;
-    }
-    
-    case 'download_module': {
-      const { moduleId } = args;
-      if (moduleId === 'sales_bi') {
-        return {
-          id: 'sales_bi',
-          name: 'Finance BI 大看板',
-          version: '1.0.2',
-          file_path: '/mock_cdn/sales_bi_module.js',
-          iconSvg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>',
-          downloadUrl: 'sales_bi_module.js',
-          sha256: 'mock-sha-sales-bi'
-        };
-      } else if (moduleId === 'crm') {
-        return {
-          id: 'crm',
-          name: 'CRM 客戶模組',
-          version: '1.0.1',
-          file_path: '/mock_cdn/crm_module.html',
-          iconSvg: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>',
-          downloadUrl: 'crm_dashboard.html',
-          sha256: 'mock-sha-crm'
-        };
-      }
-      return null;
-    }
-    
-    case 'get_module_source': {
-      const { moduleId } = args;
-      const response = await fetch(`/mock_cdn/${moduleId}_module.js`);
-      return await response.text();
-    }
-    
+    case 'get_audit_logs':
+      return [...mockAuditLogs];
+
     case 'simulate_agent_chat': {
-      const { workspace, message, channel } = args;
+      const { channel } = args;
       if (channel && typeof channel.onmessage === 'function') {
-        let responseText = "Sales Workspace Context Loaded:\n- Product: AI Core Chip.\n- Mirrored Draft: SO-9922.\n- Current Action Required: Request operator's authorization to execute database writes and sync invoice.";
-        if (workspace === 'finance') {
-          responseText = "Finance BI Dashboard Analyzed:\n- Current gross margin is 25.4%.\n- Target is 25.0%.\n- Recommendation: Approve Customer A's PO-2026-0092 to leverage idle capacity and hit Q3 goals.";
-        } else if (workspace === 'crm') {
-          responseText = "Customer CRM Profiler:\n- Customer A has a credit rating of AAA.\n- Past ledger defaults: None.\n- Delivery success rate: 100%.\n- Recommendation: Proceed to process the order immediately.";
-        }
+        const responseText = "智能助理已就緒。隨時可以為您服務，請告訴我您需要什麼協助。";
 
         const words = responseText.split(' ');
         let idx = 0;

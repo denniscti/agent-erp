@@ -9,7 +9,6 @@
  */
 
 import { invoke, check, relaunch } from './tauri.js';
-import { loadModule } from './registry.js';
 import { executeConfirmation, executeCancellation } from './workflow/harness.js';
 import { getDeclaredSkills, getSkillsByDomain, KNOWN_DOMAINS } from './workflow/index.js';
 
@@ -31,17 +30,9 @@ function loadTaskPanelCollapsed() {
 export const appState = $state({
   route: '/app/agent',
   version: '0.1.0',
-  isEnterpriseActive: false,
-  /** @type {any[]} */
-  installedModules: [], // List of installed module metadata
-  /** @type {Record<string, any>} */
-  loadedComponents: {}, // Map of moduleId -> Svelte Component class
 
   get activeWorkspace() {
     if (this.route === '/app/agent') return 'agent';
-    if (this.route === '/app/sales') return 'sales';
-    if (this.route === '/app/finance') return 'finance';
-    if (this.route === '/app/crm') return 'crm';
     if (this.route === '/app/settings') return 'settings';
     
     // Generic fallback for any other workspaces like /app/xxx
@@ -54,9 +45,6 @@ export const appState = $state({
   set activeWorkspace(ws) {
     let targetRoute = `/app/${ws}`;
     if (ws === 'agent') targetRoute = '/app/agent';
-    else if (ws === 'sales') targetRoute = '/app/sales';
-    else if (ws === 'finance') targetRoute = '/app/finance';
-    else if (ws === 'crm') targetRoute = '/app/crm';
     else if (ws === 'settings') targetRoute = '/app/settings';
     
     this.route = targetRoute;
@@ -84,15 +72,9 @@ export const appState = $state({
 
   // Database cache lists
   /** @type {any[]} */
-  mirroredOrders: [],
-  /** @type {any[]} */
   auditLogs: [],
   /** @type {any[]} */
   notifications: [],
-
-  // Mutation interceptor queue
-  /** @type {any} */
-  pendingMutation: null, // { id, title, details }
 
   // System updater status
   updateAvailable: false,
@@ -103,8 +85,6 @@ export const appState = $state({
   activeUpdate: null, // Tauri updater instance
   /** @type {string | null} */
   toastMessage: null, // Toast popup message
-  /** @type {any[]} */
-  modulesGallery: [], // List of available modules in cloud store
   
   // Auth state
   /** @type {string} */
@@ -155,18 +135,19 @@ export function navigate(path) {
   appState.route = path;
 }
 
-// Fetch mirrored order list from SQLite
-pub_fn("fetchOrders");
-async function pub_fn(name) {} // Stub helper
-
-export async function fetchOrders() {
-  try {
-    const list = await invoke('get_mirrored_orders');
-    appState.mirroredOrders = list.map(o => ({ ...o, id: o.so_id || o.id }));
-  } catch (err) {
-    console.error("Failed to fetch mirrored orders:", err);
-  }
+export function getWorkspaceLabel(workspace) {
+  if (workspace === 'agent') return 'AI 助理對話';
+  if (workspace === 'settings') return '系統設定';
+  return '業務工作區';
 }
+
+export function formatAuditDecision(decision) {
+  if (decision === 'approved') return '核准 (Approved)';
+  if (decision === 'rejected_unauthorized') return '未授權阻斷 (Unauthorized)';
+  return '拒絕 (Rejected)';
+}
+
+async function pub_fn(name) {} // Stub helper
 
 // Fetch audit logging trail from SQLite
 pub_fn("fetchAuditLogs");
@@ -181,202 +162,7 @@ export async function fetchAuditLogs() {
   }
 }
 
-// Check local DB for installed dynamic modules
-pub_fn("fetchInstalledModules");
-export async function fetchInstalledModules() {
-  try {
-    const list = await invoke('get_installed_modules');
-    appState.installedModules = list;
-    
-    // Automatically register components for Svelte mounting
-    for (const mod of list) {
-      const { loadModule } = await import('./registry.js');
-      await loadModule(mod.id);
-    }
-    
-    if (list.some(m => m.id === 'sales_bi')) {
-      appState.isEnterpriseActive = true;
-    }
-  } catch (err) {
-    console.error("Failed to fetch installed modules:", err);
-  }
-}
 
-// Fetch all available modules in the cloud gallery store
-pub_fn("fetchModulesGallery");
-export async function fetchModulesGallery() {
-  try {
-    let list = [];
-    try {
-      const response = await fetch('https://numaxofficee8.github.io/agent-erp/modules_gallery.json');
-      if (response.ok) {
-        list = await response.json();
-      } else {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-    } catch (e) {
-      console.warn("Failed to fetch cloud modules gallery, using mock local catalogue:", e);
-      // Local fallback catalogue for mock testing
-      list = [
-        {
-          id: 'sales_bi',
-          name: 'Finance BI 大看板',
-          version: '1.0.2',
-          description: '提供即時的銷售數據分析、獲利預測與動態利潤控制工具。',
-          iconSvg: '<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><line x1=\"18\" y1=\"20\" x2=\"18\" y2=\"10\"></line><line x1=\"12\" y1=\"20\" x2=\"12\" y2=\"4\"></line><line x1=\"6\" y1=\"20\" x2=\"6\" y2=\"14\"></line></svg>',
-          downloadUrl: 'sales_bi_module.js',
-          sha256: 'mock-sha-sales-bi'
-        },
-        {
-          id: 'crm',
-          name: 'CRM 客戶模組',
-          version: '1.0.1',
-          description: '企業級客戶關係管理，支援獨立沙盒與靜態 HTML 加載。',
-          iconSvg: '<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2\"></path><circle cx=\"9\" cy=\"7\" r=\"4\"></circle><path d=\"M23 21v-2a4 4 0 0 0-3-3.87\"></path><path d=\"M16 3.13a4 4 0 0 1 0 7.75\"></path></svg>',
-          downloadUrl: 'crm_dashboard.html',
-          sha256: 'mock-sha-crm'
-        }
-      ];
-    }
-    appState.modulesGallery = list;
-  } catch (err) {
-    console.error("Failed to fetch modules gallery:", err);
-  }
-}
-
-// Download and install a specific module from the store
-pub_fn("installModuleAction");
-export async function installModuleAction(moduleId) {
-  const mod = appState.modulesGallery.find(m => m.id === moduleId);
-  if (!mod) return;
-
-  showToast(`正在下載安裝模組 ${mod.name}...`);
-  try {
-    await invoke('install_module', {
-      moduleId: mod.id,
-      name: mod.name,
-      version: mod.version,
-      iconSvg: mod.iconSvg,
-      downloadUrl: mod.downloadUrl,
-      sha256: mod.sha256
-    });
-
-    // Refresh installed list to dynamically mount Svelte component
-    await fetchInstalledModules();
-    showToast(`模組 ${mod.name} 安裝成功！選單已更新。`);
-  } catch (err) {
-    console.error(`Failed to install module ${mod.name}:`, err);
-    showToast(`模組安裝失敗: ${err}`);
-  }
-}
-
-// Uninstall a registered module and clear dynamic component states
-pub_fn("uninstallModuleAction");
-export async function uninstallModuleAction(moduleId) {
-  const mod = appState.installedModules.find(m => m.id === moduleId);
-  const name = mod ? mod.name : moduleId;
-
-  showToast(`正在解除安裝模組 ${name}...`);
-  try {
-    await invoke('uninstall_module', { moduleId });
-    
-    // Clear dynamic component class
-    delete appState.loadedComponents[moduleId];
-    appState.loadedComponents = { ...appState.loadedComponents };
-    
-    // Refresh installed list
-    await fetchInstalledModules();
-    
-    // If viewing the uninstalled module, route back to sales tab
-    if (appState.activeWorkspace === moduleId) {
-      appState.activeWorkspace = 'sales';
-    }
-    
-    showToast(`模組 ${name} 已成功解除安裝！`);
-  } catch (err) {
-    console.error(`Failed to uninstall module ${moduleId}:`, err);
-    showToast(`解除安裝失敗: ${err}`);
-  }
-}
-
-// Trigger customer PO webhook simulation
-pub_fn("triggerWebhookSimulation");
-export async function triggerWebhookSimulation() {
-  try {
-    // Inject a pending notification ticker
-    appState.notifications = [
-      { id: 'notify-webhook', title: 'Webhook 觸發中...', message: '正在傳送模擬採購單 (PO-2026-0092) 到邊緣端...' }
-    ];
-    await invoke('simulate_webhook_order');
-  } catch (err) {
-    console.error("Webhook simulation trigger failed:", err);
-  }
-}
-
-// Approve mutation card
-pub_fn("approveMutation");
-export async function approveMutation(id) {
-  if (!appState.pendingMutation) return;
-  try {
-    const operator = appState.authUser?.display_name || appState.authUser?.email || 'Unknown';
-    await invoke('confirm_mutation', { mutationId: id, approved: true, operator });
-    appState.pendingMutation = null;
-    await fetchOrders();
-    await fetchAuditLogs();
-    
-    appState.chatMessages.push({
-      role: 'assistant',
-      content: `已成功核准訂單 ${id}！寫入指令已釋放，已更新本地 SQLite 庫存，並將加密收據回傳給 A 公司。`
-    });
-  } catch (err) {
-    console.error("Failed to approve mutation:", err);
-  }
-}
-
-// Reject mutation card
-pub_fn("rejectMutation");
-export async function rejectMutation(id) {
-  if (!appState.pendingMutation) return;
-  try {
-    const operator = appState.authUser?.display_name || appState.authUser?.email || 'Unknown';
-    await invoke('confirm_mutation', { mutationId: id, approved: false, operator });
-    appState.pendingMutation = null;
-    await fetchOrders();
-    await fetchAuditLogs();
-    
-    appState.chatMessages.push({
-      role: 'assistant',
-      content: `已拒絕訂單 ${id} 的核准寫入。該指令已被安全阻斷，審計日誌已記錄 ${operator === 'Unknown' ? '操作者' : operator} 的拒絕動作。`
-    });
-  } catch (err) {
-    console.error("Failed to reject mutation:", err);
-  }
-}
-
-// Simulate downloading, SHA-256 verifying, and hot-plugging the enterprise modules
-pub_fn("activateEnterprise");
-export async function activateEnterprise() {
-  appState.isEnterpriseActive = false;
-  
-  try {
-    // 1. Download & verify Svelte JS module
-    const biMeta = await invoke('download_module', { moduleId: 'sales_bi' });
-    await loadModule(biMeta.id);
-    
-    // 2. Download & verify crm iframe dashboard
-    const crmMeta = await invoke('download_module', { moduleId: 'crm' });
-    await loadModule(crmMeta.id);
-    
-    await fetchInstalledModules();
-    
-    appState.chatMessages.push({
-      role: 'assistant',
-      content: "企業進階授權已解鎖！Finance BI 看板與 CRM 模組已在本地 AppData 安全目錄完成 SHA-256 數位簽章驗收並動態載入。主介面已無縫更新。"
-    });
-  } catch (err) {
-    console.error("Enterprise activation failed:", err);
-  }
-}
 
 // Query public update manifest URL
 export async function checkForUpdates() {

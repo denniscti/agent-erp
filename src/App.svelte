@@ -1,17 +1,12 @@
 <script>
   import { onMount } from 'svelte';
-  import { listen, isTauri } from './lib/tauri.js';
+  import { isTauri } from './lib/tauri.js';
   import { 
     appState, 
-    fetchOrders, 
     fetchAuditLogs, 
-    fetchInstalledModules, 
-    triggerWebhookSimulation,
+    formatAuditDecision,
     checkForUpdates,
     installUpdate,
-    fetchModulesGallery,
-    installModuleAction,
-    uninstallModuleAction,
     navigate,
     checkAuthStatus,
     logoutAction,
@@ -51,7 +46,6 @@
   import TaskPanel from './lib/components/TaskPanel.svelte';
   import Breadcrumb from './lib/components/Breadcrumb.svelte';
   import StatusOverview from './lib/components/StatusOverview.svelte';
-  import MutationDialog from './lib/components/MutationDialog.svelte';
   import LoginScreen from './lib/components/auth/LoginScreen.svelte';
   import RegisterWizard from './lib/components/auth/RegisterWizard.svelte';
   import TenantPicker from './lib/components/auth/TenantPicker.svelte';
@@ -59,8 +53,6 @@
   import SettingsEntityCard from './lib/components/SettingsEntityCard.svelte';
 
   let activeTab = $derived(appState.activeWorkspace);
-  let activeOrderFilter = $state('all');
-  let selectedOrderId = $state(null);
   let isNotificationOpen = $state(false);
   let initializedKey = $state('');
 
@@ -817,10 +809,7 @@
     const currentKey = `${appState.authUser?.id || ''}_${appState.activeTenant?.id || ''}`;
     if (!force && initializedKey === currentKey && currentKey !== '_') return;
 
-    await fetchOrders();
     await fetchAuditLogs();
-    await fetchInstalledModules();
-    await fetchModulesGallery();
     await fetchTasks();
     await fetchPartners();
     await fetchDepartments();
@@ -886,49 +875,13 @@
     // Initial sync
     await handleHashChange();
 
-    // Automatically listen to the background notification event from Rust
-    const unlisten = await listen('notification-hub', (event) => {
-      // Append to local notifications list
-      appState.notifications.unshift({
-        id: event.payload.id,
-        title: event.payload.title,
-        message: event.payload.message,
-        time: '剛剛'
-      });
-
-      // Fire browser-standard desktop notification which Tauri webview routes to OS natively
-      if (Notification.permission === 'granted') {
-        new Notification(event.payload.title, { body: event.payload.message });
-      } else if (Notification.permission !== 'denied') {
-        Notification.requestPermission().then(permission => {
-          if (permission === 'granted') {
-            new Notification(event.payload.title, { body: event.payload.message });
-          }
-        });
-      }
-
-      // Refresh orders in real-time
-      if (appState.authStatus === 'authenticated') {
-        fetchOrders();
-      }
-    });
-
-    // Request notification permission early
-    if (Notification.permission !== 'granted' && Notification.permission !== 'denied') {
-      Notification.requestPermission();
-    }
-
     return () => {
-      if (typeof unlisten === 'function') unlisten();
       window.removeEventListener('hashchange', handleHashChange);
     };
   });
 
   function selectWorkspace(ws) {
     if (ws === 'agent') navigate('/app/agent');
-    else if (ws === 'sales') navigate('/app/sales');
-    else if (ws === 'finance') navigate('/app/finance');
-    else if (ws === 'crm') navigate('/app/crm');
     else if (ws === 'settings') navigate('/app/settings');
     else navigate(`/app/${ws}`);
   }
@@ -936,37 +889,6 @@
   function handleBrandLogoClick() {
     switchActiveTask(null);
     selectWorkspace('agent');
-  }
-
-  // Svelte Action to safely mount dynamic vanilla components to a physical DIV node
-  function mountModule(node, moduleId) {
-    const ComponentConstructor = appState.loadedComponents[moduleId];
-    if (!ComponentConstructor) return;
-
-    // Mount using the physical node as anchor
-    const instance = ComponentConstructor(node, {});
-
-    return {
-      destroy() {
-        if (instance && typeof instance.destroy === 'function') {
-          instance.destroy();
-        }
-      }
-    };
-  }
-
-  function handleOrderClick(order) {
-    selectedOrderId = order.so_id;
-    // Hydrate chat with order context
-    appState.chatMessages.push({
-      role: 'assistant',
-      content: `已為您載入 ${order.so_id} (${order.po_reference}) 的上下文資料：\n- 總價：$${order.total_amount.toLocaleString()}\n- 利潤率：${(order.profit_margin * 100).toFixed(0)}%\n- 產能消耗：${(order.capacity_usage * 100).toFixed(0)}%\n\n您可以點擊「核准接單」以觸發安全攔截審查，或向我詢問關於此訂單的排程試算。`
-    });
-  }
-
-  function triggerAcceptOrder(order) {
-    // Intercept action and show confirmation card
-    appState.pendingMutation = order;
   }
 </script>
 
@@ -1001,32 +923,7 @@
               </svg>
             </button>
 
-            <!-- Sales / Main icon -->
-            <button 
-              class="rail-nav-btn {activeTab === 'sales' ? 'active' : ''}" 
-              onclick={() => selectWorkspace('sales')}
-              title="銷售與訂單"
-              aria-label="銷售與訂單"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
-                <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
-              </svg>
-            </button>
 
-            <!-- Dynamic modules icons -->
-            {#each appState.installedModules as mod (mod.id)}
-              <button 
-                class="rail-nav-btn {activeTab === mod.id ? 'active' : ''}" 
-                onclick={() => selectWorkspace(mod.id)}
-                title={mod.name}
-                aria-label={mod.name}
-              >
-                <span class="menu-icon-custom">
-                  {@html mod.icon_svg || mod.iconSvg}
-                </span>
-              </button>
-            {/each}
 
             <!-- Settings icon -->
             <button 
@@ -1099,64 +996,12 @@
             <!-- Settings Workspace View -->
             <div class="workspace-scrollable">
               <div class="settings-layout">
-                <!-- Module Gallery Store -->
-                <div class="settings-group glass-panel">
-                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <h3>雲端擴充模組市集 (Module Gallery)</h3>
-                    <button class="btn btn-sm" onclick={fetchModulesGallery}>
-                      同步商店清單
-                    </button>
-                  </div>
-                  <p class="settings-desc">您可以從雲端清單中點擊選擇下載所需模組。安裝後側邊欄將動態載入對應 SVG 選單且切換時狀態保留。</p>
-                  
-                  <div class="module-gallery-list" style="display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 16px;">
-                    {#if appState.modulesGallery.length === 0}
-                      <div class="empty-audit" style="padding: 20px; text-align: center;">點擊「同步商店清單」載入雲端模組。</div>
-                    {:else}
-                      {#each appState.modulesGallery as item}
-                        {@const isInstalled = appState.installedModules.some(m => m.id === item.id)}
-                        <div style="display: flex; align-items: flex-start; justify-content: space-between; padding: 12px; border-radius: 8px; border: 1px solid var(--border-color); background: rgba(255, 255, 255, 0.02);">
-                          <div style="display: flex; gap: 12px; align-items: center;">
-                            <span class="gallery-icon-svg" style="display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color);">
-                              {@html item.iconSvg}
-                            </span>
-                            <div>
-                              <div style="display: flex; align-items: center; gap: 8px;">
-                                <span style="font-weight: 600; color: var(--text-primary);">{item.name}</span>
-                                <span style="font-size: 0.75rem; color: var(--text-muted);">v{item.version}</span>
-                              </div>
-                              <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 4px; line-height: 1.3;">{item.description}</p>
-                            </div>
-                          </div>
-                          <div style="display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; align-items: flex-end;">
-                            {#if isInstalled}
-                              <span style="font-size: 0.8rem; color: var(--text-muted); padding: 4px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); font-weight: 500;">已安裝</span>
-                              <button 
-                                class="btn btn-sm" 
-                                style="border-color: rgba(239, 68, 68, 0.3); color: rgb(239, 68, 68); background: rgba(239, 68, 68, 0.05);"
-                                onclick={() => uninstallModuleAction(item.id)}
-                              >
-                                解除安裝
-                              </button>
-                            {:else}
-                              <button 
-                                class="btn btn-primary btn-sm" 
-                                onclick={() => installModuleAction(item.id)}
-                              >
-                                下載安裝
-                              </button>
-                            {/if}
-                          </div>
-                        </div>
-                      {/each}
-                    {/if}
-                  </div>
-                </div>
+
 
                 <!-- SQLite Audit Trail -->
                 <div class="settings-group glass-panel">
                   <h3>邊緣寫入攔截審計紀錄 (SQLite Audit Trail)</h3>
-                  <p class="settings-desc">記錄每一次經由操作者實體點擊確認釋放的 database write 歷史。採用哈希鏈（Hash Chain）防篡改。</p>
+                  <p class="settings-desc">記錄每一次經由操作者實體點擊確認釋放的 database write 歷史。</p>
                   <div class="audit-list">
                     {#if appState.auditLogs.length === 0}
                       <div class="empty-audit">目前尚無寫入審計記錄。</div>
@@ -1170,7 +1015,11 @@
                           <div class="audit-body">
                             <span>指令：<span style="color: rgb(var(--accent-amber));">{log.action_type}</span></span>
                             <span>操作人：<span class="font-bold">{log.operator}</span></span>
-                            <span>結果：<span style={log.decision === 'approved' ? 'color: rgb(var(--accent-emerald));' : 'color: #EF4444;'}>{log.decision === 'approved' ? '核准 (Approved)' : '阻斷 (Rejected)'}</span></span>
+                            <span>結果：
+                              <span style={log.decision === 'approved' ? 'color: rgb(var(--accent-emerald));' : 'color: #EF4444;'}>
+                                {formatAuditDecision(log.decision)}
+                              </span>
+                            </span>
                           </div>
                         </div>
                       {/each}
@@ -1220,12 +1069,6 @@
                       onclick={simulateTokenExpiry}
                     >
                       模擬 Token 過期
-                    </button>
-                    <button 
-                      class="btn" 
-                      onclick={triggerWebhookSimulation}
-                    >
-                      模擬 PO Webhook 送入
                     </button>
                   </div>
                 </div>
@@ -2706,155 +2549,6 @@
                 </SettingsEntityCard>
               </div>
             </div>
-          {:else if activeTab === 'sales' && !appState.activeTaskId}
-            <!-- Sales & Orders Workspace View -->
-            <div class="workspace-scrollable">
-              <div class="orders-layout">
-                <div class="orders-sidebar">
-                  <div class="filter-row">
-                    <button class="filter-btn {activeOrderFilter === 'all' ? 'active' : ''}" onclick={() => activeOrderFilter = 'all'}>全部</button>
-                    <button class="filter-btn {activeOrderFilter === 'pending' ? 'active' : ''}" onclick={() => activeOrderFilter = 'pending'}>待處理</button>
-                    <button class="filter-btn {activeOrderFilter === 'approved' ? 'active' : ''}" onclick={() => activeOrderFilter = 'approved'}>已核准</button>
-                  </div>
-
-                  <div class="orders-list">
-                    {#if appState.mirroredOrders.length === 0}
-                      <div class="empty-orders-msg">目前暫無訂單資料</div>
-                    {:else}
-                      {#each appState.mirroredOrders.filter(o => activeOrderFilter === 'all' || o.status === activeOrderFilter) as order}
-                        <button 
-                          type="button"
-                          class="order-card {selectedOrderId === order.so_id ? 'selected' : ''}" 
-                          onclick={() => handleOrderClick(order)}
-                        >
-                          <div class="order-card-header">
-                            <span class="order-id font-bold">{order.so_id}</span>
-                            <span class="badge {order.status === 'approved' ? 'badge-emerald' : 'badge-amber'}">{order.status === 'approved' ? '已核准' : '待審核'}</span>
-                          </div>
-                          <div class="order-client">{order.customer_name}</div>
-                          <div class="order-amount">${order.total_amount.toLocaleString()}</div>
-                        </button>
-                      {/each}
-                    {/if}
-                  </div>
-                </div>
-
-                <div class="order-detail glass-panel">
-                  {#if selectedOrderId}
-                    {@const order = appState.mirroredOrders.find(o => o.so_id === selectedOrderId)}
-                    {#if order}
-                      <div class="detail-header">
-                        <h2>銷售訂單草稿：{order.so_id}</h2>
-                        <span class="badge {order.status === 'approved' ? 'badge-emerald' : 'badge-amber'}">{order.status === 'approved' ? '已核准放行' : '等候 ' + (appState.authUser?.display_name || appState.authUser?.email || '操作者') + ' 安全確認'}</span>
-                      </div>
-                      
-                      <div class="detail-grid">
-                        <div class="detail-block">
-                          <span class="block-label">客戶採購單參考 (PO Ref):</span>
-                          <span class="block-val">{order.po_reference}</span>
-                        </div>
-                        <div class="detail-block">
-                          <span class="block-label">客戶名稱:</span>
-                          <span class="block-val">{order.customer_name}</span>
-                        </div>
-                        <div class="detail-block">
-                          <span class="block-label">下單時間:</span>
-                          <span class="block-val">{new Date(order.created_at * 1000).toLocaleString()}</span>
-                        </div>
-                        <div class="detail-block">
-                          <span class="block-label">訂單利潤預估:</span>
-                          <span class="block-val text-emerald font-bold">{(order.profit_margin * 100).toFixed(0)}%</span>
-                        </div>
-                      </div>
-
-                      <div class="items-table-container">
-                        <h4>訂單明細</h4>
-                        <table class="items-table">
-                          <thead>
-                            <tr>
-                              <th>商品名稱</th>
-                              <th>數量</th>
-                              <th>單價</th>
-                              <th>總價</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {#each order.items as item}
-                              <tr>
-                                <td>{item.name}</td>
-                                <td>{item.qty}</td>
-                                <td>${item.price}</td>
-                                <td>${(item.qty * item.price).toLocaleString()}</td>
-                              </tr>
-                            {/each}
-                          </tbody>
-                        </table>
-                      </div>
-
-                      <!-- Interceptor Action row -->
-                      {#if order.status === 'pending'}
-                        <div class="ai-copilot-card">
-                          <div class="ai-header">
-                            <span class="pulse-icon"></span>
-                            <h4>AI Agent 預審結果</h4>
-                          </div>
-                          <p>
-                            該採購單利潤率為 25%，消耗邊緣工廠 85% 產能。系統已成功排程生產，剩餘 15% 產能可用於彈性接單。建議 {appState.authUser?.display_name || appState.authUser?.email || '您'} 核准此寫入動作以同步庫存帳本。
-                          </p>
-                          <button class="btn btn-primary" onclick={() => triggerAcceptOrder(order)}>
-                            核准接單並釋放指令
-                          </button>
-                        </div>
-                      {:else}
-                        <div class="approved-success-box">
-                          <span class="check-icon">✓</span>
-                          <div>
-                            <h4>訂單已於本地 SQLite 資料庫放行</h4>
-                            <p>審計紀錄與加密收據已歸檔，該安全攔截動作已圓滿完成。</p>
-                          </div>
-                        </div>
-                      {/if}
-                    {/if}
-                  {:else}
-                    <div class="detail-placeholder">
-                      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-                      <h3>請從左側列表選擇訂單查看詳情</h3>
-                      <p>或點擊右上角「模擬 PO Webhook」生成新的訂單鏡像。</p>
-                    </div>
-                  {/if}
-                </div>
-              </div>
-            </div>
-          {:else if activeTab !== 'sales' && activeTab !== 'agent' && appState.installedModules.some(m => m.id === activeTab)}
-            <!-- Dynamic Pluggable Modules Panels -->
-            {@const mod = appState.installedModules.find(m => m.id === activeTab)}
-            {@const Component = mod ? appState.loadedComponents[mod.id] : null}
-            <div class="workspace-scrollable">
-              {#if mod && mod.file_path && mod.file_path.endsWith('.html')}
-                <div class="dynamic-iframe-container glass-panel" style="height: 600px;">
-                  <iframe 
-                    src={isTauri ? `app-module://localhost/modules/${mod.id}_module.html` : `/mock_cdn/${mod.id}_module.html`}
-                    class="crm-iframe"
-                    title={mod.name}
-                    sandbox="allow-scripts"
-                    style="width: 100%; height: 100%; border: none; border-radius: 8px;"
-                  ></iframe>
-                </div>
-              {:else if Component && mod}
-                <div class="glass-panel dynamic-module-container" style="padding: 24px; min-height: 400px; display: flex; flex-direction: column;">
-                  <div style="margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
-                    <span class="badge badge-amethyst">企業熱插拔模組已載入</span>
-                    <span style="font-size: 0.85rem; color: var(--text-muted);">版本 {mod.version} • 安全校驗：SHA-256 OK</span>
-                  </div>
-                  <div use:mountModule={mod.id}></div>
-                </div>
-              {:else}
-                <div class="glass-panel" style="padding: 40px; text-align: center;">
-                  <span style="font-size: 2rem;">⏳</span>
-                  <h4 style="margin-top: 16px;">正在動態掛載模組元件...</h4>
-                </div>
-              {/if}
-            </div>
           {:else}
             <!-- AI Chat Conversation Primary View -->
             <ChatBox />
@@ -2873,14 +2567,11 @@
         <span>邊緣資料庫：SQLite 已連線</span>
       </div>
       <div class="statusbar-right">
-        <span>Provider: OpenAI GPT-4o</span>
+        <span>Provider: NVIDIA NIM</span>
       </div>
     </footer>
   </div>
 {/if}
-
-<!-- Security Confirmation dialog (Mutation Interceptor) -->
-<MutationDialog />
 
 <!-- Toast Popup Notification (UX feedback for update checker) -->
 {#if appState.toastMessage}
@@ -2900,41 +2591,7 @@
     background: #0D0E12;
   }
 
-  .menu-icon-custom {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    color: inherit;
-  }
-  .menu-icon-custom :global(svg) {
-    width: 100%;
-    height: 100%;
-    stroke: currentColor;
-    fill: none;
-  }
-  .gallery-icon-svg :global(svg) {
-    width: 20px;
-    height: 20px;
-    stroke: currentColor;
-    fill: none;
-  }
 
-  /* Orders Workspace Layout */
-  .orders-layout {
-    display: grid;
-    grid-template-columns: 320px 1fr;
-    gap: 20px;
-    min-height: 520px;
-    height: 100%;
-  }
-
-  .orders-sidebar {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
 
   .filter-row {
     display: flex;
@@ -2960,188 +2617,7 @@
     border-color: var(--border-active);
   }
 
-  .orders-list {
-    flex-grow: 1;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
 
-  .empty-orders-msg {
-    padding: 24px;
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 0.88rem;
-  }
-
-  .order-card {
-    width: 100%;
-    text-align: left;
-    font-family: inherit;
-    color: inherit;
-    background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-sm);
-    padding: 16px;
-    cursor: pointer;
-    transition: all var(--transition-fast);
-  }
-
-  .order-card:hover {
-    border-color: var(--border-active);
-  }
-
-  .order-card.selected {
-    border-color: var(--accent);
-    background: rgba(var(--accent-rgb), 0.03);
-  }
-
-  .order-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-  }
-
-  .order-client {
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    margin-bottom: 4px;
-  }
-
-  .order-amount {
-    font-size: 1.1rem;
-    font-weight: 700;
-  }
-
-  .order-detail {
-    flex-grow: 1;
-    padding: 24px;
-    overflow-y: auto;
-  }
-
-  .detail-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-color);
-    margin-bottom: 20px;
-  }
-
-  .detail-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 16px;
-    margin-bottom: 24px;
-  }
-
-  .detail-block {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .block-label {
-    color: var(--text-muted);
-    font-size: 0.85rem;
-  }
-
-  .block-val {
-    font-size: 1.05rem;
-    color: var(--text-primary);
-  }
-
-  .items-table-container {
-    margin-bottom: 24px;
-  }
-
-  .items-table-container h4 {
-    margin-bottom: 10px;
-  }
-
-  .items-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.95rem;
-  }
-
-  .items-table th, .items-table td {
-    padding: 10px 12px;
-    text-align: left;
-    border-bottom: 1px solid var(--border-color);
-  }
-
-  .items-table th {
-    color: var(--text-muted);
-    font-weight: 500;
-  }
-
-  .ai-copilot-card {
-    background: rgba(var(--accent-amber), 0.05);
-    border: 1px solid rgba(var(--accent-amber), 0.25);
-    border-radius: var(--radius-sm);
-    padding: 18px;
-    margin-top: 10px;
-  }
-
-  .ai-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: rgb(var(--accent-amber));
-    margin-bottom: 10px;
-  }
-
-  .ai-header h4 {
-    font-size: 0.95rem;
-    font-weight: 600;
-  }
-
-  .ai-copilot-card p {
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    line-height: 1.5;
-    margin-bottom: 16px;
-  }
-
-  .approved-success-box {
-    display: flex;
-    gap: 16px;
-    background: rgba(var(--accent-emerald), 0.05);
-    border: 1px solid rgba(var(--accent-emerald), 0.25);
-    border-radius: var(--radius-sm);
-    padding: 18px;
-    margin-top: 10px;
-    align-items: center;
-  }
-
-  .check-icon {
-    font-size: 2.2rem;
-    color: rgb(var(--accent-emerald));
-    font-weight: 300;
-  }
-
-  .approved-success-box h4 {
-    color: rgb(var(--accent-emerald));
-  }
-
-  .approved-success-box p {
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    margin-top: 2px;
-  }
-
-  .detail-placeholder {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: var(--text-muted);
-    gap: 12px;
-  }
 
   /* Settings Page */
   .settings-layout {
@@ -3309,16 +2785,5 @@
     font-weight: 500;
   }
 
-  .dynamic-iframe-container {
-    width: 100%;
-    height: calc(100vh - 180px);
-    overflow: hidden;
-  }
 
-  .crm-iframe {
-    width: 100%;
-    height: 100%;
-    border: none;
-    border-radius: var(--radius-md);
-  }
 </style>

@@ -1,19 +1,11 @@
 <script>
-  import { appState } from '../store.svelte.js';
+  import { appState, getWorkspaceLabel } from '../store.svelte.js';
 
   let activeTask = $derived(
     appState.activeTaskId ? appState.tasks.find(t => t.id === appState.activeTaskId) : null
   );
 
-  let workspaceLabel = $derived.by(() => {
-    if (appState.activeWorkspace === 'agent') return 'AI 助理對話';
-    if (appState.activeWorkspace === 'sales') return '銷售與訂單';
-    if (appState.activeWorkspace === 'settings') return '系統與市集管理';
-    if (appState.activeWorkspace === 'finance') return '財務管理';
-    if (appState.activeWorkspace === 'crm') return '客戶關係';
-    const mod = appState.installedModules.find(m => m.id === appState.activeWorkspace);
-    return mod ? mod.name : '業務模組';
-  });
+  let workspaceLabel = $derived(getWorkspaceLabel(appState.activeWorkspace));
 
   let taskContextLabel = $derived(
     activeTask ? activeTask.title : null
