@@ -35,8 +35,8 @@ export const appState = $state({
     if (this.route === '/app/agent') return 'agent';
     if (this.route === '/app/settings') return 'settings';
     
-    // Generic fallback for any other workspaces like /app/xxx
-    const match = this.route.match(/^\/app\/([^/]+)$/);
+    // Generic fallback for any other workspaces like /app/xxx or /app/xxx/yyy
+    const match = this.route.match(/^\/app\/([^/?#]+)/);
     if (match) return match[1];
     
     return 'agent';
@@ -114,16 +114,33 @@ export const appState = $state({
   /** @type {any | null} */
   currentProductDetail: null,
 
+  // Purchase Orders & Inventory cache (Issue #164, #165)
+  /** @type {any[]} */
+  purchaseOrders: [],
+  /** @type {any | null} */
+  currentPurchaseOrderDetail: null,
+  /** @type {any[]} */
+  inventoryLevels: [],
+  /** @type {any[]} */
+  inventoryMovements: [],
+
   // Lightweight task confirmation state
   /** @type {import('./workflow/types.js').PendingConfirmation | null} */
   pendingTaskConfirmation: null
 });
 
+let toastTimer = null;
+
 export function showToast(message) {
+  if (typeof window !== 'undefined' && toastTimer) {
+    clearTimeout(toastTimer);
+    toastTimer = null;
+  }
   appState.toastMessage = message;
   if (typeof window !== 'undefined') {
-    setTimeout(() => {
+    toastTimer = setTimeout(() => {
       appState.toastMessage = null;
+      toastTimer = null;
     }, 3500);
   }
 }
@@ -138,6 +155,8 @@ export function navigate(path) {
 export function getWorkspaceLabel(workspace) {
   if (workspace === 'agent') return 'AI 助理對話';
   if (workspace === 'settings') return '系統設定';
+  if (workspace === 'purchase-orders') return '採購單';
+  if (workspace === 'inventory') return '庫存查詢';
   return '業務工作區';
 }
 
@@ -386,11 +405,14 @@ export const ONBOARDING_STEPS = [
   }
 ];
 
+let isSyncingOnboarding = false;
+
 /**
  * Shared helper to seed onboarding parent and child tasks
  * @param {string} tenantName
  */
 export async function seedOnboardingTasks(tenantName) {
+  isSyncingOnboarding = true;
   try {
     const parentTask = await createTaskAction('新租戶起步', 'sales', '主管', null);
 
@@ -416,6 +438,8 @@ export async function seedOnboardingTasks(tenantName) {
     await fetchTasks();
   } catch (e) {
     console.warn("Failed to create onboarding tasks on tenant creation:", e);
+  } finally {
+    isSyncingOnboarding = false;
   }
 }
 
@@ -500,8 +524,6 @@ export async function createTenantAction(tenantName, companyName, tenantCode, ta
   return res;
 }
 
-let isSyncingOnboarding = false;
-
 /**
  * Ensures all declarative ONBOARDING_STEPS subtasks exist under any '新租戶起步' parent task.
  * Self-heals existing databases and tenants that were created before newer onboarding subtasks were added.
@@ -555,6 +577,40 @@ export async function ensureOnboardingTasksSynced(tasks) {
 }
 
 /**
+ * Deduplicate onboarding subtasks under the same parent task sharing the same title
+ * Prefers 'done' > 'in_progress' > 'pending', or the earliest created task.
+ * @param {any[]} tasks
+ * @returns {any[]}
+ */
+export function deduplicateOnboardingTasks(tasks) {
+  if (!Array.isArray(tasks) || tasks.length <= 1) return tasks || [];
+
+  const onboardingTitles = new Set(ONBOARDING_STEPS.map(s => s.title));
+  const seen = new Map();
+  const nonOnboarding = [];
+
+  for (const t of tasks) {
+    if (!t || typeof t !== 'object') continue;
+    if (t.parent_task_id && onboardingTitles.has(t.title)) {
+      const key = `${t.parent_task_id}:${(t.title || '').trim()}`;
+      if (seen.has(key)) {
+        const existing = seen.get(key);
+        // Prioritize 'done' status over pending
+        if (existing.status !== 'done' && t.status === 'done') {
+          seen.set(key, t);
+        }
+      } else {
+        seen.set(key, t);
+      }
+    } else {
+      nonOnboarding.push(t);
+    }
+  }
+
+  return [...nonOnboarding, ...seen.values()];
+}
+
+/**
  * Fetch tasks from SQLite
  * @param {string | null} [moduleId]
  * @returns {Promise<any[]>}
@@ -568,6 +624,7 @@ export async function fetchTasks(moduleId = null) {
     if (!moduleId) {
       tasks = await ensureOnboardingTasksSynced(tasks);
     }
+    tasks = deduplicateOnboardingTasks(tasks);
     appState.tasks = tasks;
     return appState.tasks;
   } catch (err) {
@@ -1916,4 +1973,107 @@ export async function simulateTokenExpiry() {
     console.log("Token expiration simulated successfully:", err);
   }
 }
+
+// ==========================================
+// Purchase Orders & Inventory Management (Issue #164, #165)
+// ==========================================
+
+/**
+ * Fetch purchase orders list
+ * @param {any} [filters]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchPurchaseOrders(filters = {}) {
+  try {
+    const payload = {};
+    if (filters.filter_status !== undefined || filters.filterStatus !== undefined) {
+      const st = filters.filter_status !== undefined ? filters.filter_status : filters.filterStatus;
+      if (st && st !== 'all') {
+        payload.filter_status = st;
+        payload.filterStatus = st;
+      }
+    }
+    if (filters.filter_vendor_partner_id !== undefined || filters.filterVendorPartnerId !== undefined) {
+      payload.filter_vendor_partner_id = filters.filter_vendor_partner_id !== undefined ? filters.filter_vendor_partner_id : filters.filterVendorPartnerId;
+      payload.filterVendorPartnerId = payload.filter_vendor_partner_id;
+    }
+    const list = await invoke('list_purchase_orders', payload);
+    appState.purchaseOrders = list || [];
+    return appState.purchaseOrders;
+  } catch (err) {
+    console.error("Failed to fetch purchase orders:", err);
+    return [];
+  }
+}
+
+/**
+ * Get purchase order detail
+ * @param {string} orderId
+ * @returns {Promise<any>}
+ */
+export async function fetchPurchaseOrderDetail(orderId) {
+  const trimmedId = (orderId || '').trim();
+  if (!trimmedId) {
+    throw new Error('採購單 ID 為必填項目');
+  }
+  try {
+    const detail = await invoke('get_purchase_order', {
+      order_id: trimmedId,
+      orderId: trimmedId
+    });
+    appState.currentPurchaseOrderDetail = detail;
+    return detail;
+  } catch (err) {
+    console.error("Failed to fetch purchase order detail:", err);
+    throw err;
+  }
+}
+
+/**
+ * Fetch inventory levels
+ * @returns {Promise<any[]>}
+ */
+export async function fetchInventoryLevels() {
+  try {
+    const list = await invoke('list_inventory_levels');
+    appState.inventoryLevels = list || [];
+    return appState.inventoryLevels;
+  } catch (err) {
+    console.error("Failed to fetch inventory levels:", err);
+    return [];
+  }
+}
+
+/**
+ * Fetch inventory movements for a unit (or all)
+ * @param {string} [unitId]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchInventoryMovements(unitId) {
+  try {
+    const payload = {};
+    if (unitId && String(unitId).trim()) {
+      payload.unit_id = String(unitId).trim();
+      payload.unitId = String(unitId).trim();
+    }
+    const list = await invoke('list_inventory_movements', payload);
+    appState.inventoryMovements = list || [];
+    return appState.inventoryMovements;
+  } catch (err) {
+    console.error("Failed to fetch inventory movements:", err);
+    return [];
+  }
+}
+
+/**
+ * Navigate to a specific task conversation
+ * @param {string} taskId
+ */
+export async function navigateToTask(taskId) {
+  if (taskId) {
+    await switchActiveTask(taskId);
+  }
+  navigate('/app/agent');
+}
+
 

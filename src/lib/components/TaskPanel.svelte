@@ -22,13 +22,27 @@
   );
 
   let getChildrenOf = $derived((parentId) => {
-    return visibleTasks.filter(t => t.parent_task_id === parentId);
+    const list = visibleTasks.filter(t => t.parent_task_id === parentId);
+    const seen = new Set();
+    return list.filter(child => {
+      const key = `${child.title}:${child.skill_id || child.skillId || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   });
 
   // Any orphaned child tasks whose parent is not in parentTasks
-  let orphanTasks = $derived(
-    visibleTasks.filter(t => t.parent_task_id && !visibleTasks.some(p => p.id === t.parent_task_id))
-  );
+  let orphanTasks = $derived.by(() => {
+    const list = visibleTasks.filter(t => t.parent_task_id && !visibleTasks.some(p => p.id === t.parent_task_id));
+    const seen = new Set();
+    return list.filter(orphan => {
+      const key = `${orphan.title}:${orphan.skill_id || orphan.skillId || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  });
 
   function handleSelectTask(taskId) {
     if (appState.activeTaskId === taskId) {

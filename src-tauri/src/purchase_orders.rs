@@ -1317,6 +1317,59 @@ pub fn list_inventory_levels_impl(
     Ok(list)
 }
 
+pub fn list_inventory_movements_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    unit_id: Option<&str>,
+) -> Result<Vec<InventoryMovement>, String> {
+    if tenant_id.trim().is_empty() {
+        return Err("Tenant ID cannot be empty".to_string());
+    }
+
+    let mut query = "SELECT id, tenant_id, unit_id, quantity_delta, unit_cost, reason, reference_type, reference_id, created_by, created_at FROM inventory_movements WHERE tenant_id = ?1".to_string();
+    let has_unit = unit_id.map(|u| !u.trim().is_empty()).unwrap_or(false);
+    if has_unit {
+        query.push_str(" AND unit_id = ?2");
+    }
+    query.push_str(" ORDER BY created_at ASC");
+
+    let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+
+    let map_fn = |r: &rusqlite::Row| {
+        Ok(InventoryMovement {
+            id: r.get(0)?,
+            tenant_id: r.get(1)?,
+            unit_id: r.get(2)?,
+            quantity_delta: r.get(3)?,
+            unit_cost: r.get(4)?,
+            reason: r.get(5)?,
+            reference_type: r.get(6)?,
+            reference_id: r.get(7)?,
+            created_by: r.get(8)?,
+            created_at: r.get(9)?,
+        })
+    };
+
+    let mut list = Vec::new();
+    if has_unit {
+        let uid = unit_id.unwrap().trim();
+        let rows = stmt
+            .query_map(params![tenant_id, uid], map_fn)
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            list.push(r.map_err(|e| e.to_string())?);
+        }
+    } else {
+        let rows = stmt
+            .query_map(params![tenant_id], map_fn)
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            list.push(r.map_err(|e| e.to_string())?);
+        }
+    }
+    Ok(list)
+}
+
 // ==========================================
 // Delivery Layer (Tauri Commands)
 // ==========================================
@@ -1530,6 +1583,18 @@ pub async fn list_inventory_levels<R: tauri::Runtime>(
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     list_inventory_levels_impl(&conn, &active_tid)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_inventory_movements<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    unit_id: Option<String>,
+) -> Result<Vec<InventoryMovement>, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    list_inventory_movements_impl(&conn, &active_tid, unit_id.as_deref())
 }
 
 // ==========================================
@@ -2552,5 +2617,76 @@ mod tests {
             )
             .unwrap();
         assert_eq!(movement_count, 0);
+    }
+
+    #[test]
+    fn test_tc_im_n_01_list_inventory_movements_and_filter() {
+        // Given: Setup test DB and opening balance for unit1 and unit2
+        let mut conn = setup_test_db();
+        let prod1 = create_product_impl(
+            &conn,
+            "tnt_test",
+            "原料A".to_string(),
+            "raw_material".to_string(),
+            None,
+            Some("公斤".to_string()),
+            None,
+        )
+        .unwrap();
+        let unit_test_1 = &prod1.units[0].id;
+
+        let prod2 = create_product_impl(
+            &conn,
+            "tnt_test",
+            "原料B".to_string(),
+            "raw_material".to_string(),
+            None,
+            Some("公克".to_string()),
+            None,
+        )
+        .unwrap();
+        let unit_test_2 = &prod2.units[0].id;
+
+        // When: Recording opening balance for unit_test_1 and unit_test_2
+        record_opening_inventory_balance_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_1",
+            unit_test_1,
+            12.0,
+            100.0,
+        )
+        .unwrap();
+
+        record_opening_inventory_balance_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_1",
+            unit_test_2,
+            8.0,
+            50.0,
+        )
+        .unwrap();
+
+        // Then: list_inventory_movements without unit filter returns all movements for tenant
+        let all_movs = list_inventory_movements_impl(&conn, "tnt_test", None).unwrap();
+        assert_eq!(all_movs.len(), 2);
+
+        // Then: filter by unit_test_1 returns only 1 movement
+        let unit1_movs =
+            list_inventory_movements_impl(&conn, "tnt_test", Some(unit_test_1)).unwrap();
+        assert_eq!(unit1_movs.len(), 1);
+        assert_eq!(&unit1_movs[0].unit_id, unit_test_1);
+        assert_eq!(unit1_movs[0].quantity_delta, 12.0);
+        assert_eq!(unit1_movs[0].reason, "opening_balance");
+
+        // Then: boundary - empty tenant_id returns error
+        let err = list_inventory_movements_impl(&conn, "", None);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("Tenant ID cannot be empty"));
+
+        // Then: isolated tenant returns empty
+        let other = list_inventory_movements_impl(&conn, "tnt_other", None).unwrap();
+        assert_eq!(other.len(), 0);
     }
 }

@@ -109,6 +109,33 @@ pub fn create_tasks_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite::
         [],
     )?;
 
+    // Idempotent cleanup: remove duplicate onboarding subtasks under the same tenant and parent
+    let _ = conn.execute(
+        "DELETE FROM tasks
+         WHERE id IN (
+             SELECT t1.id FROM tasks t1
+             JOIN tasks t2 ON t1.tenant_id = t2.tenant_id
+                          AND t1.parent_task_id = t2.parent_task_id
+                          AND t1.title = t2.title
+                          AND t1.id != t2.id
+             WHERE t1.parent_task_id IS NOT NULL AND t1.parent_task_id != ''
+               AND t1.title IN ('設定部門', '建立第一個客戶', '建立第一個供應商', '建立第一個商品')
+               AND (
+                   (t2.status = 'done' AND t1.status != 'done')
+                   OR (t1.status = t2.status AND (t1.created_at > t2.created_at OR (t1.created_at = t2.created_at AND t1.id > t2.id)))
+               )
+         )",
+        [],
+    );
+
+    // Clean up orphaned task messages from deleted tasks
+    let _ = conn.execute(
+        "DELETE FROM task_messages
+         WHERE task_id NOT IN (SELECT id FROM tasks)
+           AND task_id != 'main'",
+        [],
+    );
+
     Ok(())
 }
 

@@ -23,9 +23,11 @@
  * | TC-SKILL-E-04 | updateDepartmentSkillsAction with empty/whitespace department ID | Error – Empty department ID | Throws Error '部門 ID 為必填項目' | Required field check |
  * | TC-SKILL-ROLE-01 | Active tenant role 'owner' or 'admin' | Equivalence – Role authorization | canManageMembers returns true | Permission check |
  * | TC-SKILL-ROLE-02 | Active tenant role 'member' | Equivalence – Role forbidden | canManageMembers returns false | Permission check |
+ * | TC-SKILL-TOAST-01 | Rapid successive calls to showToast | Equivalence – Toast timer cleanup & lifecycle | Previous timer cleared; old timer does not prematurely clear newer toast | Anti-duplication & timing |
+ * | TC-SKILL-TOAST-02 | updateDepartmentSkillsAction calls showToast with success message | Equivalence – Department skill toast | appState.toastMessage updated with target department name | Toast feedback |
  */
 
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Polyfill Svelte 5 $state rune for Node.js test environment if not defined
@@ -43,7 +45,8 @@ const {
   getSkillsByDomain,
   KNOWN_DOMAINS,
   canManageMembers,
-  fetchAuditLogs
+  fetchAuditLogs,
+  showToast
 } = await import('../src/lib/store.svelte.js');
 
 const {
@@ -334,4 +337,107 @@ test('TC-SKILL-B-05: Boundary - updateDepartmentSkillsAction recovers via fetchD
   assert.ok(inCache, 'Department must be populated into appState.departments');
   assert.deepEqual(inCache.skills, ['customer.create_basic_profile']);
 });
+
+test('TC-SKILL-TOAST-01: Equivalence - showToast timer management clears previous timer on rapid successive calls', () => {
+  // Given: Preconditions - Browser environment simulated with timer mock capability
+  const origWindow = globalThis.window;
+  const timers = mock?.timers ?? {
+    _now: 0,
+    _timers: new Map(),
+    _nextId: 1,
+    _origSetTimeout: null,
+    _origClearTimeout: null,
+    enable() {
+      this._now = 0;
+      this._timers.clear();
+      this._nextId = 1;
+      this._origSetTimeout = globalThis.setTimeout;
+      this._origClearTimeout = globalThis.clearTimeout;
+      globalThis.setTimeout = (fn, delay = 0) => {
+        const id = this._nextId++;
+        this._timers.set(id, { fn, triggerAt: this._now + delay });
+        return id;
+      };
+      globalThis.clearTimeout = (id) => {
+        this._timers.delete(id);
+      };
+    },
+    tick(ms) {
+      this._now += ms;
+      let executed = true;
+      while (executed) {
+        executed = false;
+        let earliest = null;
+        let earliestId = null;
+        for (const [id, timer] of this._timers.entries()) {
+          if (timer.triggerAt <= this._now) {
+            if (!earliest || timer.triggerAt < earliest.triggerAt) {
+              earliest = timer;
+              earliestId = id;
+            }
+          }
+        }
+        if (earliest && earliestId) {
+          this._timers.delete(earliestId);
+          earliest.fn();
+          executed = true;
+        }
+      }
+    },
+    reset() {
+      if (this._origSetTimeout) globalThis.setTimeout = this._origSetTimeout;
+      if (this._origClearTimeout) globalThis.clearTimeout = this._origClearTimeout;
+      this._timers.clear();
+    }
+  };
+
+  if (mock?.timers) {
+    mock.timers.enable({ apis: ['setTimeout'] });
+  } else {
+    timers.enable();
+  }
+
+  try {
+    globalThis.window = globalThis;
+
+    // When:  Operation to execute - Show toast A at t=0
+    showToast('第一則提示訊息');
+    assert.equal(appState.toastMessage, '第一則提示訊息');
+
+    // When:  Advance 1000ms and show toast B at t=1000
+    timers.tick(1000);
+    showToast('第二則提示訊息（覆蓋）');
+    assert.equal(appState.toastMessage, '第二則提示訊息（覆蓋）');
+
+    // When:  Advance 2500ms to t=3500 (the exact time when toast A was scheduled to expire)
+    timers.tick(2500);
+
+    // Then:  Expected result - Toast A's timer was cancelled by clearTimeout(toastTimer),
+    //        so toastMessage remains Toast B and is NOT prematurely cleared at t=3500!
+    assert.equal(appState.toastMessage, '第二則提示訊息（覆蓋）', 'Old timer should not prematurely clear newer toast');
+
+    // When:  Advance another 1000ms to t=4500 (when toast B reaches its 3500ms duration)
+    timers.tick(1000);
+
+    // Then:  Expected result - Toast B expires and clears toastMessage to null
+    assert.equal(appState.toastMessage, null, 'Toast B should clear after its full duration');
+  } finally {
+    timers.reset();
+    globalThis.window = origWindow;
+    appState.toastMessage = null;
+  }
+});
+
+test('TC-SKILL-TOAST-02: Equivalence - updateDepartmentSkillsAction calls showToast with formatted department name', async () => {
+  // Given: Preconditions - Department exists
+  const deptName = `提示測試部_${Date.now()}`;
+  const dept = await createDepartmentAction(deptName, null);
+
+  // When:  Operation to execute - Update department skills
+  await updateDepartmentSkillsAction(dept.id, ['department.manage'], 'Toast Tester');
+
+  // Then:  Expected result - Toast message reflects the updated department
+  assert.equal(appState.toastMessage, `已成功更新「${deptName}」的可用 Skill 清單`);
+});
+
 

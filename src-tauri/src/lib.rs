@@ -437,6 +437,7 @@ pub fn run() {
             purchase_orders::record_opening_inventory_balance,
             purchase_orders::get_inventory_level,
             purchase_orders::list_inventory_levels,
+            purchase_orders::list_inventory_movements,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,

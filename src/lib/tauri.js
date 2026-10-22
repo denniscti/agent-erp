@@ -199,6 +199,26 @@ if (!mockTasks || mockTasks.length === 0) {
     }
   }
 
+  // Deduplicate existing duplicate onboarding subtasks in mockTasks
+  const seenSubtasks = new Set();
+  const dedupedMock = [];
+  const onboardingTitles = new Set(['設定部門', '建立第一個客戶', '建立第一個供應商', '建立第一個商品']);
+  for (const t of mockTasks) {
+    if (t.parent_task_id && onboardingTitles.has(t.title)) {
+      const key = `${t.tenant_id || 'tnt_mock_1'}:${t.parent_task_id}:${t.title}`;
+      if (seenSubtasks.has(key)) {
+        migrated = true;
+        continue;
+      }
+      seenSubtasks.add(key);
+    }
+    dedupedMock.push(t);
+  }
+  if (dedupedMock.length !== mockTasks.length) {
+    mockTasks = dedupedMock;
+    migrated = true;
+  }
+
   if (migrated) saveStorage('agent_erp_mock_tasks', mockTasks);
 }
 
@@ -2366,6 +2386,17 @@ export async function invoke(cmd, args = {}) {
         };
       });
       return levels.sort((a, b) => (a.product_name || '').localeCompare(b.product_name || ''));
+    }
+
+    case 'list_inventory_movements': {
+      const { unit_id, unitId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const targetUnitId = String(unit_id || unitId || '').trim();
+      let list = mockInventoryMovements.filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (targetUnitId) {
+        list = list.filter(m => m.unit_id === targetUnitId);
+      }
+      return list.sort((a, b) => a.created_at - b.created_at);
     }
 
     case 'record_audit_log': {

@@ -53,7 +53,9 @@ const {
   createTaskAction,
   fetchPartners,
   fetchVendors,
-  fetchProducts
+  fetchProducts,
+  fetchTasks,
+  deduplicateOnboardingTasks
 } = await import('../src/lib/store.svelte.js');
 
 const {
@@ -84,8 +86,8 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and departme
 
   // 1. Verify '設定部門' subtask
   const deptSubTasks = appState.tasks.filter(t => t.title === '設定部門' && t.parent_task_id === parentTask.id);
-  assert.ok(deptSubTasks.length > 0, 'Subtask 設定部門 should be created under parent task');
-  const deptSubTask = deptSubTasks[deptSubTasks.length - 1];
+  assert.equal(deptSubTasks.length, 1, 'Subtask 設定部門 must be created exactly once without duplicate');
+  const deptSubTask = deptSubTasks[0];
   assert.equal(deptSubTask.skill_id, 'department.manage', 'Department subtask must have skill_id set');
   const deptMsgs = appState.taskMessages[deptSubTask.id] || [];
   assert.ok(deptMsgs.length > 0, 'Department subtask should have initial guidance message');
@@ -96,8 +98,8 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and departme
 
   // 2. Verify '建立第一個客戶' subtask
   const customerSubTasks = appState.tasks.filter(t => t.title === '建立第一個客戶' && t.parent_task_id === parentTask.id);
-  assert.ok(customerSubTasks.length > 0, 'Subtask 建立第一個客戶 should be created under parent task');
-  const customerSubTask = customerSubTasks[customerSubTasks.length - 1];
+  assert.equal(customerSubTasks.length, 1, 'Subtask 建立第一個客戶 must be created exactly once without duplicate');
+  const customerSubTask = customerSubTasks[0];
   assert.equal(customerSubTask.skill_id, 'customer.create_basic_profile', 'Customer subtask must have skill_id set');
   const customerMsgs = appState.taskMessages[customerSubTask.id] || [];
   assert.ok(customerMsgs.length > 0, 'Customer subtask should have initial guidance message');
@@ -108,8 +110,8 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and departme
 
   // 3. Verify '建立第一個供應商' subtask (Issue #120)
   const vendorSubTasks = appState.tasks.filter(t => t.title === '建立第一個供應商' && t.parent_task_id === parentTask.id);
-  assert.ok(vendorSubTasks.length > 0, 'Subtask 建立第一個供應商 should be created under parent task');
-  const vendorSubTask = vendorSubTasks[vendorSubTasks.length - 1];
+  assert.equal(vendorSubTasks.length, 1, 'Subtask 建立第一個供應商 must be created exactly once without duplicate');
+  const vendorSubTask = vendorSubTasks[0];
   assert.equal(vendorSubTask.skill_id, 'vendor.create_basic_profile', 'Vendor subtask must have skill_id set');
   const vendorMsgs = appState.taskMessages[vendorSubTask.id] || [];
   assert.ok(vendorMsgs.length > 0, 'Vendor subtask should have initial guidance message');
@@ -124,8 +126,8 @@ test('TC-ONB-N-01: Normal case - seedOnboardingTasks creates parent and departme
 
   // 4. Verify '建立第一個商品' subtask (Issue #143)
   const productSubTasks = appState.tasks.filter(t => t.title === '建立第一個商品' && t.parent_task_id === parentTask.id);
-  assert.ok(productSubTasks.length > 0, 'Subtask 建立第一個商品 should be created under parent task');
-  const productSubTask = productSubTasks[productSubTasks.length - 1];
+  assert.equal(productSubTasks.length, 1, 'Subtask 建立第一個商品 must be created exactly once without duplicate');
+  const productSubTask = productSubTasks[0];
   assert.equal(productSubTask.skill_id, 'product.create_basic_profile', 'Product subtask must have skill_id set');
   const productMsgs = appState.taskMessages[productSubTask.id] || [];
   assert.ok(productMsgs.length > 0, 'Product subtask should have initial guidance message');
@@ -752,4 +754,63 @@ test('TC-ONB-E-01: Error case - Failure during onboarding seeding is caught grac
     'Database serialization error during onboarding seed',
     'Captured error message should match the injected failure'
   );
+});
+
+test('TC-ONB-DUP-01: Equivalence - seedOnboardingTasks creates exactly 1 subtask for each ONBOARDING_STEP without duplicate', async () => {
+  // Given: Preconditions - Reset appState
+  appState.tasks = [];
+  appState.taskMessages = {};
+
+  // When:  Operation to execute - Call seedOnboardingTasks
+  await seedOnboardingTasks('聯發科技測試租戶');
+
+  // Then:  Expected result - Exactly 4 onboarding subtasks created under '新租戶起步'
+  const parent = appState.tasks.find(t => t.title === '新租戶起步');
+  assert.ok(parent, 'Parent task must exist');
+  const subtasks = appState.tasks.filter(t => t.parent_task_id === parent.id);
+  assert.equal(subtasks.length, 4, 'Must create exactly 4 subtasks, not 8');
+
+  for (const step of ONBOARDING_STEPS) {
+    const matching = subtasks.filter(t => t.title === step.title);
+    assert.equal(matching.length, 1, `Subtask「${step.title}」must appear exactly once`);
+  }
+});
+
+test('TC-ONB-DUP-02: Boundary - deduplicateOnboardingTasks removes duplicates and prioritizes done status', () => {
+  // Given: Preconditions - Duplicate task array with varying statuses
+  const rawTasks = [
+    { id: 'p1', title: '新租戶起步', parent_task_id: null, status: 'in_progress' },
+    { id: 's1_a', title: '設定部門', parent_task_id: 'p1', status: 'pending' },
+    { id: 's1_b', title: '設定部門', parent_task_id: 'p1', status: 'done' },
+    { id: 's2_a', title: '建立第一個客戶', parent_task_id: 'p1', status: 'pending' },
+    { id: 's2_b', title: '建立第一個客戶', parent_task_id: 'p1', status: 'pending' },
+    { id: 'custom_1', title: '自訂子任務', parent_task_id: 'p1', status: 'pending' },
+    { id: 'custom_2', title: '自訂子任務', parent_task_id: 'p1', status: 'pending' }
+  ];
+
+  // When:  Operation to execute - Deduplicate
+  const result = deduplicateOnboardingTasks(rawTasks);
+
+  // Then:  Expected result -
+  // - '設定部門' has 1 item, and its status is 'done'
+  const deptItems = result.filter(t => t.title === '設定部門');
+  assert.equal(deptItems.length, 1);
+  assert.equal(deptItems[0].status, 'done');
+
+  // - '建立第一個客戶' has 1 item
+  const custItems = result.filter(t => t.title === '建立第一個客戶');
+  assert.equal(custItems.length, 1);
+
+  // - Custom non-onboarding child tasks are preserved as-is
+  const customItems = result.filter(t => t.title === '自訂子任務');
+  assert.equal(customItems.length, 2);
+});
+
+test('TC-ONB-DUP-03: Boundary - deduplicateOnboardingTasks handles null, empty, or single-element inputs safely', () => {
+  // Given: Preconditions - Boundary inputs
+  // When & Then:
+  assert.deepEqual(deduplicateOnboardingTasks(null), []);
+  assert.deepEqual(deduplicateOnboardingTasks([]), []);
+  const single = [{ id: '1', title: '設定部門', parent_task_id: 'p1' }];
+  assert.deepEqual(deduplicateOnboardingTasks(single), single);
 });
