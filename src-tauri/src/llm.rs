@@ -189,7 +189,7 @@ impl NimClient for ReqwestNimClient {
             tools,
             tool_choice,
             temperature: 0.0,
-            max_tokens: 512,
+            max_tokens: 2048,
         };
 
         let resp = self
@@ -281,6 +281,8 @@ pub fn parse_department_tool_call(resp: &ChatMessageResponse) -> Option<Departme
     }
 }
 
+/// 保留作為遷移期間的驗證基準與 rollback 安全網（對應 13 筆部門行為基準測試）。
+/// 前端已全面改走動態管線 `detect_intent`，待 #172/#173 實際跑過動態管線後再評估移除。
 pub async fn execute_detect_department_intent<C: NimClient>(
     client: &C,
     api_key: Option<&str>,
@@ -315,6 +317,8 @@ pub async fn execute_detect_department_intent<C: NimClient>(
     })
 }
 
+/// 保留作為遷移期間的驗證基準與 rollback 安全網（對應 13 筆部門行為基準測試）。
+/// 前端已全面改走動態管線 `detect_intent`，待 #172/#173 實際跑過動態管線後再評估移除。
 #[tauri::command]
 #[specta::specta]
 pub async fn detect_department_intent<R: tauri::Runtime>(
@@ -324,6 +328,117 @@ pub async fn detect_department_intent<R: tauri::Runtime>(
     let api_key = get_nvidia_api_key();
     let client = ReqwestNimClient::default();
     execute_detect_department_intent(&client, api_key.as_deref(), &user_message).await
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct DetectIntentResult {
+    pub attempted: bool,
+    pub tool_call: Option<serde_json::Value>,
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    pub content: Option<String>,
+}
+
+pub fn parse_generic_tool_calls(resp: &ChatMessageResponse) -> Option<Vec<serde_json::Value>> {
+    let tool_calls = resp.tool_calls.as_ref()?;
+    if tool_calls.is_empty() {
+        return None;
+    }
+    let mut parsed_calls = Vec::new();
+    for tc in tool_calls {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "tool".to_string(),
+            serde_json::Value::String(tc.function.name.clone()),
+        );
+        if let Some(ref id) = tc.id {
+            map.insert("id".to_string(), serde_json::Value::String(id.clone()));
+        }
+        let parsed_args = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(ref args_obj) = parsed_args {
+            for (k, v) in args_obj {
+                if k != "tool" {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            map.insert("args".to_string(), parsed_args.clone());
+        } else {
+            map.insert("args".to_string(), parsed_args);
+        }
+        parsed_calls.push(serde_json::Value::Object(map));
+    }
+    if parsed_calls.is_empty() {
+        None
+    } else {
+        Some(parsed_calls)
+    }
+}
+
+pub async fn execute_detect_intent<C: NimClient>(
+    client: &C,
+    api_key: Option<&str>,
+    user_message: &str,
+    system_prompt: &str,
+    tools: Option<Vec<ToolDefinition>>,
+) -> Result<DetectIntentResult, String> {
+    let key = match api_key {
+        Some(k) if !k.trim().is_empty() => k.trim(),
+        _ => {
+            return Ok(DetectIntentResult {
+                attempted: false,
+                tool_call: None,
+                tool_calls: None,
+                content: None,
+            })
+        }
+    };
+
+    let trimmed_msg = user_message.trim();
+    if trimmed_msg.is_empty() {
+        return Ok(DetectIntentResult {
+            attempted: false,
+            tool_call: None,
+            tool_calls: None,
+            content: None,
+        });
+    }
+
+    let raw_response = client
+        .chat_completion(key, system_prompt, trimmed_msg, tools)
+        .await?;
+
+    let parsed_calls = parse_generic_tool_calls(&raw_response);
+    let first_call = parsed_calls
+        .as_ref()
+        .and_then(|calls| calls.first().cloned());
+
+    Ok(DetectIntentResult {
+        attempted: true,
+        tool_call: first_call,
+        tool_calls: parsed_calls,
+        content: raw_response.content,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn detect_intent<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    user_message: String,
+    system_prompt: String,
+    tools: Option<Vec<ToolDefinition>>,
+) -> Result<DetectIntentResult, String> {
+    let _ = app_handle;
+    let api_key = get_nvidia_api_key();
+    let client = ReqwestNimClient::default();
+    execute_detect_intent(
+        &client,
+        api_key.as_deref(),
+        &user_message,
+        &system_prompt,
+        tools,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -739,5 +854,136 @@ pub(crate) mod tests {
             // Then: Matches expected parsed option
             assert_eq!(actual, expected, "Failed for input: {:?}", input);
         }
+    }
+
+    #[tokio::test]
+    async fn test_tc_dynamic_intent_01_tool_call_success() {
+        // Given: Preconditions - Mock client returning a generic tool call for create_department
+        let mock_client = MockNimClient {
+            response: Ok(ChatMessageResponse {
+                content: Some("好的，為您建立行銷部".to_string()),
+                tool_calls: Some(vec![ToolCallResponse {
+                    id: Some("call-dyn-1".to_string()),
+                    r#type: Some("function".to_string()),
+                    function: FunctionCallResponse {
+                        name: "create_department".to_string(),
+                        arguments: "{\"name\":\"行銷部\"}".to_string(),
+                    },
+                }]),
+            }),
+        };
+        let api_key = Some("nvapi-valid-test-key");
+        let user_msg = "我想新增行銷部";
+        let prompt = "你是一個組織架構助理。";
+        let tools = Some(get_department_tools());
+
+        // When: execute_detect_intent is executed
+        let result = execute_detect_intent(&mock_client, api_key, user_msg, prompt, tools).await;
+
+        // Then: Successfully returns attempted: true with parsed tool call and content
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(res.attempted);
+        assert_eq!(res.content, Some("好的，為您建立行銷部".to_string()));
+        assert!(res.tool_call.is_some());
+        let tc = res.tool_call.unwrap();
+        assert_eq!(tc["tool"], "create_department");
+        assert_eq!(tc["name"], "行銷部");
+        assert_eq!(tc["id"], "call-dyn-1");
+    }
+
+    #[tokio::test]
+    async fn test_tc_dynamic_intent_02_text_content_only() {
+        // Given: Preconditions - Mock client returning text without tool calls (e.g. ambiguity or general answer)
+        let mock_client = MockNimClient {
+            response: Ok(ChatMessageResponse {
+                content: Some("請問您是指 27 吋螢幕還是電競螢幕？".to_string()),
+                tool_calls: None,
+            }),
+        };
+        let api_key = Some("nvapi-valid-test-key");
+        let user_msg = "買螢幕";
+        let prompt = "你是一個採購單助理。";
+
+        // When: execute_detect_intent is executed
+        let result = execute_detect_intent(&mock_client, api_key, user_msg, prompt, None).await;
+
+        // Then: Returns attempted: true with content and tool_call as None
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(res.attempted);
+        assert_eq!(
+            res.content,
+            Some("請問您是指 27 吋螢幕還是電競螢幕？".to_string())
+        );
+        assert!(res.tool_call.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tc_dynamic_intent_03_empty_response() {
+        // Given: Preconditions - Mock client returning neither tool calls nor text content (exhaustion / empty response)
+        let mock_client = MockNimClient {
+            response: Ok(ChatMessageResponse {
+                content: None,
+                tool_calls: None,
+            }),
+        };
+        let api_key = Some("nvapi-valid-test-key");
+        let user_msg = "複雜衝突採購指令";
+        let prompt = "你是一個採購單助理。";
+
+        // When: execute_detect_intent is executed
+        let result = execute_detect_intent(&mock_client, api_key, user_msg, prompt, None).await;
+
+        // Then: Returns attempted: true with both content and tool_call as None
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(res.attempted);
+        assert!(res.content.is_none());
+        assert!(res.tool_call.is_none());
+        assert!(res.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tc_dynamic_intent_04_missing_or_blank_api_key_returns_attempted_false() {
+        // Given: Preconditions - Mock client that should not be invoked
+        let mock_client = MockNimClient {
+            response: Err("Should never be called".to_string()),
+        };
+
+        // When: api_key is None
+        let res_none = execute_detect_intent(&mock_client, None, "測試", "Prompt", None).await;
+        // Then: Short-circuits with attempted: false
+        assert!(res_none.is_ok());
+        assert!(!res_none.unwrap().attempted);
+
+        // When: api_key is blank
+        let res_blank =
+            execute_detect_intent(&mock_client, Some("   "), "測試", "Prompt", None).await;
+        // Then: Short-circuits with attempted: false
+        assert!(res_blank.is_ok());
+        assert!(!res_blank.unwrap().attempted);
+    }
+
+    #[tokio::test]
+    async fn test_tc_dynamic_intent_05_empty_or_whitespace_user_message_returns_attempted_false() {
+        // Given: Preconditions - Valid API key but empty or whitespace user message
+        let mock_client = MockNimClient {
+            response: Err("Should never be called".to_string()),
+        };
+        let api_key = Some("nvapi-valid-test-key");
+
+        // When: user_message is empty
+        let res_empty = execute_detect_intent(&mock_client, api_key, "", "Prompt", None).await;
+        // Then: Short-circuits with attempted: false
+        assert!(res_empty.is_ok());
+        assert!(!res_empty.unwrap().attempted);
+
+        // When: user_message is whitespace
+        let res_space =
+            execute_detect_intent(&mock_client, api_key, "   \n\t ", "Prompt", None).await;
+        // Then: Short-circuits with attempted: false
+        assert!(res_space.is_ok());
+        assert!(!res_space.unwrap().attempted);
     }
 }

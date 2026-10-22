@@ -109,12 +109,85 @@ export function checkToolWhitelist(toolName, profile) {
 }
 
 /**
- * Detects intent using LLM with timing and trace logging, falling back to candidate regex extractors.
+ * Assembles system prompt with optional context injection from AgentProfile.
+ * @param {import('./types.js').AgentProfile} profile
+ * @param {any} [context]
+ * @returns {Promise<string>}
+ */
+export async function assembleSystemPrompt(profile, context = {}) {
+  const basePrompt = profile?.systemPrompt || '';
+  if (!profile?.contextInjection) {
+    return basePrompt;
+  }
+  let injection = '';
+  if (typeof profile.contextInjection === 'function') {
+    try {
+      injection = await profile.contextInjection(context);
+    } catch (err) {
+      console.warn('[Harness] Error executing contextInjection function:', err);
+    }
+  } else if (typeof profile.contextInjection === 'string') {
+    injection = profile.contextInjection;
+  }
+
+  if (injection && typeof injection === 'string' && injection.trim()) {
+    return basePrompt ? `${basePrompt}\n\n${injection.trim()}` : injection.trim();
+  }
+  return basePrompt;
+}
+
+/**
+ * Default LLM intent detector invoking backend `detect_intent` dynamically with profile tools and prompt.
+ * @param {string} userMessage
+ * @param {import('./types.js').AgentProfile} profile
+ * @param {any} [context]
+ * @returns {Promise<any>}
+ */
+export async function defaultLlmDetector(userMessage, profile, context = {}) {
+  const assembledPrompt = await assembleSystemPrompt(profile, context);
+  const tools = Array.isArray(profile?.tools) && profile.tools.length > 0 ? profile.tools : null;
+  return await invoke('detect_intent', {
+    userMessage,
+    systemPrompt: assembledPrompt,
+    tools
+  });
+}
+
+/**
+ * Checks if a response from LLM is considered an empty response failure
+ * (attempted, but returns neither valid tool call nor non-empty text content).
+ * @param {any} res
+ * @returns {boolean}
+ */
+export function isEmptyModelResponse(res) {
+  if (!res || typeof res !== 'object') return false;
+  // If attempted === false, it means unconfigured API key or offline, not model output failure
+  if (res.attempted === false) return false;
+
+  const hasTool = Boolean(
+    (res.tool_call && typeof res.tool_call === 'object' && (res.tool_call.tool || res.tool_call.name)) ||
+    (Array.isArray(res.tool_calls) && res.tool_calls.length > 0) ||
+    res.tool
+  );
+  if (hasTool) return false;
+
+  // Check content: if content property is present or if object explicitly has null/empty content
+  if ('content' in res) {
+    const hasContent = typeof res.content === 'string' && res.content.trim().length > 0;
+    return !hasContent;
+  }
+
+  return false;
+}
+
+/**
+ * Detects intent using LLM with timing, retry on empty responses, and trace logging,
+ * falling back to candidate regex extractors.
  * @param {string} userMessage
  * @param {import('./types.js').AgentProfile} profile
  * @param {any} [context]
  * @param {any} [options]
- * @returns {Promise<{ intent: { tool: string, [key: string]: any } | null, traceId: string | null }>}
+ * @returns {Promise<{ intent: { tool: string, [key: string]: any } | null, traceId: string | null, rawResponse?: any, content?: string | null }>}
  */
 export async function detectIntentWithFallbackAndTrace(userMessage, profile, context = {}, options = {}) {
   if (!userMessage || !userMessage.trim()) {
@@ -126,17 +199,40 @@ export async function detectIntentWithFallbackAndTrace(userMessage, profile, con
   const opts = options || {};
   let traceId = null;
 
-  // 1. Try LLM detector first if provided
-  if (typeof opts.llmDetector === 'function') {
+  // 1. Try LLM detector (either explicitly passed or default dynamic detector if profile provided)
+  const detector = typeof opts.llmDetector === 'function'
+    ? opts.llmDetector
+    : (profile ? defaultLlmDetector : null);
+
+  if (typeof detector === 'function') {
     const startTime = Date.now();
     let llmRawResult = null;
     let callError = null;
 
     try {
-      llmRawResult = await opts.llmDetector(trimmed, profile);
+      llmRawResult = await detector(trimmed, profile, ctx);
     } catch (err) {
       callError = err;
       console.warn('[Harness] LLM intent detection failed or unavailable, falling back to regex:', err);
+    }
+
+    // Empty response defense:
+    // If the model was attempted, but returned empty response (no tool_call and no text content),
+    // treat as a failure: retry once. If still empty, fall back to regex candidate extractors.
+    if (!callError && isEmptyModelResponse(llmRawResult)) {
+      console.warn('[Harness] Model returned empty response (no tool_call and no text content), retrying once...');
+      try {
+        const retryResult = await detector(trimmed, profile, ctx);
+        if (isEmptyModelResponse(retryResult)) {
+          callError = new Error('Model returned empty response after retry');
+          llmRawResult = retryResult;
+        } else {
+          llmRawResult = retryResult;
+        }
+      } catch (retryErr) {
+        callError = retryErr;
+        console.warn('[Harness] Model retry call failed:', retryErr);
+      }
     }
 
     // Determine if the LLM call was actually attempted (e.g. API key was present)
@@ -149,18 +245,20 @@ export async function detectIntentWithFallbackAndTrace(userMessage, profile, con
 
       // Extract tool intent (supports DetectDepartmentIntentResult { attempted, tool_call } or direct { tool, ... })
       let detectedIntent = null;
-      if (llmRawResult && typeof llmRawResult === 'object') {
-        if (llmRawResult.tool_call && typeof llmRawResult.tool_call === 'object' && llmRawResult.tool_call.tool) {
+      if (!callError && llmRawResult && typeof llmRawResult === 'object') {
+        if (llmRawResult.tool_call && typeof llmRawResult.tool_call === 'object' && (llmRawResult.tool_call.tool || llmRawResult.tool_call.name)) {
           detectedIntent = llmRawResult.tool_call;
         } else if (llmRawResult.tool) {
           detectedIntent = llmRawResult;
         }
       }
 
+      const assembledSystemPrompt = await assembleSystemPrompt(profile, ctx);
+
       const traceRecord = {
         id: traceId,
         agent_scope: ctx.agentScope || ctx.taskId || profile?.id || 'general',
-        system_prompt: profile?.systemPrompt || '',
+        system_prompt: assembledSystemPrompt,
         tools_json: JSON.stringify(profile?.tools || []),
         user_message: trimmed,
         raw_response: llmRawResult != null ? JSON.stringify(llmRawResult) : null,
@@ -176,7 +274,12 @@ export async function detectIntentWithFallbackAndTrace(userMessage, profile, con
       await logLlmTrace(traceRecord, opts.tracer);
 
       if (detectedIntent) {
-        return { intent: detectedIntent, traceId };
+        return { intent: detectedIntent, traceId, rawResponse: llmRawResult };
+      }
+
+      // If call succeeded without error (e.g. model gave text response), return text content
+      if (!callError && llmRawResult && typeof llmRawResult === 'object' && llmRawResult.content) {
+        return { intent: null, traceId, rawResponse: llmRawResult, content: llmRawResult.content };
       }
     }
   }
@@ -230,7 +333,7 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
   const opts = options || {};
 
   // Step 1: Detect intent with trace logging
-  const { intent, traceId } = await detectIntentWithFallbackAndTrace(
+  const { intent, traceId, rawResponse, content: modelContent } = await detectIntentWithFallbackAndTrace(
     userMessage,
     profile,
     ctx,
@@ -239,9 +342,15 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
 
   // If no tool was detected, return guidance/fallback text
   if (!intent || !intent.tool) {
-    const fallbackMsg = typeof profile?.getFallbackMessage === 'function'
+    const textContent = (typeof modelContent === 'string' && modelContent.trim().length > 0)
+      ? modelContent.trim()
+      : (rawResponse?.content && typeof rawResponse.content === 'string' && rawResponse.content.trim().length > 0
+        ? rawResponse.content.trim()
+        : null);
+
+    const fallbackMsg = textContent || (typeof profile?.getFallbackMessage === 'function'
       ? profile.getFallbackMessage(ctx.activeTask)
-      : '請提供具體的操作需求，我將為您執行相應的任務。';
+      : '請提供具體的操作需求，我將為您執行相應的任務。');
     return {
       type: 'text',
       content: fallbackMsg,

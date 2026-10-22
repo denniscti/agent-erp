@@ -421,6 +421,7 @@ pub fn run() {
             products::update_supply_source,
             products::add_bom_item,
             llm::detect_department_intent,
+            llm::detect_intent,
             llm_traces::record_llm_trace,
             llm_traces::update_llm_trace_decision,
             llm_traces::get_llm_traces,

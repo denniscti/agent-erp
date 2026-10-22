@@ -38,6 +38,7 @@
  * @property {string} [id] - Unique skill identifier (e.g., 'customer.create_basic_profile', 'department.manage')
  * @property {string} [domain] - Declared skill domain from KNOWN_DOMAINS (e.g., 'department', 'customer', 'vendor')
  * @property {string} systemPrompt - Prompt defining the role and boundary of the agent.
+ * @property {string | ((context?: any) => string | Promise<string>)} [contextInjection] - Optional context injection text or dynamic generator (e.g., catalog data) assembled into system prompt.
  * @property {ToolDefinition[]} tools - Array of allowed tool definitions.
  * @property {ToolHandler[]} toolHandlers - Array of corresponding tool handler instances.
  * @property {(task?: any) => string} [getFallbackMessage] - Guidance message when user message does not match any tool.

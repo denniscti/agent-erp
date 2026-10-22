@@ -937,8 +937,13 @@ export async function invoke(cmd, args = {}) {
       return { ...dept };
     }
 
+    // 保留作為遷移期間的驗證基準與 rollback 安全網，前端已全面改走 detect_intent
     case 'detect_department_intent': {
       return { attempted: false, tool_call: null };
+    }
+
+    case 'detect_intent': {
+      return { attempted: false, tool_call: null, tool_calls: null, content: null };
     }
 
     case 'create_partner': {

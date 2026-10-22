@@ -57,16 +57,7 @@
       const turnResult = await runAgentTurn(
         userMessage,
         currentTaskProfile,
-        { taskId: currentTaskId, activeTask },
-        {
-          llmDetector: async (msg) => {
-            try {
-              return await invoke('detect_department_intent', { userMessage: msg });
-            } catch {
-              return null;
-            }
-          }
-        }
+        { taskId: currentTaskId, activeTask }
       );
 
       if (turnResult.type === 'pending_confirmation' && turnResult.confirmation) {
