@@ -11,6 +11,7 @@ pub mod llm;
 pub mod llm_traces;
 pub mod partners;
 pub mod products;
+pub mod purchase_orders;
 pub mod tasks;
 pub mod tps2_types;
 
@@ -156,6 +157,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     products::create_products_tables(&conn)
         .map_err(|e| format!("Failed to create products tables: {}", e))?;
+
+    purchase_orders::create_purchase_orders_tables(&conn)
+        .map_err(|e| format!("Failed to create purchase orders tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -420,6 +424,19 @@ pub fn run() {
             products::add_supply_source,
             products::update_supply_source,
             products::add_bom_item,
+            purchase_orders::create_purchase_order,
+            purchase_orders::update_purchase_order_header,
+            purchase_orders::add_purchase_order_line,
+            purchase_orders::update_purchase_order_line,
+            purchase_orders::remove_purchase_order_line,
+            purchase_orders::submit_purchase_order,
+            purchase_orders::confirm_purchase_order_received,
+            purchase_orders::cancel_purchase_order,
+            purchase_orders::get_purchase_order,
+            purchase_orders::list_purchase_orders,
+            purchase_orders::record_opening_inventory_balance,
+            purchase_orders::get_inventory_level,
+            purchase_orders::list_inventory_levels,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
