@@ -9,6 +9,7 @@ import {
   vendorCreateBasicProfileAgentProfile
 } from './partners.js';
 import { productManagementAgentProfile } from './products.js';
+import { purchaseOrderAgentProfile } from './purchaseOrders.js';
 import { isKnownDomain } from './domains.js';
 
 export * from './types.js';
@@ -16,6 +17,7 @@ export * from './harness.js';
 export * from './departments.js';
 export * from './partners.js';
 export * from './products.js';
+export * from './purchaseOrders.js';
 export * from './domains.js';
 
 /**
@@ -34,6 +36,10 @@ registerAgentProfile('customers', customerCreateBasicProfileAgentProfile);
 registerAgentProfile('vendor.create_basic_profile', vendorCreateBasicProfileAgentProfile);
 registerAgentProfile('task_m4_vendor', vendorCreateBasicProfileAgentProfile);
 registerAgentProfile('vendors', vendorCreateBasicProfileAgentProfile);
+registerAgentProfile('vendor.manage_purchase_order', purchaseOrderAgentProfile);
+registerAgentProfile('purchase_orders', purchaseOrderAgentProfile);
+registerAgentProfile('purchase_order', purchaseOrderAgentProfile);
+registerAgentProfile('task_purchase_order', purchaseOrderAgentProfile);
 registerAgentProfile('product.create_basic_profile', productManagementAgentProfile);
 registerAgentProfile('product.manage', productManagementAgentProfile);
 registerAgentProfile('task_m7_product', productManagementAgentProfile);
@@ -85,6 +91,12 @@ const declaredSkillsList = [
     name: '管理商品與規格 BOM',
     domain: 'product',
     description: '查詢商品清單、維護變體包裝單位、供應來源與自製成品 BOM 組成'
+  },
+  {
+    id: 'vendor.manage_purchase_order',
+    name: '採購單建立與推進',
+    domain: 'vendor',
+    description: '以對話形式建立採購單、推進下單、到貨確認與取消狀態'
   }
 ];
 
@@ -117,22 +129,27 @@ export function getAgentProfileForTask(task) {
     return taskProfileMap.get(moduleId) || null;
   }
 
-  // 4. Fallback check for department subtask title
+  // 4. Fallback check for purchase order subtask title (higher priority than generic vendor keywords)
+  if (task.title && (task.title.includes('採購') || task.title.toLowerCase().includes('purchase'))) {
+    return purchaseOrderAgentProfile;
+  }
+
+  // 5. Fallback check for department subtask title
   if (task.title && task.title.includes('設定部門')) {
     return departmentAgentProfile;
   }
 
-  // 5. Fallback check for vendor subtask title
+  // 6. Fallback check for vendor subtask title
   if (task.title && (task.title.includes('新增供應商') || task.title.includes('建立供應商') || task.title.includes('供應商') || task.title.includes('廠商'))) {
     return vendorCreateBasicProfileAgentProfile;
   }
 
-  // 6. Fallback check for customer subtask title
+  // 7. Fallback check for customer subtask title
   if (task.title && (task.title.includes('新增客戶') || task.title.includes('建立客戶') || task.title.includes('客戶'))) {
     return customerCreateBasicProfileAgentProfile;
   }
 
-  // 7. Fallback check for product subtask title
+  // 8. Fallback check for product subtask title
   if (task.title && (task.title.includes('新增商品') || task.title.includes('建立商品') || task.title.includes('商品') || task.title.includes('產品'))) {
     return productManagementAgentProfile;
   }

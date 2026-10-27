@@ -26,6 +26,38 @@ function loadTaskPanelCollapsed() {
   return false;
 }
 
+function loadUserCreatedTaskIds() {
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const saved = localStorage.getItem('agent_erp_user_created_task_ids');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return new Set(parsed);
+      }
+    } catch (e) {
+      console.warn("Failed to load userCreatedTaskIds from localStorage:", e);
+    }
+  }
+  return new Set();
+}
+
+/**
+ * Tracks a task created by the user so it remains visible in TaskPanel
+ * @param {string} id
+ */
+export function trackUserCreatedTaskId(id) {
+  if (!id) return;
+  if (!appState.userCreatedTaskIds) {
+    appState.userCreatedTaskIds = new Set();
+  }
+  appState.userCreatedTaskIds.add(id);
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      localStorage.setItem('agent_erp_user_created_task_ids', JSON.stringify(Array.from(appState.userCreatedTaskIds)));
+    } catch (e) {}
+  }
+}
+
 // Define the global reactive app state using Svelte 5 $state
 export const appState = $state({
   route: '/app/agent',
@@ -67,6 +99,8 @@ export const appState = $state({
   /** @type {string | null} */
   activeTaskId: null, // null = 主 Agent 環境對話；字串 = 子任務對話
   taskPanelCollapsed: loadTaskPanelCollapsed(),
+  /** @type {Set<string>} */
+  userCreatedTaskIds: loadUserCreatedTaskIds(),
   /** @type {Record<string, Array<{ role: string, content: string, timestamp?: number }>>} */
   taskMessages: {},
 
@@ -655,6 +689,9 @@ export async function createTaskAction(title, moduleId, assignee, parentTaskId =
       skill_id: skillId || null,
       skills: Array.isArray(skills) ? skills : (skillId ? [skillId] : null)
     });
+    if (task?.id) {
+      trackUserCreatedTaskId(task.id);
+    }
     await fetchTasks();
     return task;
   } catch (err) {
@@ -1679,12 +1716,14 @@ export function getCurrentUserEffectiveSkills(state = appState) {
  * Filter task list based on user's effective skill set (Issue #132).
  * Tasks declaring a skillId / skill_id must match one of user's effective skills.
  * Tasks without skillId (unrestricted/parent tasks) are preserved.
+ * User-created tasks are also preserved so creators never lose their own tasks.
  *
  * @param {any[]} tasks
  * @param {string[] | Set<string> | null | undefined} [effectiveSkills]
+ * @param {any} [currentUser]
  * @returns {any[]}
  */
-export function filterTasksBySkills(tasks, effectiveSkills = getCurrentUserEffectiveSkills()) {
+export function filterTasksBySkills(tasks, effectiveSkills = getCurrentUserEffectiveSkills(), currentUser = appState.authUser) {
   if (!tasks || !Array.isArray(tasks)) {
     return [];
   }
@@ -1698,9 +1737,20 @@ export function filterTasksBySkills(tasks, effectiveSkills = getCurrentUserEffec
     skillSet = new Set();
   }
 
+  const currentUserId = currentUser?.id || currentUser?.user_id;
+  const currentUserEmail = currentUser?.email;
+
   return tasks.filter(task => {
     if (!task || typeof task !== 'object') {
       return false;
+    }
+
+    // User-created tasks exception: creators can always see tasks they created
+    if (task.created_by && ((currentUserId && task.created_by === currentUserId) || (currentUserEmail && task.created_by === currentUserEmail))) {
+      return true;
+    }
+    if (appState.userCreatedTaskIds && appState.userCreatedTaskIds.has(task.id)) {
+      return true;
     }
 
     const rawSkillId = task.skillId || task.skill_id;
@@ -1863,7 +1913,7 @@ export async function confirmPendingTaskAction() {
   clearPendingTaskConfirmation();
 
   try {
-    const { content, toolName, completesTask, summary, toast } = await executeConfirmation(conf, { 
+    const { content, toolName, completesTask, cancelsTask, summary, toast } = await executeConfirmation(conf, { 
       taskId, 
       activeTask: appState.tasks.find(t => t.id === taskId) 
     });
@@ -1874,6 +1924,13 @@ export async function confirmPendingTaskAction() {
 
     if (taskId && completesTask) {
       await updateTaskStatusAction(taskId, 'done');
+    } else if (taskId && cancelsTask) {
+      await updateTaskStatusAction(taskId, 'cancelled');
+    } else if (taskId) {
+      const currentTask = appState.tasks.find(t => t.id === taskId);
+      if (currentTask && currentTask.status === 'pending') {
+        await updateTaskStatusAction(taskId, 'in_progress');
+      }
     }
 
     if (summary) {
@@ -1882,6 +1939,15 @@ export async function confirmPendingTaskAction() {
 
     if (toolName === 'create_department' || toolName === 'list_departments') {
       await fetchDepartments();
+    }
+
+    if (toolName && toolName.includes('purchase_order')) {
+      try {
+        await fetchPurchaseOrders();
+        await fetchInventoryLevels();
+      } catch (e) {
+        console.warn("Failed to refresh purchase orders or inventory after confirmation:", e);
+      }
     }
 
     // Refresh audit logs in store

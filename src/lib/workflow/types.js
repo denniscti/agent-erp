@@ -25,6 +25,7 @@
  * @property {(args: any, context?: any) => Promise<any>} execute - Executes the actual tool operation (e.g. Tauri IPC).
  * @property {boolean} [requiresConfirmation] - Whether human confirmation is required before execution (default: true).
  * @property {boolean} [completesTask] - Whether successful execution marks the active task as completed ('done').
+ * @property {boolean} [cancelsTask] - Whether successful execution marks the active task as cancelled ('cancelled').
  * @property {(result: any, args?: any, context?: any) => string} [describeTaskSummary] - Formats summary message reported to main ambient conversation.
  * @property {(result: any, args?: any, context?: any) => string} [describeToast] - Formats toast notification message upon successful execution.
  * @property {(args?: any, context?: any) => string} [describeCancel] - Formats human-readable cancellation response.

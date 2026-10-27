@@ -414,7 +414,8 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
     try {
       const result = await handler.execute(args, ctx);
       const content = handler.formatResult(result, args, ctx);
-      const completesTask = Boolean(handler.completesTask);
+      const completesTask = Boolean(result?.completesTask ?? handler.completesTask);
+      const cancelsTask = Boolean(result?.cancelsTask ?? handler.cancelsTask);
       const summary = typeof handler.describeTaskSummary === 'function'
         ? handler.describeTaskSummary(result, args, ctx)
         : null;
@@ -428,6 +429,7 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
         toolName,
         args,
         completesTask,
+        cancelsTask,
         summary,
         toast,
         traceId
@@ -502,7 +504,7 @@ export async function runAgentTurn(userMessage, profile, context = {}, options =
  * @param {import('./types.js').PendingConfirmation} confirmation
  * @param {any} [context]
  * @param {{ auditLogger?: (entry: any) => Promise<any>, decisionUpdater?: (id: string, decision: string) => Promise<any> }} [options]
- * @returns {Promise<{ result: any, content: string, toolName: string, args: any, completesTask: boolean, summary: string | null, toast: string | null }>}
+ * @returns {Promise<{ result: any, content: string, toolName: string, args: any, completesTask: boolean, cancelsTask: boolean, summary: string | null, toast: string | null }>}
  */
 export async function executeConfirmation(confirmation, context = {}, options = {}) {
   if (!confirmation || !confirmation.handler) {
@@ -533,7 +535,8 @@ export async function executeConfirmation(confirmation, context = {}, options = 
 
   const result = await handler.execute(args, ctx);
   const content = handler.formatResult(result, args, ctx);
-  const completesTask = Boolean(handler.completesTask);
+  const completesTask = Boolean(result?.completesTask ?? handler.completesTask);
+  const cancelsTask = Boolean(result?.cancelsTask ?? handler.cancelsTask);
   const summary = typeof handler.describeTaskSummary === 'function'
     ? handler.describeTaskSummary(result, args, ctx)
     : null;
@@ -547,6 +550,7 @@ export async function executeConfirmation(confirmation, context = {}, options = 
     toolName,
     args,
     completesTask,
+    cancelsTask,
     summary,
     toast
   };

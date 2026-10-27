@@ -240,12 +240,12 @@ if (!mockTaskMessages || mockTaskMessages.length === 0) {
 
 function createDefaultMockDepartments(tenantId = 'tnt_mock_1') {
   return [
-    { id: "dept_mock_1", tenant_id: tenantId, name: "總經理室", parent_id: null, skills: ["org.manage", "audit.trace_view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
-    { id: "dept_mock_2", tenant_id: tenantId, name: "研發總處", parent_id: null, skills: ["dev.repo_write", "dev.agent_config"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
+    { id: "dept_mock_1", tenant_id: tenantId, name: "總經理室", parent_id: null, skills: ["org.manage", "audit.trace_view", "department.manage", "vendor.manage_purchase_order", "vendor.manage", "vendor.create_basic_profile", "product.manage", "product.create_basic_profile", "customer.create_basic_profile", "customer.view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 3 },
+    { id: "dept_mock_2", tenant_id: tenantId, name: "研發總處", parent_id: null, skills: ["dev.repo_write", "dev.agent_config", "product.manage"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
     { id: "dept_mock_3", tenant_id: tenantId, name: "前端小組", parent_id: "dept_mock_2", skills: ["ui.build", "ui.component_test"], created_at: Math.floor(Date.now() / 1000) - 86400 * 2 },
     { id: "dept_mock_4", tenant_id: tenantId, name: "後端架構組", parent_id: "dept_mock_2", skills: ["backend.api_build", "db.migrate"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-    { id: "dept_mock_5", tenant_id: tenantId, name: "行銷業務部", parent_id: null, skills: ["sales.lead_manage", "crm.read"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
-    { id: "dept_mock_6", tenant_id: tenantId, name: "財務會計處", parent_id: null, skills: ["finance.view", "invoice.issue"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
+    { id: "dept_mock_5", tenant_id: tenantId, name: "行銷業務部", parent_id: null, skills: ["sales.lead_manage", "crm.read", "customer.create_basic_profile", "customer.view"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 },
+    { id: "dept_mock_6", tenant_id: tenantId, name: "財務會計處", parent_id: null, skills: ["finance.view", "invoice.issue", "vendor.manage_purchase_order", "vendor.manage"], created_at: Math.floor(Date.now() / 1000) - 86400 * 1 }
   ];
 }
 
@@ -260,6 +260,10 @@ if (!mockDepartments || !Array.isArray(mockDepartments) || mockDepartments.lengt
   mockDepartments.forEach(d => {
     if (!d.tenant_id) {
       d.tenant_id = 'tnt_mock_1';
+      migrated = true;
+    }
+    if ((d.id === 'dept_mock_1' || d.id === 'dept_mock_6') && Array.isArray(d.skills) && !d.skills.includes('vendor.manage_purchase_order')) {
+      d.skills.push('vendor.manage_purchase_order');
       migrated = true;
     }
   });
@@ -905,6 +909,7 @@ export async function invoke(cmd, args = {}) {
     case 'create_task': {
       const { title, moduleId, assignee, parentTaskId, skillId, module_id, parent_task_id, skill_id, skills } = args;
       const targetTenantId = resolveMockActiveTenantId();
+      const targetUserId = (mockSessions && mockSessions.user_id) ? mockSessions.user_id : 'usr_mock_admin';
       const now = Math.floor(Date.now() / 1000);
       const finalModuleId = (moduleId || module_id || '').trim();
       const finalParentTaskId = parentTaskId || parent_task_id || null;
@@ -926,7 +931,8 @@ export async function invoke(cmd, args = {}) {
         skillId: finalSkillId,
         skills: finalSkills,
         created_at: now,
-        completed_at: null
+        completed_at: null,
+        created_by: targetUserId
       };
       mockTasks.push(newTask);
       saveStorage('agent_erp_mock_tasks', mockTasks);
