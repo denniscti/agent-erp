@@ -40,7 +40,13 @@
     updateProductUnitAction,
     addSupplySourceAction,
     updateSupplySourceAction,
-    addBomItemAction
+    addBomItemAction,
+    fetchWarehouses,
+    createWarehouseAction,
+    updateWarehouseAction,
+    setDefaultWarehouseAction,
+    deactivateWarehouseAction,
+    reactivateWarehouseAction
   } from './lib/store.svelte.js';
   import ChatBox from './lib/components/ChatBox.svelte';
   import TaskPanel from './lib/components/TaskPanel.svelte';
@@ -69,6 +75,16 @@
   let newDepartmentParentId = $state('');
   let isAddingDepartment = $state(false);
   let departmentError = $state('');
+
+  // Warehouse management state (Issue #179)
+  let newWarehouseCode = $state('');
+  let newWarehouseName = $state('');
+  let isAddingWarehouse = $state(false);
+  let warehouseError = $state('');
+  let editingWarehouseId = $state(null);
+  let editWarehouseCode = $state('');
+  let editWarehouseName = $state('');
+  let isSavingWarehouse = $state(false);
 
   // Customer / Partner / Vendor management state (Issue #117, #119)
   let newPartnerName = $state('');
@@ -808,6 +824,95 @@
     return parent ? parent.name : parentId;
   }
 
+  // --- Warehouse Handlers (Issue #179) ---
+  async function handleCreateWarehouse(e) {
+    if (e && e.preventDefault) e.preventDefault();
+    warehouseError = '';
+    const code = newWarehouseCode.trim();
+    const name = newWarehouseName.trim();
+    if (!code) {
+      warehouseError = '倉庫代碼為必填項目';
+      return;
+    }
+    if (!name) {
+      warehouseError = '倉庫名稱為必填項目';
+      return;
+    }
+    isAddingWarehouse = true;
+    try {
+      await createWarehouseAction(code, name);
+      newWarehouseCode = '';
+      newWarehouseName = '';
+    } catch (err) {
+      warehouseError = err.message || '建立倉庫失敗';
+    } finally {
+      isAddingWarehouse = false;
+    }
+  }
+
+  async function handleSetDefaultWarehouse(id) {
+    warehouseError = '';
+    try {
+      await setDefaultWarehouseAction(id);
+    } catch (err) {
+      warehouseError = err.message || '設定預設倉失敗';
+    }
+  }
+
+  async function handleDeactivateWarehouse(id) {
+    warehouseError = '';
+    try {
+      await deactivateWarehouseAction(id);
+    } catch (err) {
+      warehouseError = err.message || '停用倉庫失敗';
+    }
+  }
+
+  async function handleReactivateWarehouse(id) {
+    warehouseError = '';
+    try {
+      await reactivateWarehouseAction(id);
+    } catch (err) {
+      warehouseError = err.message || '啟用倉庫失敗';
+    }
+  }
+
+  function handleStartEditWarehouse(wh) {
+    editingWarehouseId = wh.id;
+    editWarehouseCode = wh.code;
+    editWarehouseName = wh.name;
+    warehouseError = '';
+  }
+
+  function handleCancelEditWarehouse() {
+    editingWarehouseId = null;
+    editWarehouseCode = '';
+    editWarehouseName = '';
+  }
+
+  async function handleSaveEditWarehouse(id) {
+    warehouseError = '';
+    const code = editWarehouseCode.trim();
+    const name = editWarehouseName.trim();
+    if (!code) {
+      warehouseError = '倉庫代碼為必填項目';
+      return;
+    }
+    if (!name) {
+      warehouseError = '倉庫名稱為必填項目';
+      return;
+    }
+    isSavingWarehouse = true;
+    try {
+      await updateWarehouseAction(id, code, name);
+      editingWarehouseId = null;
+    } catch (err) {
+      warehouseError = err.message || '更新倉庫失敗';
+    } finally {
+      isSavingWarehouse = false;
+    }
+  }
+
   async function initializeAppData(force = false) {
     const currentKey = `${appState.authUser?.id || ''}_${appState.activeTenant?.id || ''}`;
     if (!force && initializedKey === currentKey && currentKey !== '_') return;
@@ -818,6 +923,7 @@
     await fetchDepartments();
     await fetchMembers();
     await fetchProducts();
+    await fetchWarehouses();
     await initMainChatGreeting();
     initializedKey = currentKey;
   }
@@ -2561,6 +2667,157 @@
                               </div>
                             {/if}
                           {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </SettingsEntityCard>
+
+                <!-- Warehouse Management (Warehouse Master) -->
+                <SettingsEntityCard
+                  title="倉庫管理 (Warehouse Master)"
+                  description="管理實體倉庫據點與分倉維度（支援預設倉設定、代碼維護與庫存防停用檢核）。"
+                  onRefresh={fetchWarehouses}
+                  refreshLabel="重新整理倉庫"
+                  errorMessage={warehouseError}
+                  isEmpty={appState.warehouses.length === 0}
+                  emptyMessage="目前尚無倉庫資料，請先新增第一個倉庫（將自動成為預設倉）。"
+                  listClass="warehouse-list"
+                  listStyle="display: flex; flex-direction: column; gap: 8px;"
+                >
+                  {#snippet form()}
+                    <!-- Add Warehouse Form -->
+                    <form onsubmit={handleCreateWarehouse} class="warehouse-add-form" style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; padding: 14px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: var(--radius-sm); margin-bottom: 16px;">
+                      <div style="flex: 1; min-width: 140px;">
+                        <label for="warehouse-code-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">倉庫代碼 *</label>
+                        <input
+                          id="warehouse-code-input"
+                          type="text"
+                          class="form-input"
+                          placeholder="例：WH-TPE、WH-01"
+                          bind:value={newWarehouseCode}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                        />
+                      </div>
+                      <div style="flex: 1.5; min-width: 180px;">
+                        <label for="warehouse-name-input" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">倉庫名稱 *</label>
+                        <input
+                          id="warehouse-name-input"
+                          type="text"
+                          class="form-input"
+                          placeholder="例：台北總倉、高雄分倉"
+                          bind:value={newWarehouseName}
+                          style="width: 100%; padding: 7px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        class="btn btn-primary btn-sm"
+                        disabled={isAddingWarehouse}
+                        style="height: 35px; white-space: nowrap; padding: 0 16px;"
+                        id="btn-add-warehouse"
+                      >
+                        {#if isAddingWarehouse}新增中...{:else}+ 新增倉庫{/if}
+                      </button>
+                    </form>
+                  {/snippet}
+
+                  {#each appState.warehouses as wh (wh.id)}
+                    <div class="warehouse-item" style="display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color);">
+                      {#if editingWarehouseId === wh.id}
+                        <!-- Inline Edit Mode -->
+                        <form onsubmit={(e) => { e.preventDefault(); handleSaveEditWarehouse(wh.id); }} style="display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;">
+                          <div style="flex: 1; min-width: 120px;">
+                            <label for="edit-wh-code-{wh.id}" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">代碼</label>
+                            <input
+                              id="edit-wh-code-{wh.id}"
+                              type="text"
+                              class="form-input"
+                              bind:value={editWarehouseCode}
+                              style="width: 100%; padding: 6px 8px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                            />
+                          </div>
+                          <div style="flex: 1.5; min-width: 160px;">
+                            <label for="edit-wh-name-{wh.id}" style="display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 4px;">名稱</label>
+                            <input
+                              id="edit-wh-name-{wh.id}"
+                              type="text"
+                              class="form-input"
+                              bind:value={editWarehouseName}
+                              style="width: 100%; padding: 6px 8px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                            />
+                          </div>
+                          <div style="display: flex; gap: 6px;">
+                            <button type="submit" class="btn btn-primary btn-xs" disabled={isSavingWarehouse} style="height: 31px; padding: 0 12px;">儲存</button>
+                            <button type="button" class="btn btn-outline btn-xs" onclick={handleCancelEditWarehouse} style="height: 31px; padding: 0 10px;">取消</button>
+                          </div>
+                        </form>
+                      {:else}
+                        <!-- Display Mode -->
+                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                          <div style="display: flex; align-items: center; gap: 12px;">
+                            <div style="width: 36px; height: 36px; border-radius: 8px; background: rgba(var(--accent-amber), 0.12); border: 1px solid rgba(var(--accent-amber), 0.3); display: flex; align-items: center; justify-content: center; font-size: 1.1rem;">
+                              🏬
+                            </div>
+                            <div>
+                              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <span style="font-weight: 600; color: var(--text-primary); font-size: 0.92rem;">{wh.name}</span>
+                                <span class="badge badge-slate" style="font-family: monospace; font-size: 0.75rem;">{wh.code}</span>
+                                {#if wh.is_default}
+                                  <span class="badge badge-amber" style="font-size: 0.72rem; font-weight: 600;">
+                                    ★ 預設倉
+                                  </span>
+                                {/if}
+                                {#if wh.is_active}
+                                  <span class="badge badge-emerald" style="font-size: 0.72rem;">啟用中</span>
+                                {:else}
+                                  <span class="badge badge-slate" style="font-size: 0.72rem; opacity: 0.7;">已停用</span>
+                                {/if}
+                              </div>
+                              <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">ID: {wh.id}</div>
+                            </div>
+                          </div>
+
+                          <div style="display: flex; align-items: center; gap: 6px;">
+                            {#if !wh.is_default && wh.is_active}
+                              <button
+                                type="button"
+                                class="btn btn-outline btn-xs"
+                                onclick={() => handleSetDefaultWarehouse(wh.id)}
+                                title="將此倉庫設為開單與開帳預設倉"
+                              >
+                                設為預設
+                              </button>
+                            {/if}
+                            <button
+                              type="button"
+                              class="btn btn-outline btn-xs"
+                              onclick={() => handleStartEditWarehouse(wh)}
+                            >
+                              編輯
+                            </button>
+                            {#if wh.is_active}
+                              {#if !wh.is_default}
+                                <button
+                                  type="button"
+                                  class="btn btn-outline btn-xs"
+                                  style="color: #ef4444; border-color: rgba(239, 68, 68, 0.3);"
+                                  onclick={() => handleDeactivateWarehouse(wh.id)}
+                                >
+                                  停用
+                                </button>
+                              {/if}
+                            {:else}
+                              <button
+                                type="button"
+                                class="btn btn-outline btn-xs"
+                                style="color: #10b981; border-color: rgba(16, 185, 129, 0.3);"
+                                onclick={() => handleReactivateWarehouse(wh.id)}
+                              >
+                                重新啟用
+                              </button>
+                            {/if}
+                          </div>
                         </div>
                       {/if}
                     </div>

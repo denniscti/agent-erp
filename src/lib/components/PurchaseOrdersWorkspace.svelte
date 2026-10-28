@@ -17,7 +17,8 @@
     submitPurchaseOrderAction,
     confirmPurchaseOrderReceivedAction,
     cancelPurchaseOrderAction,
-    recordOpeningInventoryBalanceAction
+    recordOpeningInventoryBalanceAction,
+    fetchWarehouses
   } from '../store.svelte.js';
   import { invoke } from '../tauri.js';
 
@@ -43,6 +44,7 @@
   let createCurrency = $state('TWD');
   let createExpectedDate = $state('');
   let createNote = $state('');
+  let createWarehouseId = $state('');
 
   // Modal 2: Confirm Receipt Modal
   let isReceiveModalOpen = $state(false);
@@ -53,6 +55,24 @@
   let openingUnitId = $state('');
   let openingQuantity = $state(1);
   let openingUnitCost = $state(0);
+  let openingWarehouseId = $state('');
+
+  // Warehouse selection state (Issue #179)
+  let selectedInventoryWarehouseId = $state('');
+  let editWarehouseId = $state('');
+
+  let activeWarehouses = $derived(
+    (appState.warehouses || []).filter(w => w.is_active)
+  );
+  let defaultWarehouse = $derived(
+    (appState.warehouses || []).find(w => w.is_default && w.is_active) || activeWarehouses[0] || null
+  );
+
+  function getWarehouseName(whId) {
+    if (!whId) return '主倉 (預設)';
+    const wh = (appState.warehouses || []).find(w => w.id === whId);
+    return wh ? `${wh.name} (${wh.code})` : whId;
+  }
 
   // Modal 4: In-App Confirmation Modal (Replaces native window.confirm for WebView compatibility)
   let isConfirmModalOpen = $state(false);
@@ -115,6 +135,7 @@
   async function loadAuxiliaryData() {
     auxiliaryLoading = true;
     try {
+      await fetchWarehouses();
       const [partners, products] = await Promise.all([
         invoke('list_partners'),
         invoke('list_products')
@@ -204,6 +225,7 @@
         const o = appState.currentPurchaseOrderDetail.order;
         editExpectedDate = o.expected_date ? new Date(o.expected_date * 1000).toISOString().slice(0, 10) : '';
         editNote = o.note || '';
+        editWarehouseId = o.warehouse_id || defaultWarehouse?.id || '';
       }
     } catch (err) {
       orderDetailError = err.message || '無法載入採購單明細';
@@ -227,6 +249,7 @@
     createCurrency = 'TWD';
     createExpectedDate = '';
     createNote = '';
+    createWarehouseId = defaultWarehouse?.id || (activeWarehouses[0]?.id || '');
     isCreateModalOpen = true;
     if (availableVendors.length === 0) {
       loadAuxiliaryData();
@@ -242,6 +265,7 @@
     openingUnitId = availableUnits.length > 0 ? availableUnits[0].unit_id : '';
     openingQuantity = 1;
     openingUnitCost = 0;
+    openingWarehouseId = defaultWarehouse?.id || (activeWarehouses[0]?.id || '');
     isOpeningBalanceModalOpen = true;
     if (availableUnits.length === 0) {
       loadAuxiliaryData();
@@ -343,6 +367,7 @@
         currency: createCurrency,
         expected_date: expTimestamp,
         note: createNote,
+        warehouse_id: createWarehouseId || defaultWarehouse?.id || null,
         task_id: null // manual form entry strictly null
       });
       isCreateModalOpen = false;
@@ -364,7 +389,8 @@
       const expTimestamp = editExpectedDate ? Math.floor(new Date(editExpectedDate).getTime() / 1000) : null;
       await updatePurchaseOrderHeaderAction(orderId, {
         expected_date: expTimestamp,
-        note: editNote
+        note: editNote,
+        warehouse_id: editWarehouseId || null
       });
       isEditingHeader = false;
     } catch (err) {
@@ -577,7 +603,8 @@
         quantity_delta: qty,
         quantityDelta: qty,
         unit_cost: cost,
-        unitCost: cost
+        unitCost: cost,
+        warehouse_id: openingWarehouseId || defaultWarehouse?.id || null
       });
       isOpeningBalanceModalOpen = false;
       if (activeSubTab === 'inventory') {
@@ -590,6 +617,17 @@
     }
   }
 
+  async function handleWarehouseFilterChange() {
+    isLoading = true;
+    try {
+      await fetchInventoryLevels(selectedInventoryWarehouseId || null);
+    } catch (err) {
+      console.error("Failed to filter inventory by warehouse:", err);
+    } finally {
+      isLoading = false;
+    }
+  }
+
   async function handleToggleUnitBreakdown(unitId) {
     if (expandedInventoryUnitId === unitId) {
       expandedInventoryUnitId = null;
@@ -599,7 +637,7 @@
     expandedInventoryUnitId = unitId;
     unitMovementsLoading = true;
     try {
-      const list = await fetchInventoryMovements(unitId);
+      const list = await fetchInventoryMovements(unitId, selectedInventoryWarehouseId || null);
       unitMovements = list || [];
     } catch (err) {
       console.error("Failed to fetch movements for unit:", err);
@@ -884,7 +922,7 @@
             <div class="header-edit-box glass-panel">
               <h4 class="form-title">編輯表頭資訊</h4>
               <div class="form-row">
-                <div class="form-group">
+                <div class="form-group flex-1">
                   <label for="edit-expected-date">預計到貨日</label>
                   <input
                     type="date"
@@ -894,23 +932,31 @@
                   />
                 </div>
                 <div class="form-group flex-1">
-                  <label for="edit-note">單據備註</label>
-                  <input
-                    type="text"
-                    id="edit-note"
-                    bind:value={editNote}
-                    placeholder="備註說明..."
-                    class="form-input"
-                  />
+                  <label for="edit-warehouse">進貨倉庫</label>
+                  <select id="edit-warehouse" bind:value={editWarehouseId} class="form-select">
+                    {#each activeWarehouses as wh}
+                      <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
+                    {/each}
+                  </select>
                 </div>
-                <div class="form-actions-inline">
-                  <button class="btn btn-primary btn-sm" onclick={handleSaveHeader} disabled={actionLoading}>
-                    儲存表頭
-                  </button>
-                  <button class="btn btn-sm" onclick={() => isEditingHeader = false}>
-                    取消
-                  </button>
-                </div>
+              </div>
+              <div class="form-group" style="margin-top: 8px;">
+                <label for="edit-note">單據備註</label>
+                <input
+                  type="text"
+                  id="edit-note"
+                  bind:value={editNote}
+                  placeholder="備註說明..."
+                  class="form-input"
+                />
+              </div>
+              <div class="form-actions-inline" style="margin-top: 10px;">
+                <button class="btn btn-primary btn-sm" onclick={handleSaveHeader} disabled={actionLoading}>
+                  儲存表頭
+                </button>
+                <button class="btn btn-sm" onclick={() => isEditingHeader = false}>
+                  取消
+                </button>
               </div>
             </div>
           {:else}
@@ -923,6 +969,10 @@
               <div class="meta-card">
                 <span class="meta-label">結算幣別</span>
                 <span class="meta-value">{order.currency || 'TWD'}</span>
+              </div>
+              <div class="meta-card">
+                <span class="meta-label">進貨倉庫</span>
+                <span class="meta-value font-medium" style="color: rgb(var(--accent-amber));">{getWarehouseName(order.warehouse_id)}</span>
               </div>
               <div class="meta-card">
                 <span class="meta-label">預計到貨日</span>
@@ -1399,6 +1449,27 @@
           </div>
         </div>
       {:else}
+        <div class="filter-bar glass-panel" style="margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; flex-wrap: wrap; gap: 10px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <label for="inv-warehouse-filter" style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">倉庫維度：</label>
+            <select
+              id="inv-warehouse-filter"
+              bind:value={selectedInventoryWarehouseId}
+              onchange={handleWarehouseFilterChange}
+              class="form-select"
+              style="width: 200px; padding: 6px 10px; font-size: 0.85rem;"
+            >
+              <option value="">全部倉庫 (合計總量)</option>
+              {#each appState.warehouses as wh}
+                <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設' : ''}{!wh.is_active ? ' (停用)' : ''}</option>
+              {/each}
+            </select>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick={openOpeningBalanceModal}>
+            + 登記期初底帳
+          </button>
+        </div>
+
         <div class="table-container glass-panel">
           <div class="table-responsive">
             <table class="data-table">
@@ -1451,6 +1522,7 @@
                                   <tr>
                                     <th>時間</th>
                                     <th>異動原因</th>
+                                    <th>倉別</th>
                                     <th class="text-right">異動數量</th>
                                     <th class="text-right">單位成本</th>
                                     <th class="text-right">異動後累計</th>
@@ -1464,6 +1536,11 @@
                                       <td>
                                         <span class="reason-tag {mov.reason === 'opening_balance' ? 'reason-opening' : 'reason-po'}">
                                           {formatMovementReason(mov.reason)}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span class="unit-tag" style="background: rgba(var(--accent-amber), 0.1); color: rgb(var(--accent-amber)); border: 1px solid rgba(var(--accent-amber), 0.2);">
+                                          {getWarehouseName(mov.warehouse_id)}
                                         </span>
                                       </td>
                                       <td class="text-right font-bold {mov.quantity_delta > 0 ? 'text-emerald' : 'text-red'}">
@@ -1526,6 +1603,14 @@
             <option value="">-- 請選擇供應商 --</option>
             {#each availableVendors as vendor}
               <option value={vendor.id}>{vendor.name} ({vendor.tax_id || '無統編'})</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="create-po-warehouse">進貨倉庫 *</label>
+          <select id="create-po-warehouse" bind:value={createWarehouseId} class="form-select">
+            {#each activeWarehouses as wh}
+              <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
             {/each}
           </select>
         </div>
@@ -1642,6 +1727,14 @@
             <option value="">-- 請選擇商品單位 --</option>
             {#each availableUnits as unit}
               <option value={unit.unit_id}>{unit.label}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="opening-warehouse">開帳倉庫 *</label>
+          <select id="opening-warehouse" bind:value={openingWarehouseId} class="form-select">
+            {#each activeWarehouses as wh}
+              <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
             {/each}
           </select>
         </div>

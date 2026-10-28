@@ -31,6 +31,7 @@ pub struct PurchaseOrder {
     pub cancelled_at: Option<i64>,
     pub task_id: Option<String>,
     pub total_amount: f64,
+    pub warehouse_id: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -69,6 +70,7 @@ pub struct InventoryMovement {
     pub reference_id: Option<String>,
     pub created_by: String,
     pub created_at: i64,
+    pub warehouse_id: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -79,6 +81,7 @@ pub struct InventoryLevel {
     pub variant_name: Option<String>,
     pub sku: Option<String>,
     pub unit_name: Option<String>,
+    pub warehouse_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -111,7 +114,8 @@ pub fn create_purchase_orders_tables(conn: &rusqlite::Connection) -> Result<(), 
             ordered_at INTEGER,
             received_at INTEGER,
             cancelled_at INTEGER,
-            task_id TEXT
+            task_id TEXT,
+            warehouse_id TEXT
         )",
         [],
     )?;
@@ -160,7 +164,8 @@ pub fn create_purchase_orders_tables(conn: &rusqlite::Connection) -> Result<(), 
             reference_type TEXT NOT NULL,
             reference_id TEXT,
             created_by TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            warehouse_id TEXT
         )",
         [],
     )?;
@@ -169,6 +174,9 @@ pub fn create_purchase_orders_tables(conn: &rusqlite::Connection) -> Result<(), 
         "CREATE INDEX IF NOT EXISTS idx_im_tenant_unit ON inventory_movements (tenant_id, unit_id)",
         [],
     )?;
+
+    // Idempotent migrations for existing tables (shared helper)
+    crate::warehouses::ensure_warehouse_columns_and_indices(conn)?;
 
     Ok(())
 }
@@ -295,6 +303,7 @@ fn row_to_order(row: &rusqlite::Row) -> Result<PurchaseOrder, rusqlite::Error> {
         cancelled_at: row.get(13)?,
         task_id: row.get(14)?,
         total_amount: 0.0,
+        warehouse_id: row.get::<_, Option<String>>(15)?.unwrap_or_default(),
     })
 }
 
@@ -334,6 +343,7 @@ pub fn create_purchase_order_impl(
     note: Option<String>,
     task_id: Option<String>,
     initial_lines: Option<Vec<CreatePurchaseOrderLineInput>>,
+    warehouse_id: Option<String>,
 ) -> Result<PurchaseOrderDetail, String> {
     if tenant_id.trim().is_empty() {
         return Err("Tenant ID cannot be empty".to_string());
@@ -347,6 +357,14 @@ pub fn create_purchase_order_impl(
     if currency_str.trim().to_uppercase() != "TWD" {
         return Err("幣別僅支援 'TWD'".to_string());
     }
+
+    // P-01 & W-00 & W-04: Resolve warehouse
+    let target_wh_id = match warehouse_id {
+        Some(ref wid) if !wid.trim().is_empty() => {
+            crate::warehouses::validate_warehouse_active(conn, tenant_id, wid)?.id
+        }
+        _ => crate::warehouses::resolve_default_warehouse(conn, tenant_id)?.id,
+    };
 
     let vendor_snapshot = resolve_vendor_snapshot(conn, tenant_id, vendor_partner_id)?;
 
@@ -365,8 +383,8 @@ pub fn create_purchase_order_impl(
         "INSERT INTO purchase_orders (
             id, tenant_id, po_number, vendor_partner_id, vendor_name_snapshot,
             currency, status, expected_date, note, created_by, created_at,
-            ordered_at, received_at, cancelled_at, task_id
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'draft', ?7, ?8, ?9, ?10, NULL, NULL, NULL, ?11)",
+            ordered_at, received_at, cancelled_at, task_id, warehouse_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'draft', ?7, ?8, ?9, ?10, NULL, NULL, NULL, ?11, ?12)",
         params![
             po_id,
             tenant_id,
@@ -378,7 +396,8 @@ pub fn create_purchase_order_impl(
             note,
             trimmed_uid,
             now,
-            task_id
+            task_id,
+            target_wh_id
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -515,6 +534,7 @@ pub fn create_purchase_order_impl(
         cancelled_at: None,
         task_id,
         total_amount,
+        warehouse_id: target_wh_id,
     };
 
     Ok(PurchaseOrderDetail { order, lines })
@@ -527,6 +547,7 @@ pub fn update_purchase_order_header_impl(
     vendor_partner_id: Option<String>,
     expected_date: Option<Option<i64>>,
     note: Option<Option<String>>,
+    warehouse_id: Option<String>,
 ) -> Result<PurchaseOrderDetail, String> {
     if tenant_id.trim().is_empty() {
         return Err("Tenant ID cannot be empty".to_string());
@@ -586,6 +607,19 @@ pub fn update_purchase_order_header_impl(
             params![n, order_id],
         )
         .map_err(|e| e.to_string())?;
+    }
+
+    // P-02: warehouse_id only allowed in draft or ordered, must pass W-04
+    if let Some(ref new_wh) = warehouse_id {
+        let trimmed_wh = new_wh.trim();
+        if !trimmed_wh.is_empty() {
+            crate::warehouses::validate_warehouse_active(&tx, tenant_id, trimmed_wh)?;
+            tx.execute(
+                "UPDATE purchase_orders SET warehouse_id = ?1 WHERE id = ?2",
+                params![trimmed_wh, order_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
     }
 
     tx.commit().map_err(|e| e.to_string())?;
@@ -922,17 +956,27 @@ pub fn confirm_purchase_order_received_impl(
         return Err("無法解析有效使用者 session，操作被拒絕".to_string());
     }
 
-    let status: String = {
+    let (status, po_warehouse_id): (String, String) = {
         let mut stmt = conn
-            .prepare("SELECT status FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2")
+            .prepare(
+                "SELECT status, warehouse_id FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2",
+            )
             .map_err(|e| e.to_string())?;
-        stmt.query_row(params![order_id, tenant_id], |row| row.get(0))
-            .map_err(|_| "找不到採購單或不屬於目前租戶".to_string())?
+        stmt.query_row(params![order_id, tenant_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            ))
+        })
+        .map_err(|_| "找不到採購單或不屬於目前租戶".to_string())?
     };
 
     if status != "ordered" {
         return Err(format!("無效的狀態轉換：不可從 {} 轉換至 received", status));
     }
+
+    // P-03: Re-validate warehouse is active upon receipt
+    crate::warehouses::validate_warehouse_active(conn, tenant_id, &po_warehouse_id)?;
 
     let rec_map = line_received_quantities.unwrap_or_default();
     let now = current_timestamp();
@@ -987,7 +1031,7 @@ pub fn confirm_purchase_order_received_impl(
         )
         .map_err(|e| e.to_string())?;
 
-        // Insert inventory movement
+        // Insert inventory movement with warehouse_id
         let im_id = format!(
             "im_{}_{}",
             now,
@@ -995,8 +1039,8 @@ pub fn confirm_purchase_order_received_impl(
         );
         tx.execute(
             "INSERT INTO inventory_movements (
-                id, tenant_id, unit_id, quantity_delta, unit_cost, reason, reference_type, reference_id, created_by, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 'purchase_receipt', 'purchase_order', ?6, ?7, ?8)",
+                id, tenant_id, unit_id, quantity_delta, unit_cost, reason, reference_type, reference_id, created_by, created_at, warehouse_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'purchase_receipt', 'purchase_order', ?6, ?7, ?8, ?9)",
             params![
                 im_id,
                 tenant_id,
@@ -1005,7 +1049,8 @@ pub fn confirm_purchase_order_received_impl(
                 cost,
                 order_id,
                 trimmed_uid,
-                now
+                now,
+                po_warehouse_id
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1074,7 +1119,7 @@ pub fn get_purchase_order_impl(
             "SELECT 
                 id, tenant_id, po_number, vendor_partner_id, vendor_name_snapshot,
                 currency, status, expected_date, note, created_by, created_at,
-                ordered_at, received_at, cancelled_at, task_id
+                ordered_at, received_at, cancelled_at, task_id, warehouse_id
              FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2",
         )
         .map_err(|e| e.to_string())?;
@@ -1119,7 +1164,7 @@ pub fn list_purchase_orders_impl(
     let mut query = "SELECT 
                         id, tenant_id, po_number, vendor_partner_id, vendor_name_snapshot,
                         currency, status, expected_date, note, created_by, created_at,
-                        ordered_at, received_at, cancelled_at, task_id
+                        ordered_at, received_at, cancelled_at, task_id, warehouse_id
                      FROM purchase_orders WHERE tenant_id = ?1"
         .to_string();
 
@@ -1174,6 +1219,7 @@ pub fn record_opening_inventory_balance_impl(
     unit_id: &str,
     quantity_delta: f64,
     unit_cost: f64,
+    warehouse_id: Option<String>,
 ) -> Result<InventoryMovement, String> {
     if tenant_id.trim().is_empty() {
         return Err("Tenant ID cannot be empty".to_string());
@@ -1192,18 +1238,33 @@ pub fn record_opening_inventory_balance_impl(
         return Err("期初開帳成本不可為負數".to_string());
     }
 
-    // Check duplicate opening balance
+    // O-01 & W-00 & W-04: Resolve warehouse
+    let (target_wh_id, target_wh_name) = match warehouse_id {
+        Some(ref wid) if !wid.trim().is_empty() => {
+            let wh = crate::warehouses::validate_warehouse_active(conn, tenant_id, wid)?;
+            (wh.id, wh.name)
+        }
+        _ => {
+            let wh = crate::warehouses::resolve_default_warehouse(conn, tenant_id)?;
+            (wh.id, wh.name)
+        }
+    };
+
+    // O-01: Check duplicate opening balance per (tenant_id, unit_id, warehouse_id)
     let exists: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM inventory_movements 
-             WHERE tenant_id = ?1 AND unit_id = ?2 AND reason = 'opening_balance'",
-            params![tenant_id, unit_id],
+             WHERE tenant_id = ?1 AND unit_id = ?2 AND warehouse_id = ?3 AND reason = 'opening_balance'",
+            params![tenant_id, unit_id, target_wh_id],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
 
     if exists > 0 {
-        return Err("期初已開帳，更正請待庫存調整功能（M12）".to_string());
+        return Err(format!(
+            "此商品單位在〔{}〕已開帳，數量更正請用庫存調整（原因：期初更正）",
+            target_wh_name
+        ));
     }
 
     let now = current_timestamp();
@@ -1215,8 +1276,8 @@ pub fn record_opening_inventory_balance_impl(
 
     conn.execute(
         "INSERT INTO inventory_movements (
-            id, tenant_id, unit_id, quantity_delta, unit_cost, reason, reference_type, reference_id, created_by, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, 'opening_balance', 'opening_balance', NULL, ?6, ?7)",
+            id, tenant_id, unit_id, quantity_delta, unit_cost, reason, reference_type, reference_id, created_by, created_at, warehouse_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, 'opening_balance', 'opening_balance', NULL, ?6, ?7, ?8)",
         params![
             im_id,
             tenant_id,
@@ -1224,7 +1285,8 @@ pub fn record_opening_inventory_balance_impl(
             quantity_delta,
             unit_cost,
             trimmed_uid,
-            now
+            now,
+            target_wh_id
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -1240,6 +1302,7 @@ pub fn record_opening_inventory_balance_impl(
         reference_id: None,
         created_by: trimmed_uid.to_string(),
         created_at: now,
+        warehouse_id: target_wh_id,
     })
 }
 
@@ -1247,20 +1310,52 @@ pub fn get_inventory_level_impl(
     conn: &rusqlite::Connection,
     tenant_id: &str,
     unit_id: &str,
+    warehouse_id: Option<&str>,
 ) -> Result<InventoryLevel, String> {
     if tenant_id.trim().is_empty() {
         return Err("Tenant ID cannot be empty".to_string());
     }
 
+    // Rule Q-01: Zero warehouse tenant returns level with 0 quantity
+    if !crate::warehouses::has_any_warehouses(conn, tenant_id)? {
+        let snap = resolve_unit_snapshot(conn, tenant_id, unit_id)?;
+        return Ok(InventoryLevel {
+            unit_id: unit_id.to_string(),
+            current_quantity: 0.0,
+            product_name: Some(snap.product_name),
+            variant_name: Some(snap.variant_name),
+            sku: snap.sku,
+            unit_name: Some(snap.unit_name),
+            warehouse_id: warehouse_id
+                .map(|w| w.trim().to_string())
+                .filter(|w| !w.is_empty()),
+        });
+    }
+
     let snap = resolve_unit_snapshot(conn, tenant_id, unit_id)?;
 
-    let current_quantity: f64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(quantity_delta), 0.0) FROM inventory_movements WHERE tenant_id = ?1 AND unit_id = ?2",
-            params![tenant_id, unit_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+    let (current_quantity, effective_wh) = match warehouse_id {
+        Some(wid) if !wid.trim().is_empty() => {
+            let qty: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(quantity_delta), 0.0) FROM inventory_movements WHERE tenant_id = ?1 AND unit_id = ?2 AND warehouse_id = ?3",
+                    params![tenant_id, unit_id, wid.trim()],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            (qty, Some(wid.trim().to_string()))
+        }
+        _ => {
+            let qty: f64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(quantity_delta), 0.0) FROM inventory_movements WHERE tenant_id = ?1 AND unit_id = ?2",
+                    params![tenant_id, unit_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            (qty, None)
+        }
+    };
 
     Ok(InventoryLevel {
         unit_id: unit_id.to_string(),
@@ -1269,19 +1364,44 @@ pub fn get_inventory_level_impl(
         variant_name: Some(snap.variant_name),
         sku: snap.sku,
         unit_name: Some(snap.unit_name),
+        warehouse_id: effective_wh,
     })
 }
 
 pub fn list_inventory_levels_impl(
     conn: &rusqlite::Connection,
     tenant_id: &str,
+    warehouse_id: Option<&str>,
 ) -> Result<Vec<InventoryLevel>, String> {
     if tenant_id.trim().is_empty() {
         return Err("Tenant ID cannot be empty".to_string());
     }
 
-    let mut stmt = conn
-        .prepare(
+    // Rule Q-01: Zero warehouse tenant returns empty list
+    if !crate::warehouses::has_any_warehouses(conn, tenant_id)? {
+        return Ok(Vec::new());
+    }
+
+    let filter_wh = warehouse_id.map(|w| w.trim()).filter(|w| !w.is_empty());
+
+    let (query, effective_wh) = if let Some(wid) = filter_wh {
+        (
+            "SELECT 
+                u.id,
+                COALESCE((SELECT SUM(im.quantity_delta) FROM inventory_movements im WHERE im.tenant_id = ?1 AND im.unit_id = u.id AND im.warehouse_id = ?2), 0.0),
+                p.name,
+                v.name,
+                v.sku,
+                u.unit_name
+             FROM product_units u
+             JOIN product_variants v ON u.variant_id = v.id
+             JOIN products p ON v.product_id = p.id
+             WHERE p.tenant_id = ?1
+             ORDER BY p.name ASC, v.name ASC, u.unit_name ASC".to_string(),
+            Some(wid.to_string()),
+        )
+    } else {
+        (
             "SELECT 
                 u.id,
                 COALESCE((SELECT SUM(im.quantity_delta) FROM inventory_movements im WHERE im.tenant_id = ?1 AND im.unit_id = u.id), 0.0),
@@ -1293,22 +1413,31 @@ pub fn list_inventory_levels_impl(
              JOIN product_variants v ON u.variant_id = v.id
              JOIN products p ON v.product_id = p.id
              WHERE p.tenant_id = ?1
-             ORDER BY p.name ASC, v.name ASC, u.unit_name ASC",
+             ORDER BY p.name ASC, v.name ASC, u.unit_name ASC".to_string(),
+            None,
         )
-        .map_err(|e| e.to_string())?;
+    };
 
-    let rows = stmt
-        .query_map(params![tenant_id], |r| {
-            Ok(InventoryLevel {
-                unit_id: r.get(0)?,
-                current_quantity: r.get(1)?,
-                product_name: Some(r.get(2)?),
-                variant_name: Some(r.get(3)?),
-                sku: r.get(4)?,
-                unit_name: Some(r.get(5)?),
-            })
+    let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
+
+    let map_fn = |r: &rusqlite::Row| {
+        Ok(InventoryLevel {
+            unit_id: r.get(0)?,
+            current_quantity: r.get(1)?,
+            product_name: Some(r.get(2)?),
+            variant_name: Some(r.get(3)?),
+            sku: r.get(4)?,
+            unit_name: Some(r.get(5)?),
+            warehouse_id: effective_wh.clone(),
         })
-        .map_err(|e| e.to_string())?;
+    };
+
+    let rows = if let Some(wid) = filter_wh {
+        stmt.query_map(params![tenant_id, wid], map_fn)
+    } else {
+        stmt.query_map(params![tenant_id], map_fn)
+    }
+    .map_err(|e| e.to_string())?;
 
     let mut list = Vec::new();
     for r in rows {
@@ -1321,16 +1450,36 @@ pub fn list_inventory_movements_impl(
     conn: &rusqlite::Connection,
     tenant_id: &str,
     unit_id: Option<&str>,
+    warehouse_id: Option<&str>,
 ) -> Result<Vec<InventoryMovement>, String> {
     if tenant_id.trim().is_empty() {
         return Err("Tenant ID cannot be empty".to_string());
     }
 
-    let mut query = "SELECT id, tenant_id, unit_id, quantity_delta, unit_cost, reason, reference_type, reference_id, created_by, created_at FROM inventory_movements WHERE tenant_id = ?1".to_string();
-    let has_unit = unit_id.map(|u| !u.trim().is_empty()).unwrap_or(false);
-    if has_unit {
-        query.push_str(" AND unit_id = ?2");
+    // Rule Q-01: Zero warehouse tenant returns empty list
+    if !crate::warehouses::has_any_warehouses(conn, tenant_id)? {
+        return Ok(Vec::new());
     }
+
+    let mut query = "SELECT id, tenant_id, unit_id, quantity_delta, unit_cost, reason, reference_type, reference_id, created_by, created_at, warehouse_id FROM inventory_movements WHERE tenant_id = ?1".to_string();
+    let mut sql_params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id.to_string())];
+
+    if let Some(u) = unit_id {
+        let trimmed = u.trim();
+        if !trimmed.is_empty() {
+            query.push_str(&format!(" AND unit_id = ?{}", sql_params.len() + 1));
+            sql_params.push(Box::new(trimmed.to_string()));
+        }
+    }
+
+    if let Some(w) = warehouse_id {
+        let trimmed = w.trim();
+        if !trimmed.is_empty() {
+            query.push_str(&format!(" AND warehouse_id = ?{}", sql_params.len() + 1));
+            sql_params.push(Box::new(trimmed.to_string()));
+        }
+    }
+
     query.push_str(" ORDER BY created_at ASC");
 
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
@@ -1347,25 +1496,18 @@ pub fn list_inventory_movements_impl(
             reference_id: r.get(7)?,
             created_by: r.get(8)?,
             created_at: r.get(9)?,
+            warehouse_id: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
         })
     };
 
+    let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), map_fn)
+        .map_err(|e| e.to_string())?;
+
     let mut list = Vec::new();
-    if has_unit {
-        let uid = unit_id.unwrap().trim();
-        let rows = stmt
-            .query_map(params![tenant_id, uid], map_fn)
-            .map_err(|e| e.to_string())?;
-        for r in rows {
-            list.push(r.map_err(|e| e.to_string())?);
-        }
-    } else {
-        let rows = stmt
-            .query_map(params![tenant_id], map_fn)
-            .map_err(|e| e.to_string())?;
-        for r in rows {
-            list.push(r.map_err(|e| e.to_string())?);
-        }
+    for r in rows {
+        list.push(r.map_err(|e| e.to_string())?);
     }
     Ok(list)
 }
@@ -1376,6 +1518,7 @@ pub fn list_inventory_movements_impl(
 
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_purchase_order<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     vendor_partner_id: String,
@@ -1384,6 +1527,7 @@ pub async fn create_purchase_order<R: tauri::Runtime>(
     note: Option<String>,
     task_id: Option<String>,
     initial_lines: Option<Vec<CreatePurchaseOrderLineInput>>,
+    warehouse_id: Option<String>,
 ) -> Result<PurchaseOrderDetail, String> {
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
@@ -1399,6 +1543,7 @@ pub async fn create_purchase_order<R: tauri::Runtime>(
         note,
         task_id,
         initial_lines,
+        warehouse_id,
     )
 }
 
@@ -1410,6 +1555,7 @@ pub async fn update_purchase_order_header<R: tauri::Runtime>(
     vendor_partner_id: Option<String>,
     expected_date: Option<Option<i64>>,
     note: Option<Option<String>>,
+    warehouse_id: Option<String>,
 ) -> Result<PurchaseOrderDetail, String> {
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
@@ -1421,6 +1567,7 @@ pub async fn update_purchase_order_header<R: tauri::Runtime>(
         vendor_partner_id,
         expected_date,
         note,
+        warehouse_id,
     )
 }
 
@@ -1547,6 +1694,7 @@ pub async fn record_opening_inventory_balance<R: tauri::Runtime>(
     unit_id: String,
     quantity_delta: f64,
     unit_cost: f64,
+    warehouse_id: Option<String>,
 ) -> Result<InventoryMovement, String> {
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
@@ -1559,6 +1707,7 @@ pub async fn record_opening_inventory_balance<R: tauri::Runtime>(
         &unit_id,
         quantity_delta,
         unit_cost,
+        warehouse_id,
     )
 }
 
@@ -1567,22 +1716,24 @@ pub async fn record_opening_inventory_balance<R: tauri::Runtime>(
 pub async fn get_inventory_level<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     unit_id: String,
+    warehouse_id: Option<String>,
 ) -> Result<InventoryLevel, String> {
     let db_path = get_db_path(&app_handle);
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    get_inventory_level_impl(&conn, &active_tid, &unit_id)
+    get_inventory_level_impl(&conn, &active_tid, &unit_id, warehouse_id.as_deref())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn list_inventory_levels<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
+    warehouse_id: Option<String>,
 ) -> Result<Vec<InventoryLevel>, String> {
     let db_path = get_db_path(&app_handle);
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    list_inventory_levels_impl(&conn, &active_tid)
+    list_inventory_levels_impl(&conn, &active_tid, warehouse_id.as_deref())
 }
 
 #[tauri::command]
@@ -1590,11 +1741,17 @@ pub async fn list_inventory_levels<R: tauri::Runtime>(
 pub async fn list_inventory_movements<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     unit_id: Option<String>,
+    warehouse_id: Option<String>,
 ) -> Result<Vec<InventoryMovement>, String> {
     let db_path = get_db_path(&app_handle);
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    list_inventory_movements_impl(&conn, &active_tid, unit_id.as_deref())
+    list_inventory_movements_impl(
+        &conn,
+        &active_tid,
+        unit_id.as_deref(),
+        warehouse_id.as_deref(),
+    )
 }
 
 // ==========================================
@@ -1609,7 +1766,7 @@ mod tests {
     use crate::products::{add_supply_source_impl, create_product_impl};
 
     fn setup_test_db() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
 
         conn.execute(
@@ -1659,6 +1816,7 @@ mod tests {
 
         crate::partners::create_partners_table(&conn).unwrap();
         crate::products::create_products_tables(&conn).unwrap();
+        crate::warehouses::create_warehouses_tables(&conn).unwrap();
         create_purchase_orders_tables(&conn).unwrap();
 
         conn.execute(
@@ -1669,6 +1827,8 @@ mod tests {
             "INSERT INTO tenants (id, code, name, company_name) VALUES ('tnt_other', 'other', 'Other Tenant', 'Other Inc.')",
             [],
         ).unwrap();
+
+        let _ = crate::warehouses::create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉");
 
         conn.execute(
             "INSERT INTO users (id, email, password, name) VALUES ('usr_1', 'u1@example.com', 'hash', 'User One')",
@@ -1708,6 +1868,7 @@ mod tests {
             Some("第一筆採購備註".to_string()),
             Some("task_1".to_string()),
             None,
+            None,
         )
         .unwrap();
 
@@ -1722,7 +1883,7 @@ mod tests {
 
         // When: Creating second purchase order in the same tenant
         let detail2 = create_purchase_order_impl(
-            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -1758,7 +1919,7 @@ mod tests {
 
         // Add supply source for this vendor + unit at 320 TWD
         let src = add_supply_source_impl(
-            &conn,
+            &mut conn,
             "tnt_test",
             unit_id,
             &vendor.id,
@@ -1769,7 +1930,7 @@ mod tests {
         .unwrap();
 
         let detail = create_purchase_order_impl(
-            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -1865,6 +2026,7 @@ mod tests {
                     purchase_cost: Some(80.0),
                 },
             ]),
+            None,
         )
         .unwrap();
 
@@ -1896,10 +2058,10 @@ mod tests {
         assert_eq!(received.lines[1].received_quantity, Some(20.0));
 
         // Then: Inventory movements written with actual received quantities
-        let inv1 = get_inventory_level_impl(&conn, "tnt_test", u1).unwrap();
+        let inv1 = get_inventory_level_impl(&conn, "tnt_test", u1, None).unwrap();
         assert_eq!(inv1.current_quantity, 8.0);
 
-        let inv2 = get_inventory_level_impl(&conn, "tnt_test", u2).unwrap();
+        let inv2 = get_inventory_level_impl(&conn, "tnt_test", u2, None).unwrap();
         assert_eq!(inv2.current_quantity, 20.0);
     }
 
@@ -1931,7 +2093,7 @@ mod tests {
         // --- Scenario 1: Cancel draft purchase order ---
         // Given: Draft order
         let detail1 = create_purchase_order_impl(
-            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -1958,6 +2120,7 @@ mod tests {
                 quantity: 10.0,
                 purchase_cost: Some(50.0),
             }]),
+            None,
         )
         .unwrap();
         let ordered2 =
@@ -1990,7 +2153,7 @@ mod tests {
 
         // When: Recording opening balance for the first time
         let mov = record_opening_inventory_balance_impl(
-            &mut conn, "tnt_test", "usr_1", unit_id, 150.0, 45.0,
+            &mut conn, "tnt_test", "usr_1", unit_id, 150.0, 45.0, None,
         )
         .unwrap();
 
@@ -1999,17 +2162,17 @@ mod tests {
         assert_eq!(mov.unit_cost, Some(45.0));
         assert_eq!(mov.reason, "opening_balance");
 
-        let level = get_inventory_level_impl(&conn, "tnt_test", unit_id).unwrap();
+        let level = get_inventory_level_impl(&conn, "tnt_test", unit_id, None).unwrap();
         assert_eq!(level.current_quantity, 150.0);
 
         // When: Trying to record opening balance a second time for the same unit
         let err = record_opening_inventory_balance_impl(
-            &mut conn, "tnt_test", "usr_1", unit_id, 50.0, 45.0,
+            &mut conn, "tnt_test", "usr_1", unit_id, 50.0, 45.0, None,
         )
         .unwrap_err();
 
         // Then: Rejected with exact specification message
-        assert!(err.contains("期初已開帳，更正請待庫存調整功能（M12）"));
+        assert!(err.contains("此商品單位在〔主倉〕已開帳，數量更正請用庫存調整（原因：期初更正）"));
     }
 
     #[test]
@@ -2057,6 +2220,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(err_curr.contains("幣別僅支援 'TWD'"));
@@ -2072,19 +2236,20 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(err_vnd.contains("不是供應商"));
 
         // TC-PO-E-12: Empty user_id rejected
         let err_uid = create_purchase_order_impl(
-            &mut conn, "tnt_test", "   ", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "   ", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap_err();
         assert!(err_uid.contains("無法解析有效使用者 session"));
 
         let order = create_purchase_order_impl(
-            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -2164,6 +2329,7 @@ mod tests {
             Some(vendor2.id),
             None,
             None,
+            None,
         )
         .unwrap_err();
         assert!(err_mod_vnd.contains("採購單已有明細，不可修改供應商"));
@@ -2207,7 +2373,7 @@ mod tests {
         let unit_id = &mfg_prod.units[0].id;
 
         let order = create_purchase_order_impl(
-            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -2252,7 +2418,7 @@ mod tests {
         let unit_id = &prod.units[0].id;
 
         let empty_order = create_purchase_order_impl(
-            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -2294,6 +2460,7 @@ mod tests {
                 quantity: 5.0,
                 purchase_cost: Some(30.0),
             }]),
+            None,
         )
         .unwrap();
         submit_purchase_order_impl(&mut conn, "tnt_test", &po_to_receive.order.id).unwrap();
@@ -2354,6 +2521,7 @@ mod tests {
                 quantity: 20.0,
                 purchase_cost: Some(10.0),
             }]),
+            None,
         )
         .unwrap();
 
@@ -2386,6 +2554,7 @@ mod tests {
                 quantity: 100.0,
                 purchase_cost: Some(15.0),
             }]),
+            None,
         )
         .unwrap();
         submit_purchase_order_impl(&mut conn, "tnt_test", &detail.order.id).unwrap();
@@ -2410,7 +2579,7 @@ mod tests {
         );
         // Then: Second call is rejected, inventory movement remains exactly 1, quantity does not double
         assert!(second_res.is_err());
-        let inv = get_inventory_level_impl(&conn, "tnt_test", unit_id).unwrap();
+        let inv = get_inventory_level_impl(&conn, "tnt_test", unit_id, None).unwrap();
         assert_eq!(inv.current_quantity, 100.0);
 
         let mov_count: i64 = conn
@@ -2425,7 +2594,7 @@ mod tests {
         // --- Idempotency Test 3: cancel_purchase_order_impl double call protection ---
         // Given: A draft purchase order
         let po_cancel = create_purchase_order_impl(
-            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None,
+            &mut conn, "tnt_test", "usr_1", &vendor.id, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -2447,6 +2616,8 @@ mod tests {
     fn test_tc_po_iso_tenant_isolation() {
         // Given: Orders and products in two separate tenants
         let mut conn = setup_test_db();
+        let _ =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_other", "OTHER_WH", "其他倉");
         let vendor1 = create_partner_impl(
             &conn,
             "tnt_test",
@@ -2476,6 +2647,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let order2 = create_purchase_order_impl(
@@ -2483,6 +2655,7 @@ mod tests {
             "tnt_other",
             "usr_1",
             &vendor2.id,
+            None,
             None,
             None,
             None,
@@ -2582,6 +2755,7 @@ mod tests {
                     purchase_cost: Some(100.0),
                 },
             ]),
+            None,
         )
         .unwrap();
 
@@ -2655,6 +2829,7 @@ mod tests {
             unit_test_1,
             12.0,
             100.0,
+            None,
         )
         .unwrap();
 
@@ -2665,28 +2840,29 @@ mod tests {
             unit_test_2,
             8.0,
             50.0,
+            None,
         )
         .unwrap();
 
         // Then: list_inventory_movements without unit filter returns all movements for tenant
-        let all_movs = list_inventory_movements_impl(&conn, "tnt_test", None).unwrap();
+        let all_movs = list_inventory_movements_impl(&conn, "tnt_test", None, None).unwrap();
         assert_eq!(all_movs.len(), 2);
 
         // Then: filter by unit_test_1 returns only 1 movement
         let unit1_movs =
-            list_inventory_movements_impl(&conn, "tnt_test", Some(unit_test_1)).unwrap();
+            list_inventory_movements_impl(&conn, "tnt_test", Some(unit_test_1), None).unwrap();
         assert_eq!(unit1_movs.len(), 1);
         assert_eq!(&unit1_movs[0].unit_id, unit_test_1);
         assert_eq!(unit1_movs[0].quantity_delta, 12.0);
         assert_eq!(unit1_movs[0].reason, "opening_balance");
 
         // Then: boundary - empty tenant_id returns error
-        let err = list_inventory_movements_impl(&conn, "", None);
+        let err = list_inventory_movements_impl(&conn, "", None, None);
         assert!(err.is_err());
         assert!(err.unwrap_err().contains("Tenant ID cannot be empty"));
 
         // Then: isolated tenant returns empty
-        let other = list_inventory_movements_impl(&conn, "tnt_other", None).unwrap();
+        let other = list_inventory_movements_impl(&conn, "tnt_other", None, None).unwrap();
         assert_eq!(other.len(), 0);
     }
 }

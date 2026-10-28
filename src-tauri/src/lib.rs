@@ -14,6 +14,7 @@ pub mod products;
 pub mod purchase_orders;
 pub mod tasks;
 pub mod tps2_types;
+pub mod warehouses;
 
 #[cfg(test)]
 thread_local! {
@@ -160,6 +161,12 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     purchase_orders::create_purchase_orders_tables(&conn)
         .map_err(|e| format!("Failed to create purchase orders tables: {}", e))?;
+
+    warehouses::create_warehouses_tables(&conn)
+        .map_err(|e| format!("Failed to create warehouses tables: {}", e))?;
+
+    warehouses::run_warehouses_migration_and_backfill(&conn)
+        .map_err(|e| format!("Failed to run warehouses migration and backfill: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -438,6 +445,12 @@ pub fn run() {
             purchase_orders::get_inventory_level,
             purchase_orders::list_inventory_levels,
             purchase_orders::list_inventory_movements,
+            warehouses::create_warehouse,
+            warehouses::update_warehouse,
+            warehouses::set_default_warehouse,
+            warehouses::deactivate_warehouse,
+            warehouses::reactivate_warehouse,
+            warehouses::list_warehouses,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,

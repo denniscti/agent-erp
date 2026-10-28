@@ -930,6 +930,6 @@ test('TC-172-OB-E-02: Error - Duplicate opening balance on the same unit is reje
     async () => {
       await recordOpeningInventoryBalanceAction({ unit_id: unitId, quantity_delta: 20, unit_cost: 60.0 });
     },
-    /期初已開帳，更正請待庫存調整功能（M12）/
+    /(?:期初已開帳|此商品單位在〔.*〕已開帳，數量更正請用庫存調整（原因：期初更正）)/
   );
 });

@@ -378,6 +378,98 @@ if (!mockInventoryMovements || !Array.isArray(mockInventoryMovements)) {
   saveStorage('agent_erp_mock_inventory_movements', mockInventoryMovements);
 }
 
+const defaultMockWarehouses = [
+  {
+    id: "wh_mock_1",
+    tenant_id: "tnt_mock_1",
+    code: "MAIN",
+    name: "主倉",
+    is_default: true,
+    is_active: true,
+    created_at: Math.floor(Date.now() / 1000) - 86400,
+  }
+];
+
+let mockWarehouses = loadStorage('agent_erp_mock_warehouses', defaultMockWarehouses);
+if (!mockWarehouses || !Array.isArray(mockWarehouses)) {
+  mockWarehouses = JSON.parse(JSON.stringify(defaultMockWarehouses));
+  saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+}
+
+function migrateAndBackfillMockWarehouses() {
+  const tenantsWithData = new Set();
+  for (const po of mockPurchaseOrders) {
+    if (!po.warehouse_id) {
+      tenantsWithData.add(po.tenant_id || 'tnt_mock_1');
+    }
+  }
+  for (const mov of mockInventoryMovements) {
+    if (!mov.warehouse_id) {
+      tenantsWithData.add(mov.tenant_id || 'tnt_mock_1');
+    }
+  }
+
+  for (const tid of tenantsWithData) {
+    let wh = mockWarehouses.find(w => (w.tenant_id || 'tnt_mock_1') === tid && w.is_default);
+    if (!wh) {
+      wh = mockWarehouses.find(w => (w.tenant_id || 'tnt_mock_1') === tid && w.is_active);
+    }
+    if (!wh) {
+      wh = {
+        id: nextMockUid('wh'),
+        tenant_id: tid,
+        code: 'MAIN',
+        name: '主倉',
+        is_default: true,
+        is_active: true,
+        created_at: Math.floor(Date.now() / 1000),
+      };
+      mockWarehouses.push(wh);
+    }
+    for (const po of mockPurchaseOrders) {
+      if ((po.tenant_id || 'tnt_mock_1') === tid && !po.warehouse_id) {
+        po.warehouse_id = wh.id;
+      }
+    }
+    for (const mov of mockInventoryMovements) {
+      if ((mov.tenant_id || 'tnt_mock_1') === tid && !mov.warehouse_id) {
+        mov.warehouse_id = wh.id;
+      }
+    }
+  }
+  saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+  saveStorage('agent_erp_mock_purchase_orders', mockPurchaseOrders);
+  saveStorage('agent_erp_mock_inventory_movements', mockInventoryMovements);
+}
+migrateAndBackfillMockWarehouses();
+
+function resolveMockDefaultWarehouse(tenantId) {
+  const tWhs = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') === tenantId);
+  if (tWhs.length === 0) {
+    throw new Error('此租戶尚未建立任何倉別，請先至「倉庫管理」建立一個倉別');
+  }
+  let defWh = tWhs.find(w => w.is_default);
+  if (!defWh) {
+    defWh = tWhs.find(w => w.is_active);
+  }
+  if (!defWh || !defWh.is_active) {
+    throw new Error('預設倉已停用，請先重新啟用或設定其他預設倉');
+  }
+  return defWh;
+}
+
+function validateMockWarehouseActive(tenantId, warehouseId) {
+  const targetId = String(warehouseId || '').trim();
+  if (!targetId) {
+    throw new Error('找不到倉別或倉別已停用');
+  }
+  const wh = mockWarehouses.find(w => w.id === targetId && (w.tenant_id || 'tnt_mock_1') === tenantId);
+  if (!wh || !wh.is_active) {
+    throw new Error('找不到倉別或倉別已停用');
+  }
+  return wh;
+}
+
 function nextMockPoNumber(tenantId) {
   let maxSeq = 0;
   for (const po of mockPurchaseOrders) {
@@ -1899,7 +1991,8 @@ export async function invoke(cmd, args = {}) {
         expected_date, expectedDate,
         note,
         task_id, taskId,
-        initial_lines, initialLines
+        initial_lines, initialLines,
+        warehouse_id, warehouseId
       } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
       const targetVendorId = vendor_partner_id || vendorPartnerId;
@@ -1911,6 +2004,13 @@ export async function invoke(cmd, args = {}) {
       if (curr.trim().toUpperCase() !== 'TWD') {
         throw new Error("幣別僅支援 'TWD'");
       }
+      const rawWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      let targetWh;
+      if (rawWhId !== undefined && rawWhId !== null && String(rawWhId).trim() !== '') {
+        targetWh = validateMockWarehouseActive(targetTenantId, rawWhId);
+      } else {
+        targetWh = resolveMockDefaultWarehouse(targetTenantId);
+      }
       const vendorName = resolveMockVendorSnapshot(targetTenantId, targetVendorId);
       const now = Math.floor(Date.now() / 1000);
       const poId = nextMockUid('po');
@@ -1920,6 +2020,7 @@ export async function invoke(cmd, args = {}) {
         id: poId,
         tenant_id: targetTenantId,
         po_number: poNumber,
+        warehouse_id: targetWh.id,
         vendor_partner_id: targetVendorId,
         vendor_name_snapshot: vendorName,
         currency: curr.trim().toUpperCase(),
@@ -2001,7 +2102,8 @@ export async function invoke(cmd, args = {}) {
         order_id, orderId,
         vendor_partner_id, vendorPartnerId,
         expected_date, expectedDate,
-        note
+        note,
+        warehouse_id, warehouseId
       } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
       const targetOrderId = order_id || orderId;
@@ -2024,6 +2126,11 @@ export async function invoke(cmd, args = {}) {
         const vendorName = resolveMockVendorSnapshot(targetTenantId, newVendor);
         order.vendor_partner_id = newVendor;
         order.vendor_name_snapshot = vendorName;
+      }
+      const rawWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      if (rawWhId !== undefined && rawWhId !== null && String(rawWhId).trim() !== '') {
+        const wh = validateMockWarehouseActive(targetTenantId, rawWhId);
+        order.warehouse_id = wh.id;
       }
       if (expected_date !== undefined || expectedDate !== undefined) {
         order.expected_date = expected_date !== undefined ? expected_date : expectedDate;
@@ -2232,6 +2339,12 @@ export async function invoke(cmd, args = {}) {
         }
       }
 
+      if (!order.warehouse_id) {
+        const defWh = resolveMockDefaultWarehouse(targetTenantId);
+        order.warehouse_id = defWh.id;
+      }
+      validateMockWarehouseActive(targetTenantId, order.warehouse_id);
+
       order.status = 'received';
       order.received_at = now;
 
@@ -2244,6 +2357,7 @@ export async function invoke(cmd, args = {}) {
         mockInventoryMovements.push({
           id: imId,
           tenant_id: targetTenantId,
+          warehouse_id: order.warehouse_id,
           unit_id: l.unit_id,
           quantity_delta: actualQty,
           unit_cost: l.purchase_cost,
@@ -2313,11 +2427,22 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'record_opening_inventory_balance': {
-      const { unit_id, unitId, quantity_delta, quantityDelta, unit_cost, unitCost } = args || {};
+      const { unit_id, unitId, quantity_delta, quantityDelta, unit_cost, unitCost, warehouse_id, warehouseId } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
       const targetUserId = (mockSessions && mockSessions.user_id) ? mockSessions.user_id : 'usr_mock_admin';
       const targetUnitId = String(unit_id || unitId || '').trim();
       resolveMockUnitSnapshot(targetTenantId, targetUnitId);
+
+      const rawWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      let targetWh;
+      if (rawWhId !== undefined && rawWhId !== null && String(rawWhId).trim() !== '') {
+        targetWh = validateMockWarehouseActive(targetTenantId, rawWhId);
+      } else {
+        targetWh = resolveMockDefaultWarehouse(targetTenantId);
+      }
 
       const qty = Number(quantity_delta !== undefined ? quantity_delta : quantityDelta);
       if (isNaN(qty) || qty <= 0) {
@@ -2328,9 +2453,11 @@ export async function invoke(cmd, args = {}) {
         throw new Error('期初開帳成本不可為負數');
       }
 
-      const dup = mockInventoryMovements.find(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId && m.unit_id === targetUnitId && m.reason === 'opening_balance');
+      const dup = mockInventoryMovements.find(
+        m => (m.tenant_id || 'tnt_mock_1') === targetTenantId && m.unit_id === targetUnitId && m.warehouse_id === targetWh.id && m.reason === 'opening_balance'
+      );
       if (dup) {
-        throw new Error('期初已開帳，更正請待庫存調整功能（M12）');
+        throw new Error(`此商品單位在〔${targetWh.name}〕已開帳，數量更正請用庫存調整（原因：期初更正）`);
       }
 
       const now = Math.floor(Date.now() / 1000);
@@ -2338,6 +2465,7 @@ export async function invoke(cmd, args = {}) {
       const newMovement = {
         id: imId,
         tenant_id: targetTenantId,
+        warehouse_id: targetWh.id,
         unit_id: targetUnitId,
         quantity_delta: qty,
         unit_cost: cost,
@@ -2353,14 +2481,34 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'get_inventory_level': {
-      const { unit_id, unitId } = args || {};
+      const { unit_id, unitId, warehouse_id, warehouseId } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
       const targetUnitId = String(unit_id || unitId || '').trim();
       const { unit, variant, product } = resolveMockUnitSnapshot(targetTenantId, targetUnitId);
-      const movements = mockInventoryMovements.filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId && m.unit_id === targetUnitId);
+      const rawWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      const targetWhId = (rawWhId !== undefined && rawWhId !== null && String(rawWhId).trim() !== '') ? String(rawWhId).trim() : null;
+
+      const tWhs = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (tWhs.length === 0) {
+        return {
+          unit_id: targetUnitId,
+          warehouse_id: targetWhId,
+          current_quantity: 0,
+          product_name: product.name,
+          variant_name: variant.name,
+          sku: variant.sku || null,
+          unit_name: unit.unit_name
+        };
+      }
+
+      let movements = mockInventoryMovements.filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId && m.unit_id === targetUnitId);
+      if (targetWhId) {
+        movements = movements.filter(m => m.warehouse_id === targetWhId);
+      }
       const current_quantity = movements.reduce((sum, m) => sum + m.quantity_delta, 0);
       return {
         unit_id: targetUnitId,
+        warehouse_id: targetWhId,
         current_quantity,
         product_name: product.name,
         variant_name: variant.name,
@@ -2370,7 +2518,15 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_inventory_levels': {
+      const { warehouse_id, warehouseId } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
+      const tWhs = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (tWhs.length === 0) {
+        return [];
+      }
+      const rawWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      const targetWhId = (rawWhId !== undefined && rawWhId !== null && String(rawWhId).trim() !== '') ? String(rawWhId).trim() : null;
+
       const tenantProducts = mockProducts.filter(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId);
       const prodIds = new Set(tenantProducts.map(p => p.id));
       const tenantVariants = mockProductVariants.filter(v => prodIds.has(v.product_id));
@@ -2380,10 +2536,14 @@ export async function invoke(cmd, args = {}) {
       const levels = tenantUnits.map(unit => {
         const variant = tenantVariants.find(v => v.id === unit.variant_id);
         const product = tenantProducts.find(p => p.id === variant.product_id);
-        const movements = mockInventoryMovements.filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId && m.unit_id === unit.id);
+        let movements = mockInventoryMovements.filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId && m.unit_id === unit.id);
+        if (targetWhId) {
+          movements = movements.filter(m => m.warehouse_id === targetWhId);
+        }
         const current_quantity = movements.reduce((sum, m) => sum + m.quantity_delta, 0);
         return {
           unit_id: unit.id,
+          warehouse_id: targetWhId,
           current_quantity,
           product_name: product ? product.name : null,
           variant_name: variant ? variant.name : null,
@@ -2395,14 +2555,209 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'list_inventory_movements': {
-      const { unit_id, unitId } = args || {};
+      const { unit_id, unitId, warehouse_id, warehouseId } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const tWhs = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (tWhs.length === 0) {
+        return [];
+      }
       const targetUnitId = String(unit_id || unitId || '').trim();
+      const rawWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      const targetWhId = (rawWhId !== undefined && rawWhId !== null && String(rawWhId).trim() !== '') ? String(rawWhId).trim() : null;
+
       let list = mockInventoryMovements.filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (targetUnitId) {
         list = list.filter(m => m.unit_id === targetUnitId);
       }
-      return list.sort((a, b) => a.created_at - b.created_at);
+      if (targetWhId) {
+        list = list.filter(m => m.warehouse_id === targetWhId);
+      }
+      return list.sort((a, b) => (a.created_at || 0) - (b.created_at || 0) || (a.id > b.id ? 1 : -1));
+    }
+
+    case 'create_warehouse': {
+      const { code, name } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const trimmedCode = String(code || '').trim();
+      if (!trimmedCode) {
+        throw new Error('倉別代碼不可空白');
+      }
+      const trimmedName = String(name || '').trim();
+      if (!trimmedName) {
+        throw new Error('倉別名稱不可空白');
+      }
+      const dup = mockWarehouses.some(
+        w => (w.tenant_id || 'tnt_mock_1') === targetTenantId && w.code.toLowerCase() === trimmedCode.toLowerCase()
+      );
+      if (dup) {
+        throw new Error('倉別代碼已存在');
+      }
+      const tenantWhs = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      const is_default = tenantWhs.length === 0;
+      const newWh = {
+        id: nextMockUid('wh'),
+        tenant_id: targetTenantId,
+        code: trimmedCode,
+        name: trimmedName,
+        is_default,
+        is_active: true,
+        created_at: Math.floor(Date.now() / 1000)
+      };
+      mockWarehouses.push(newWh);
+      saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+      return newWh;
+    }
+
+    case 'update_warehouse': {
+      const { id, code, name } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const trimmedId = String(id || '').trim();
+      const wh = mockWarehouses.find(w => w.id === trimmedId && (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!wh) {
+        throw new Error('找不到倉別或不屬於目前租戶');
+      }
+      const trimmedCode = String(code || '').trim();
+      if (!trimmedCode) {
+        throw new Error('倉別代碼不可空白');
+      }
+      const trimmedName = String(name || '').trim();
+      if (!trimmedName) {
+        throw new Error('倉別名稱不可空白');
+      }
+      const dup = mockWarehouses.some(
+        w => (w.tenant_id || 'tnt_mock_1') === targetTenantId && w.id !== trimmedId && w.code.toLowerCase() === trimmedCode.toLowerCase()
+      );
+      if (dup) {
+        throw new Error('倉別代碼已存在');
+      }
+      wh.code = trimmedCode;
+      wh.name = trimmedName;
+      saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+      return wh;
+    }
+
+    case 'set_default_warehouse': {
+      const { id } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const trimmedId = String(id || '').trim();
+      const wh = mockWarehouses.find(w => w.id === trimmedId && (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!wh) {
+        throw new Error('找不到倉別或不屬於目前租戶');
+      }
+      if (!wh.is_active) {
+        throw new Error('停用中的倉別不可設為預設');
+      }
+      for (const w of mockWarehouses) {
+        if ((w.tenant_id || 'tnt_mock_1') === targetTenantId) {
+          w.is_default = (w.id === trimmedId);
+        }
+      }
+      saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+      return wh;
+    }
+
+    case 'deactivate_warehouse': {
+      const { id } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const trimmedId = String(id || '').trim();
+      const wh = mockWarehouses.find(w => w.id === trimmedId && (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!wh) {
+        throw new Error('找不到倉別或不屬於目前租戶');
+      }
+      if (wh.is_default) {
+        throw new Error('預設倉不可停用');
+      }
+      // Check stock
+      const stockByUnit = {};
+      for (const m of mockInventoryMovements) {
+        if ((m.tenant_id || 'tnt_mock_1') === targetTenantId && m.warehouse_id === trimmedId) {
+          stockByUnit[m.unit_id] = (stockByUnit[m.unit_id] || 0) + m.quantity_delta;
+        }
+      }
+      for (const qty of Object.values(stockByUnit)) {
+        if (Math.abs(qty) > 1e-6) {
+          throw new Error('此倉仍有庫存，請先調撥或調整歸零');
+        }
+      }
+      // Check pending POs
+      const pendingPo = mockPurchaseOrders.find(
+        po => (po.tenant_id || 'tnt_mock_1') === targetTenantId && po.warehouse_id === trimmedId && (po.status === 'draft' || po.status === 'ordered')
+      );
+      if (pendingPo) {
+        throw new Error(`此倉仍被未結案單據引用：${pendingPo.po_number}`);
+      }
+      wh.is_active = false;
+      saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+      return wh;
+    }
+
+    case 'reactivate_warehouse': {
+      const { id } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const trimmedId = String(id || '').trim();
+      const wh = mockWarehouses.find(w => w.id === trimmedId && (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!wh) {
+        throw new Error('找不到倉別或不屬於目前租戶');
+      }
+      wh.is_active = true;
+      saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+      return wh;
+    }
+
+    case 'list_warehouses': {
+      const { include_inactive, includeInactive } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const incInactive = include_inactive !== undefined ? include_inactive : includeInactive;
+      let list = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!incInactive) {
+        list = list.filter(w => w.is_active);
+      }
+      return list.sort((a, b) => (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0) || a.created_at - b.created_at);
+    }
+
+    case 'set_mock_active_tenant': {
+      const tid = (args && (args.tenant_id || args.tenantId)) || 'tnt_mock_1';
+      if (!mockSessions) {
+        mockSessions = {
+          user_id: 'usr_mock_admin',
+          active_tenant_id: tid,
+          token: 'mock-token'
+        };
+      } else {
+        mockSessions.active_tenant_id = tid;
+      }
+      saveStorage('agent_erp_mock_session', mockSessions);
+      return tid;
+    }
+
+    case 'reset_mock_warehouses': {
+      const { tenant_id, tenantId } = args || {};
+      const targetTid = tenant_id || tenantId;
+      if (targetTid) {
+        mockWarehouses = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') !== targetTid);
+      } else {
+        mockWarehouses = JSON.parse(JSON.stringify(defaultMockWarehouses));
+      }
+      saveStorage('agent_erp_mock_warehouses', mockWarehouses);
+      return mockWarehouses;
     }
 
     case 'record_audit_log': {

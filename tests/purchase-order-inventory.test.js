@@ -241,7 +241,7 @@ test('TC-PO-N-08 & E-11: Opening inventory balance and duplicate prevention', as
         unitCost: 15.5
       });
     },
-    /期初已開帳，更正請待庫存調整功能（M12）/
+    /(?:期初已開帳|此商品單位在〔.*〕已開帳，數量更正請用庫存調整（原因：期初更正）)/
   );
 });
 

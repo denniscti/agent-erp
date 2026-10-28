@@ -1077,7 +1077,7 @@ pub fn update_product_unit_impl(
 
 // Usecase: add_supply_source
 pub fn add_supply_source_impl(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     tenant_id: &str,
     unit_id: &str,
     vendor_partner_id: &str,
@@ -1105,36 +1105,40 @@ pub fn add_supply_source_impl(
     // Verify unit belongs to product in active tenant.
     // Resilient resolution: supports direct unit_id, or fallback via variant_id/product_id
     // to find that variant's base unit (is_base_unit = 1).
-    let mut check_unit = conn
-        .prepare(
-            "SELECT u.id \
-             FROM product_units u \
-             JOIN product_variants v ON u.variant_id = v.id \
-             JOIN products p ON v.product_id = p.id \
-             WHERE (u.id = ?1 OR u.variant_id = ?1 OR v.product_id = ?1) \
-               AND p.tenant_id = ?2 \
-             ORDER BY u.is_base_unit DESC, v.is_default DESC \
-             LIMIT 1",
-        )
-        .map_err(|e| format!("Failed to prepare unit ownership check: {}", e))?;
-    let resolved_unit: Result<String, _> = check_unit
-        .query_row(params![trimmed_unit_id, trimmed_tenant_id], |row| {
-            row.get(0)
-        });
-    let actual_unit_id = match resolved_unit {
-        Ok(id) => id,
-        Err(_) => return Err("Product unit not found".to_string()),
+    let actual_unit_id = {
+        let mut check_unit = conn
+            .prepare(
+                "SELECT u.id \
+                 FROM product_units u \
+                 JOIN product_variants v ON u.variant_id = v.id \
+                 JOIN products p ON v.product_id = p.id \
+                 WHERE (u.id = ?1 OR u.variant_id = ?1 OR v.product_id = ?1) \
+                   AND p.tenant_id = ?2 \
+                 ORDER BY u.is_base_unit DESC, v.is_default DESC \
+                 LIMIT 1",
+            )
+            .map_err(|e| format!("Failed to prepare unit ownership check: {}", e))?;
+        let resolved_unit: Result<String, _> = check_unit
+            .query_row(params![trimmed_unit_id, trimmed_tenant_id], |row| {
+                row.get(0)
+            });
+        match resolved_unit {
+            Ok(id) => id,
+            Err(_) => return Err("Product unit not found".to_string()),
+        }
     };
 
     // Verify vendor partner exists in same tenant and is_vendor = 1
-    let mut check_vendor = conn
-        .prepare(
-            "SELECT 1 FROM partners WHERE id = ?1 AND tenant_id = ?2 AND is_vendor = 1 LIMIT 1",
-        )
-        .map_err(|e| format!("Failed to prepare vendor check: {}", e))?;
-    let has_vendor = check_vendor
-        .query_row(params![trimmed_vendor_id, trimmed_tenant_id], |_| Ok(()))
-        .is_ok();
+    let has_vendor = {
+        let mut check_vendor = conn
+            .prepare(
+                "SELECT 1 FROM partners WHERE id = ?1 AND tenant_id = ?2 AND is_vendor = 1 LIMIT 1",
+            )
+            .map_err(|e| format!("Failed to prepare vendor check: {}", e))?;
+        check_vendor
+            .query_row(params![trimmed_vendor_id, trimmed_tenant_id], |_| Ok(()))
+            .is_ok()
+    };
     if !has_vendor {
         return Err("供應商不存在或無效".to_string());
     }
@@ -1147,16 +1151,18 @@ pub fn add_supply_source_impl(
         .unwrap_or_else(|| "TWD".to_string());
     let is_prim = is_primary.unwrap_or(false);
 
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
     // If promoting to primary, demote other existing primary sources for this unit
     if is_prim {
-        conn.execute(
+        tx.execute(
             "UPDATE product_supply_sources SET is_primary = 0 WHERE unit_id = ?1",
             params![actual_unit_id],
         )
         .map_err(|e| format!("Failed to demote existing primary supply sources: {}", e))?;
     }
 
-    conn.execute(
+    tx.execute(
         "INSERT INTO product_supply_sources (id, unit_id, vendor_partner_id, purchase_cost, currency, is_primary, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
@@ -1171,6 +1177,8 @@ pub fn add_supply_source_impl(
     )
     .map_err(|e| format!("Failed to insert supply source: {}", e))?;
 
+    tx.commit().map_err(|e| e.to_string())?;
+
     Ok(ProductSupplySource {
         id: src_id,
         unit_id: actual_unit_id,
@@ -1184,7 +1192,7 @@ pub fn add_supply_source_impl(
 
 // Usecase: update_supply_source
 pub fn update_supply_source_impl(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     tenant_id: &str,
     source_id: &str,
     purchase_cost: Option<f64>,
@@ -1203,31 +1211,6 @@ pub fn update_supply_source_impl(
     }
 
     // Verify source exists and belongs to active tenant
-    let mut check_source = conn
-        .prepare(
-            "SELECT s.id, s.unit_id, s.vendor_partner_id, s.purchase_cost, s.currency, s.is_primary, s.created_at \
-             FROM product_supply_sources s \
-             JOIN product_units u ON s.unit_id = u.id \
-             JOIN product_variants v ON u.variant_id = v.id \
-             JOIN products p ON v.product_id = p.id \
-             WHERE s.id = ?1 AND p.tenant_id = ?2 \
-             LIMIT 1",
-        )
-        .map_err(|e| format!("Failed to prepare supply source ownership check: {}", e))?;
-
-    let existing: Result<(String, String, String, f64, String, i64, i64), _> = check_source
-        .query_row(params![trimmed_source_id, trimmed_tenant_id], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-                row.get(6)?,
-            ))
-        });
-
     let (
         id,
         unit_id,
@@ -1236,9 +1219,36 @@ pub fn update_supply_source_impl(
         current_currency,
         current_primary_int,
         created_at,
-    ) = match existing {
-        Ok(tuple) => tuple,
-        Err(_) => return Err("供應來源不存在".to_string()),
+    ) = {
+        let mut check_source = conn
+            .prepare(
+                "SELECT s.id, s.unit_id, s.vendor_partner_id, s.purchase_cost, s.currency, s.is_primary, s.created_at \
+                 FROM product_supply_sources s \
+                 JOIN product_units u ON s.unit_id = u.id \
+                 JOIN product_variants v ON u.variant_id = v.id \
+                 JOIN products p ON v.product_id = p.id \
+                 WHERE s.id = ?1 AND p.tenant_id = ?2 \
+                 LIMIT 1",
+            )
+            .map_err(|e| format!("Failed to prepare supply source ownership check: {}", e))?;
+
+        let existing: Result<(String, String, String, f64, String, i64, i64), _> = check_source
+            .query_row(params![trimmed_source_id, trimmed_tenant_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            });
+
+        match existing {
+            Ok(tuple) => tuple,
+            Err(_) => return Err("供應來源不存在".to_string()),
+        }
     };
 
     // If cost provided, validate >= 0.0
@@ -1259,12 +1269,14 @@ pub fn update_supply_source_impl(
             if trimmed_v.is_empty() {
                 return Err("供應商不存在或無效".to_string());
             }
-            let mut check_vendor = conn
-                .prepare("SELECT 1 FROM partners WHERE id = ?1 AND tenant_id = ?2 AND is_vendor = 1 LIMIT 1")
-                .map_err(|e| format!("Failed to prepare vendor check: {}", e))?;
-            let has_vendor = check_vendor
-                .query_row(params![trimmed_v, trimmed_tenant_id], |_| Ok(()))
-                .is_ok();
+            let has_vendor = {
+                let mut check_vendor = conn
+                    .prepare("SELECT 1 FROM partners WHERE id = ?1 AND tenant_id = ?2 AND is_vendor = 1 LIMIT 1")
+                    .map_err(|e| format!("Failed to prepare vendor check: {}", e))?;
+                check_vendor
+                    .query_row(params![trimmed_v, trimmed_tenant_id], |_| Ok(()))
+                    .is_ok()
+            };
             if !has_vendor {
                 return Err("供應商不存在或無效".to_string());
             }
@@ -1287,16 +1299,18 @@ pub fn update_supply_source_impl(
 
     let effective_primary = is_primary.unwrap_or(current_primary_int == 1);
 
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
     // If promoting to primary, demote other supply sources under the same unit
     if effective_primary {
-        conn.execute(
+        tx.execute(
             "UPDATE product_supply_sources SET is_primary = 0 WHERE unit_id = ?1 AND id != ?2",
             params![unit_id, id],
         )
         .map_err(|e| format!("Failed to demote existing primary supply sources: {}", e))?;
     }
 
-    conn.execute(
+    tx.execute(
         "UPDATE product_supply_sources \
          SET purchase_cost = ?1, vendor_partner_id = ?2, currency = ?3, is_primary = ?4 \
          WHERE id = ?5",
@@ -1309,6 +1323,8 @@ pub fn update_supply_source_impl(
         ],
     )
     .map_err(|e| format!("Failed to update supply source: {}", e))?;
+
+    tx.commit().map_err(|e| e.to_string())?;
 
     Ok(ProductSupplySource {
         id,
@@ -1619,11 +1635,11 @@ pub async fn add_supply_source<R: tauri::Runtime>(
     is_primary: Option<bool>,
 ) -> Result<ProductSupplySource, String> {
     let db_path = get_db_path(&app_handle);
-    let conn =
+    let mut conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     add_supply_source_impl(
-        &conn,
+        &mut conn,
         &active_tid,
         &unit_id,
         &vendor_partner_id,
@@ -1644,11 +1660,11 @@ pub async fn update_supply_source<R: tauri::Runtime>(
     is_primary: Option<bool>,
 ) -> Result<ProductSupplySource, String> {
     let db_path = get_db_path(&app_handle);
-    let conn =
+    let mut conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     update_supply_source_impl(
-        &conn,
+        &mut conn,
         &active_tid,
         &source_id,
         purchase_cost,
@@ -1901,7 +1917,7 @@ pub mod tests {
     #[test]
     fn test_tc_prod_pos_07_add_supply_source() {
         // Given: Product with default unit and vendor partner in same tenant
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -1925,7 +1941,7 @@ pub mod tests {
         // When: Adding supply source with valid vendor for base unit "個"
         let base_unit_id = &p.units[0].id;
         let src_base = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             base_unit_id,
             &vendor.id,
@@ -1953,7 +1969,7 @@ pub mod tests {
         )
         .unwrap();
         let src_box = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &box_unit.id,
             &vendor.id,
@@ -2196,7 +2212,7 @@ pub mod tests {
     #[test]
     fn test_tc_prod_neg_06_negative_purchase_cost_error() {
         // Given: Product with variant and vendor
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -2219,7 +2235,7 @@ pub mod tests {
 
         // When: Cost < 0
         let err = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p.units[0].id,
             &v.id,
@@ -2235,7 +2251,7 @@ pub mod tests {
     #[test]
     fn test_tc_prod_neg_07_invalid_or_non_vendor_partner_error() {
         // Given: Partner with only customer identity (is_vendor = false)
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -2258,7 +2274,7 @@ pub mod tests {
 
         // When: Trying to bind customer as supply source
         let err = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p.units[0].id,
             &cust.id,
@@ -2542,7 +2558,7 @@ pub mod tests {
     #[test]
     fn test_tc_prod_bnd_01_and_02_and_03_boundary_values() {
         // Given: Whitespace name and zero price / cost
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
 
         // When: Creating product with whitespace trimming and 0.0 price
         let p = create_product_impl(
@@ -2571,9 +2587,16 @@ pub mod tests {
             None,
         )
         .unwrap();
-        let src =
-            add_supply_source_impl(&conn, TEST_TENANT_A, &p.units[0].id, &v.id, 0.0, None, None)
-                .unwrap();
+        let src = add_supply_source_impl(
+            &mut conn,
+            TEST_TENANT_A,
+            &p.units[0].id,
+            &v.id,
+            0.0,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Then: 0.0 cost is allowed
         assert_eq!(src.purchase_cost, 0.0);
@@ -2692,7 +2715,7 @@ pub mod tests {
     #[test]
     fn test_tc_prod_iso_04_cross_tenant_vendor_binding_blocked() {
         // Given: Product in Tenant A, Vendor in Tenant B
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p_a = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -2715,7 +2738,7 @@ pub mod tests {
 
         // When: Tenant A tries to bind Tenant B's vendor
         let err = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p_a.units[0].id,
             &v_b.id,
@@ -2748,7 +2771,7 @@ pub mod tests {
         )
         .unwrap();
         let err_unit = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p_b.units[0].id,
             &v_a.id,
@@ -2800,7 +2823,7 @@ pub mod tests {
     #[test]
     fn test_tc_prod_res_01_unit_and_supply_fallback_from_prod_id() {
         // Given: Product created in test db
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -2834,7 +2857,7 @@ pub mod tests {
         .unwrap();
         // Calling add_supply_source_impl with product.id -> fallback to default variant's base unit
         let src_from_prod = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p.product.id,
             &vendor.id,
@@ -2845,7 +2868,7 @@ pub mod tests {
         .unwrap();
         // Calling add_supply_source_impl with variant.id -> fallback to that variant's base unit
         let src_from_var = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p.variants[0].id,
             &vendor.id,
@@ -3500,7 +3523,7 @@ pub mod tests {
     #[test]
     fn test_tc_src_pos_01_multiple_vendors_same_unit() {
         // Given: Resale product and 2 vendor partners in same tenant
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -3533,7 +3556,7 @@ pub mod tests {
 
         // When: Adding 2 supply sources for the exact same unit with different costs
         let src1 = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             unit_id,
             &v1.id,
@@ -3543,7 +3566,7 @@ pub mod tests {
         )
         .unwrap();
         let src2 = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             unit_id,
             &v2.id,
@@ -3571,7 +3594,7 @@ pub mod tests {
     #[test]
     fn test_tc_src_pos_02_update_supply_source() {
         // Given: Product, vendor 1, vendor 2, and existing supply source
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -3601,7 +3624,7 @@ pub mod tests {
         )
         .unwrap();
         let src = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p.units[0].id,
             &v1.id,
@@ -3613,7 +3636,7 @@ pub mod tests {
 
         // When: Updating cost, vendor, and primary status
         let updated = update_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &src.id,
             Some(28.5),
@@ -3638,7 +3661,7 @@ pub mod tests {
     #[test]
     fn test_tc_src_pos_03_primary_source_exclusivity() {
         // Given: Product and 2 vendors in Tenant A
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -3671,7 +3694,7 @@ pub mod tests {
 
         // When: Adding src1 as primary
         let src1 = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             unit_id,
             &v1.id,
@@ -3684,7 +3707,7 @@ pub mod tests {
 
         // When: Adding src2 as primary
         let src2 = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             unit_id,
             &v2.id,
@@ -3711,9 +3734,16 @@ pub mod tests {
         assert!(s2_db.is_primary);
 
         // When: Updating src1 to become primary again
-        let updated1 =
-            update_supply_source_impl(&conn, TEST_TENANT_A, &src1.id, None, None, None, Some(true))
-                .unwrap();
+        let updated1 = update_supply_source_impl(
+            &mut conn,
+            TEST_TENANT_A,
+            &src1.id,
+            None,
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
         assert!(updated1.is_primary);
 
         // Then: src2 was demoted and only src1 is primary
@@ -3735,7 +3765,7 @@ pub mod tests {
     #[test]
     fn test_tc_src_bnd_01_zero_cost() {
         // Given: Product and vendor
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -3757,16 +3787,23 @@ pub mod tests {
         .unwrap();
 
         // When: Setting purchase cost to 0.0
-        let src =
-            add_supply_source_impl(&conn, TEST_TENANT_A, &p.units[0].id, &v.id, 0.0, None, None)
-                .unwrap();
+        let src = add_supply_source_impl(
+            &mut conn,
+            TEST_TENANT_A,
+            &p.units[0].id,
+            &v.id,
+            0.0,
+            None,
+            None,
+        )
+        .unwrap();
 
         // Then: 0.0 cost is allowed
         assert_eq!(src.purchase_cost, 0.0);
 
         // When: Updating cost to 0.0001 (minimal fractional positive)
         let updated = update_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &src.id,
             Some(0.0001),
@@ -3783,7 +3820,7 @@ pub mod tests {
     #[test]
     fn test_tc_src_neg_01_negative_cost() {
         // Given: Product, vendor, and existing source
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -3804,7 +3841,7 @@ pub mod tests {
         )
         .unwrap();
         let src = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p.units[0].id,
             &v.id,
@@ -3815,8 +3852,15 @@ pub mod tests {
         .unwrap();
 
         // When: Updating with negative cost
-        let err =
-            update_supply_source_impl(&conn, TEST_TENANT_A, &src.id, Some(-5.0), None, None, None);
+        let err = update_supply_source_impl(
+            &mut conn,
+            TEST_TENANT_A,
+            &src.id,
+            Some(-5.0),
+            None,
+            None,
+            None,
+        );
 
         // Then: Rejection with validation message
         assert_eq!(err.unwrap_err(), "採購成本不能為負數");
@@ -3825,7 +3869,7 @@ pub mod tests {
     #[test]
     fn test_tc_src_neg_02_non_vendor_partner() {
         // Given: Partner with is_vendor = false
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -3855,7 +3899,7 @@ pub mod tests {
         )
         .unwrap();
         let src = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p.units[0].id,
             &src_vendor.id,
@@ -3866,8 +3910,15 @@ pub mod tests {
         .unwrap();
 
         // When: Updating source vendor to a non-vendor partner
-        let err =
-            update_supply_source_impl(&conn, TEST_TENANT_A, &src.id, None, Some(v.id), None, None);
+        let err = update_supply_source_impl(
+            &mut conn,
+            TEST_TENANT_A,
+            &src.id,
+            None,
+            Some(v.id),
+            None,
+            None,
+        );
 
         // Then: Rejected
         assert_eq!(err.unwrap_err(), "供應商不存在或無效");
@@ -3876,16 +3927,23 @@ pub mod tests {
     #[test]
     fn test_tc_src_neg_03_and_04_source_id_errors() {
         // Given: DB connection
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
 
         // When: Empty source ID
-        let err_empty =
-            update_supply_source_impl(&conn, TEST_TENANT_A, "   ", Some(10.0), None, None, None);
+        let err_empty = update_supply_source_impl(
+            &mut conn,
+            TEST_TENANT_A,
+            "   ",
+            Some(10.0),
+            None,
+            None,
+            None,
+        );
         assert_eq!(err_empty.unwrap_err(), "供應來源 ID 不能為空");
 
         // When: Nonexistent source ID
         let err_not_found = update_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             "src_nonexistent_999",
             Some(10.0),
@@ -3899,7 +3957,7 @@ pub mod tests {
     #[test]
     fn test_tc_src_iso_01_and_02_cross_tenant_guards() {
         // Given: Product & vendor in Tenant A
-        let conn = setup_test_db();
+        let mut conn = setup_test_db();
         let p_a = create_product_impl(
             &conn,
             TEST_TENANT_A,
@@ -3920,7 +3978,7 @@ pub mod tests {
         )
         .unwrap();
         let src_a = add_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &p_a.units[0].id,
             &v_a.id,
@@ -3943,7 +4001,7 @@ pub mod tests {
 
         // When: Tenant B tries to update Tenant A's supply source
         let err_cross_update = update_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_B,
             &src_a.id,
             Some(50.0),
@@ -3955,7 +4013,7 @@ pub mod tests {
 
         // When: Tenant A tries to bind Tenant B's vendor
         let err_cross_vendor = update_supply_source_impl(
-            &conn,
+            &mut conn,
             TEST_TENANT_A,
             &src_a.id,
             None,

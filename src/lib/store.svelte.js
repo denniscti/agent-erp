@@ -148,6 +148,10 @@ export const appState = $state({
   /** @type {any | null} */
   currentProductDetail: null,
 
+  // Warehouses cache (Issue #179)
+  /** @type {any[]} */
+  warehouses: [],
+
   // Purchase Orders & Inventory cache (Issue #164, #165)
   /** @type {any[]} */
   purchaseOrders: [],
@@ -385,6 +389,7 @@ export async function login(email, password) {
       fetchTasks(),
       fetchDepartments(),
       fetchPartners(),
+      fetchWarehouses(),
       fetchMembers()
     ]);
   }
@@ -534,6 +539,7 @@ export async function selectTenantAction(tenantId) {
     fetchDepartments(),
     fetchPartners(),
     fetchProducts(),
+    fetchWarehouses(),
     fetchMembers()
   ]);
   return res;
@@ -2097,11 +2103,17 @@ export async function fetchPurchaseOrderDetail(orderId) {
 
 /**
  * Fetch inventory levels
+ * @param {string | null} [warehouseId]
  * @returns {Promise<any[]>}
  */
-export async function fetchInventoryLevels() {
+export async function fetchInventoryLevels(warehouseId = null) {
   try {
-    const list = await invoke('list_inventory_levels');
+    const payload = {};
+    if (warehouseId && String(warehouseId).trim()) {
+      payload.warehouse_id = String(warehouseId).trim();
+      payload.warehouseId = String(warehouseId).trim();
+    }
+    const list = await invoke('list_inventory_levels', payload);
     appState.inventoryLevels = list || [];
     return appState.inventoryLevels;
   } catch (err) {
@@ -2113,14 +2125,19 @@ export async function fetchInventoryLevels() {
 /**
  * Fetch inventory movements for a unit (or all)
  * @param {string} [unitId]
+ * @param {string | null} [warehouseId]
  * @returns {Promise<any[]>}
  */
-export async function fetchInventoryMovements(unitId) {
+export async function fetchInventoryMovements(unitId, warehouseId = null) {
   try {
     const payload = {};
     if (unitId && String(unitId).trim()) {
       payload.unit_id = String(unitId).trim();
       payload.unitId = String(unitId).trim();
+    }
+    if (warehouseId && String(warehouseId).trim()) {
+      payload.warehouse_id = String(warehouseId).trim();
+      payload.warehouseId = String(warehouseId).trim();
     }
     const list = await invoke('list_inventory_movements', payload);
     appState.inventoryMovements = list || [];
@@ -2154,6 +2171,8 @@ export async function createPurchaseOrderAction({
   expected_date,
   expectedDate,
   note,
+  warehouse_id,
+  warehouseId,
   task_id = null,
   taskId = null,
   initial_lines,
@@ -2165,6 +2184,7 @@ export async function createPurchaseOrderAction({
   }
   const expDate = expected_date !== undefined ? expected_date : expectedDate;
   const lines = initial_lines !== undefined ? initial_lines : initialLines;
+  const whId = warehouse_id !== undefined ? warehouse_id : warehouseId;
 
   const payload = {
     vendor_partner_id: vendorId,
@@ -2176,6 +2196,10 @@ export async function createPurchaseOrderAction({
     task_id: task_id || taskId || null,
     taskId: task_id || taskId || null
   };
+  if (whId && String(whId).trim()) {
+    payload.warehouse_id = String(whId).trim();
+    payload.warehouseId = String(whId).trim();
+  }
   if (lines && Array.isArray(lines)) {
     payload.initial_lines = lines;
     payload.initialLines = lines;
@@ -2204,7 +2228,9 @@ export async function updatePurchaseOrderHeaderAction(orderId, {
   vendorPartnerId,
   expected_date,
   expectedDate,
-  note
+  note,
+  warehouse_id,
+  warehouseId
 } = {}) {
   const oId = String(orderId || '').trim();
   if (!oId) throw new Error('採購單 ID 為必填項目');
@@ -2225,6 +2251,11 @@ export async function updatePurchaseOrderHeaderAction(orderId, {
   }
   if (note !== undefined) {
     payload.note = note ? String(note).trim() : null;
+  }
+  const whId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+  if (whId !== undefined) {
+    payload.warehouse_id = whId ? String(whId).trim() : null;
+    payload.warehouseId = payload.warehouse_id;
   }
 
   try {
@@ -2432,23 +2463,32 @@ export async function recordOpeningInventoryBalanceAction({
   quantity_delta,
   quantityDelta,
   unit_cost,
-  unitCost
+  unitCost,
+  warehouse_id,
+  warehouseId
 } = {}) {
   const uId = String(unit_id || unitId || '').trim();
   if (!uId) throw new Error('商品單位 ID 為必填項目');
 
   const rawQty = quantity_delta !== undefined ? quantity_delta : quantityDelta;
   const rawCost = unit_cost !== undefined ? unit_cost : unitCost;
+  const whId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+
+  const payload = {
+    unit_id: uId,
+    unitId: uId,
+    quantity_delta: Number(rawQty),
+    quantityDelta: Number(rawQty),
+    unit_cost: Number(rawCost),
+    unitCost: Number(rawCost)
+  };
+  if (whId && String(whId).trim()) {
+    payload.warehouse_id = String(whId).trim();
+    payload.warehouseId = String(whId).trim();
+  }
 
   try {
-    const movement = await invoke('record_opening_inventory_balance', {
-      unit_id: uId,
-      unitId: uId,
-      quantity_delta: Number(rawQty),
-      quantityDelta: Number(rawQty),
-      unit_cost: Number(rawCost),
-      unitCost: Number(rawCost)
-    });
+    const movement = await invoke('record_opening_inventory_balance', payload);
     await fetchInventoryLevels();
     showToast('已成功建立期初庫存底帳！');
     return movement;
@@ -2457,6 +2497,131 @@ export async function recordOpeningInventoryBalanceAction({
     throw err;
   }
 }
+
+/**
+ * Fetch warehouses from SQLite / Mock
+ * @param {boolean} [includeInactive=true]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchWarehouses(includeInactive = true) {
+  try {
+    const payload = {};
+    if (includeInactive !== null && includeInactive !== undefined) {
+      payload.include_inactive = Boolean(includeInactive);
+      payload.includeInactive = Boolean(includeInactive);
+    }
+    const list = await invoke('list_warehouses', payload);
+    appState.warehouses = list || [];
+    return appState.warehouses;
+  } catch (err) {
+    console.error("Failed to fetch warehouses:", err);
+    return [];
+  }
+}
+
+/**
+ * Create a warehouse
+ * @param {string} code
+ * @param {string} name
+ * @returns {Promise<any>}
+ */
+export async function createWarehouseAction(code, name) {
+  const trimmedCode = (code || '').trim();
+  const trimmedName = (name || '').trim();
+  if (!trimmedCode) throw new Error('倉庫代碼為必填項目');
+  if (!trimmedName) throw new Error('倉庫名稱為必填項目');
+  try {
+    const wh = await invoke('create_warehouse', {
+      code: trimmedCode,
+      name: trimmedName
+    });
+    await fetchWarehouses();
+    showToast(`倉庫「${wh.name} (${wh.code})」建立成功！`);
+    return wh;
+  } catch (err) {
+    console.error("Failed to create warehouse:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update warehouse
+ * @param {string} id
+ * @param {string} code
+ * @param {string} name
+ * @returns {Promise<any>}
+ */
+export async function updateWarehouseAction(id, code, name) {
+  const trimmedCode = (code || '').trim();
+  const trimmedName = (name || '').trim();
+  if (!trimmedCode) throw new Error('倉庫代碼為必填項目');
+  if (!trimmedName) throw new Error('倉庫名稱為必填項目');
+  try {
+    const wh = await invoke('update_warehouse', {
+      id,
+      code: trimmedCode,
+      name: trimmedName
+    });
+    await fetchWarehouses();
+    showToast(`倉庫「${wh.name}」已更新！`);
+    return wh;
+  } catch (err) {
+    console.error("Failed to update warehouse:", err);
+    throw err;
+  }
+}
+
+/**
+ * Set default warehouse
+ * @param {string} id
+ * @returns {Promise<any>}
+ */
+export async function setDefaultWarehouseAction(id) {
+  try {
+    const wh = await invoke('set_default_warehouse', { id });
+    await fetchWarehouses();
+    showToast(`已將「${wh.name}」設為預設倉！`);
+    return wh;
+  } catch (err) {
+    console.error("Failed to set default warehouse:", err);
+    throw err;
+  }
+}
+
+/**
+ * Deactivate warehouse
+ * @param {string} id
+ * @returns {Promise<any>}
+ */
+export async function deactivateWarehouseAction(id) {
+  try {
+    const wh = await invoke('deactivate_warehouse', { id });
+    await fetchWarehouses();
+    showToast(`已停用倉庫「${wh.name}」！`);
+    return wh;
+  } catch (err) {
+    console.error("Failed to deactivate warehouse:", err);
+    throw err;
+  }
+}
+
+/**
+ * Reactivate warehouse
+ * @param {string} id
+ * @returns {Promise<any>}
+ */
+export async function reactivateWarehouseAction(id) {
+  try {
+    const wh = await invoke('reactivate_warehouse', { id });
+    await fetchWarehouses();
+    showToast(`已重新啟用倉庫「${wh.name}」！`);
+    return wh;
+  } catch (err) {
+    console.error("Failed to reactivate warehouse:", err);
+    throw err;
+  }
+}
+
 
 
 
