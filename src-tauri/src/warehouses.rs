@@ -592,6 +592,35 @@ pub fn deactivate_warehouse_impl(
         return Err(format!("此倉仍被未結案單據引用：{}", po_num));
     }
 
+    // W-03 Extension: Cannot deactivate if referenced by draft inventory adjustments
+    let has_adj_table = match conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='inventory_adjustments'",
+        [],
+        |_| Ok(true),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    if has_adj_table {
+        let pending_adj: Option<String> = match conn.query_row(
+            "SELECT adjustment_number FROM inventory_adjustments 
+             WHERE tenant_id = ?1 AND warehouse_id = ?2 AND status = 'draft' 
+             ORDER BY created_at ASC LIMIT 1",
+            params![tenant_id, trimmed_id],
+            |r| r.get(0),
+        ) {
+            Ok(adj_num) => Some(adj_num),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.to_string()),
+        };
+
+        if let Some(adj_num) = pending_adj {
+            return Err(format!("此倉仍被未結案單據引用：{}", adj_num));
+        }
+    }
+
     conn.execute(
         "UPDATE warehouses SET is_active = 0 WHERE id = ?1 AND tenant_id = ?2",
         params![trimmed_id, tenant_id],

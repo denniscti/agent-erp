@@ -206,47 +206,7 @@ pub fn resolve_active_user_id(conn: &rusqlite::Connection) -> Result<String, Str
     resolve_active_user_id_from_store(conn, &token_store)
 }
 
-struct UnitSnapshot {
-    unit_name: String,
-    variant_name: String,
-    sku: Option<String>,
-    product_name: String,
-    is_purchasable: bool,
-}
-
-fn resolve_unit_snapshot(
-    conn: &rusqlite::Connection,
-    tenant_id: &str,
-    unit_id: &str,
-) -> Result<UnitSnapshot, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT 
-                u.id, u.unit_name,
-                v.name, v.sku,
-                p.name, p.is_purchasable
-             FROM product_units u
-             JOIN product_variants v ON u.variant_id = v.id
-             JOIN products p ON v.product_id = p.id
-             WHERE u.id = ?1 AND p.tenant_id = ?2",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let res = stmt.query_row(params![unit_id, tenant_id], |row| {
-        Ok(UnitSnapshot {
-            unit_name: row.get(1)?,
-            variant_name: row.get(2)?,
-            sku: row.get(3)?,
-            product_name: row.get(4)?,
-            is_purchasable: row.get::<_, i64>(5)? == 1,
-        })
-    });
-
-    match res {
-        Ok(snapshot) => Ok(snapshot),
-        Err(_) => Err("找不到指定的商品單位 (unit_id) 或不屬於目前租戶".to_string()),
-    }
-}
+pub use crate::products::{resolve_unit_snapshot, UnitSnapshot};
 
 fn resolve_vendor_snapshot(
     conn: &rusqlite::Connection,

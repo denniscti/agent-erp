@@ -7,6 +7,7 @@ use tauri::Manager;
 
 pub mod auth;
 pub mod departments;
+pub mod inventory_adjustments;
 pub mod llm;
 pub mod llm_traces;
 pub mod partners;
@@ -167,6 +168,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     warehouses::run_warehouses_migration_and_backfill(&conn)
         .map_err(|e| format!("Failed to run warehouses migration and backfill: {}", e))?;
+
+    inventory_adjustments::create_inventory_adjustments_tables(&conn)
+        .map_err(|e| format!("Failed to create inventory adjustments tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -451,6 +455,15 @@ pub fn run() {
             warehouses::deactivate_warehouse,
             warehouses::reactivate_warehouse,
             warehouses::list_warehouses,
+            inventory_adjustments::create_inventory_adjustment,
+            inventory_adjustments::update_inventory_adjustment_header,
+            inventory_adjustments::add_inventory_adjustment_line,
+            inventory_adjustments::update_inventory_adjustment_line,
+            inventory_adjustments::remove_inventory_adjustment_line,
+            inventory_adjustments::post_inventory_adjustment,
+            inventory_adjustments::cancel_inventory_adjustment,
+            inventory_adjustments::get_inventory_adjustment,
+            inventory_adjustments::list_inventory_adjustments,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,

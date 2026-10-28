@@ -23,6 +23,7 @@
     "test:cards": "node --test tests/settings-entity-card.test.js",
     "test:llm": "node ./scripts/test-nvidia-api.mjs",
     "seed:data": "node ./scripts/seed-test-data.mjs",
+    "seed:inventory": "node ./scripts/seed-inventory-data.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
