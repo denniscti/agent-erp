@@ -621,6 +621,35 @@ pub fn deactivate_warehouse_impl(
         }
     }
 
+    // W-03 Extension: Cannot deactivate if referenced by draft/counting stocktakes
+    let has_stk_table = match conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stocktakes'",
+        [],
+        |_| Ok(true),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    if has_stk_table {
+        let pending_stk: Option<String> = match conn.query_row(
+            "SELECT stocktake_number FROM stocktakes 
+             WHERE tenant_id = ?1 AND warehouse_id = ?2 AND status IN ('draft', 'counting') 
+             ORDER BY created_at ASC LIMIT 1",
+            params![tenant_id, trimmed_id],
+            |r| r.get(0),
+        ) {
+            Ok(stk_num) => Some(stk_num),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.to_string()),
+        };
+
+        if let Some(stk_num) = pending_stk {
+            return Err(format!("此倉仍被未結案單據引用：{}", stk_num));
+        }
+    }
+
     conn.execute(
         "UPDATE warehouses SET is_active = 0 WHERE id = ?1 AND tenant_id = ?2",
         params![trimmed_id, tenant_id],

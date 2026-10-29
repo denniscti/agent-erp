@@ -421,6 +421,41 @@ function formatMockInventoryAdjustmentDetail(adjustment) {
   };
 }
 
+let mockStocktakes = loadStorage('agent_erp_mock_stocktakes', []);
+if (!mockStocktakes || !Array.isArray(mockStocktakes)) {
+  mockStocktakes = [];
+  saveStorage('agent_erp_mock_stocktakes', mockStocktakes);
+}
+
+let mockStocktakeLines = loadStorage('agent_erp_mock_stocktake_lines', []);
+if (!mockStocktakeLines || !Array.isArray(mockStocktakeLines)) {
+  mockStocktakeLines = [];
+  saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+}
+
+function nextMockStkNumber(tenantId) {
+  let maxSeq = 0;
+  for (const stk of mockStocktakes) {
+    if ((stk.tenant_id || 'tnt_mock_1') === tenantId && stk.stocktake_number && stk.stocktake_number.startsWith('STK-')) {
+      const num = parseInt(stk.stocktake_number.slice(4), 10);
+      if (!isNaN(num) && num > maxSeq) {
+        maxSeq = num;
+      }
+    }
+  }
+  return `STK-${String(maxSeq + 1).padStart(5, '0')}`;
+}
+
+function formatMockStocktakeDetail(stocktake) {
+  const lines = mockStocktakeLines
+    .filter(l => l.stocktake_id === stocktake.id)
+    .sort((a, b) => a.line_no - b.line_no);
+  return {
+    stocktake: { ...stocktake },
+    lines: lines.map(l => ({ ...l }))
+  };
+}
+
 function validateMockAdjReasonAndNote(reasonCode, note) {
   const trimmedReason = String(reasonCode || '').trim();
   const allowed = ['damage', 'loss', 'found', 'opening_correction', 'other'];
@@ -2764,6 +2799,13 @@ export async function invoke(cmd, args = {}) {
       if (pendingAdj) {
         throw new Error(`此倉仍被未結案單據引用：${pendingAdj.adjustment_number}`);
       }
+      // Check pending STKs (W-03 Extension)
+      const pendingStk = mockStocktakes.find(
+        stk => (stk.tenant_id || 'tnt_mock_1') === targetTenantId && stk.warehouse_id === trimmedId && (stk.status === 'draft' || stk.status === 'counting')
+      );
+      if (pendingStk) {
+        throw new Error(`此倉仍被未結案單據引用：${pendingStk.stocktake_number}`);
+      }
       wh.is_active = false;
       saveStorage('agent_erp_mock_warehouses', mockWarehouses);
       return wh;
@@ -3188,6 +3230,558 @@ export async function invoke(cmd, args = {}) {
       }
       saveStorage('agent_erp_mock_inventory_adjustments', mockInventoryAdjustments);
       saveStorage('agent_erp_mock_inventory_adjustment_lines', mockInventoryAdjustmentLines);
+      return true;
+    }
+
+    case 'create_stocktake': {
+      const {
+        warehouse_id, warehouseId,
+        note,
+        task_id, taskId,
+        initial_unit_ids, initialUnitIds
+      } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const activeUid = mockSessions && mockSessions.user_id ? mockSessions.user_id : 'usr_mock_admin';
+      if (!activeUid || !activeUid.trim()) {
+        throw new Error('無法解析有效使用者 session，操作被拒絕');
+      }
+
+      const targetWhId = String(warehouse_id || warehouseId || '').trim();
+      validateMockWarehouseActive(targetTenantId, targetWhId);
+
+      const now = Math.floor(Date.now() / 1000);
+      const stkId = nextMockUid('stk');
+      const stkNumber = nextMockStkNumber(targetTenantId);
+
+      const unitList = initial_unit_ids || initialUnitIds || [];
+      const seenUnits = new Set();
+      const createdLines = [];
+
+      for (let idx = 0; idx < unitList.length; idx++) {
+        const uId = String(unitList[idx] || '').trim();
+        if (!uId) {
+          throw new Error('找不到指定的商品單位 (unit_id) 或不屬於目前租戶');
+        }
+        if (seenUnits.has(uId)) {
+          throw new Error('此品項已在盤點單中');
+        }
+        seenUnits.add(uId);
+
+        const { unit, variant, product } = resolveMockUnitSnapshot(targetTenantId, uId);
+        const lineId = nextMockUid('stkl');
+        const newLine = {
+          id: lineId,
+          stocktake_id: stkId,
+          line_no: idx + 1,
+          unit_id: uId,
+          product_name_snapshot: product.name,
+          variant_name_snapshot: variant.name,
+          sku_snapshot: variant.sku || null,
+          unit_name_snapshot: unit.name,
+          system_quantity: null,
+          system_quantity_at: null,
+          counted_quantity: null,
+          created_at: now
+        };
+        createdLines.push(newLine);
+      }
+
+      const newStk = {
+        id: stkId,
+        tenant_id: targetTenantId,
+        stocktake_number: stkNumber,
+        warehouse_id: targetWhId,
+        status: 'draft',
+        note: note ? String(note).trim() : null,
+        created_by: activeUid,
+        created_at: now,
+        counting_started_at: null,
+        posted_at: null,
+        cancelled_at: null,
+        task_id: task_id || taskId || null
+      };
+
+      mockStocktakes.push(newStk);
+      for (const line of createdLines) {
+        mockStocktakeLines.push(line);
+      }
+
+      saveStorage('agent_erp_mock_stocktakes', mockStocktakes);
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+
+      return formatMockStocktakeDetail(newStk);
+    }
+
+    case 'update_stocktake_header': {
+      const {
+        stocktake_id, stocktakeId,
+        warehouse_id, warehouseId,
+        note
+      } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      if (stk.status !== 'draft') {
+        throw new Error(`盤點單狀態為 ${stk.status}，僅草稿狀態可修改表頭`);
+      }
+
+      const targetWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      if (targetWhId !== undefined) {
+        const trimmedWh = String(targetWhId).trim();
+        validateMockWarehouseActive(targetTenantId, trimmedWh);
+        stk.warehouse_id = trimmedWh;
+      }
+      if (note !== undefined) {
+        stk.note = note ? String(note).trim() : null;
+      }
+
+      saveStorage('agent_erp_mock_stocktakes', mockStocktakes);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'add_stocktake_lines': {
+      const {
+        stocktake_id, stocktakeId,
+        unit_ids, unitIds
+      } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      if (stk.status !== 'draft') {
+        throw new Error(`盤點單狀態為 ${stk.status}，僅草稿狀態可新增品項`);
+      }
+
+      const existingUnits = new Set(
+        mockStocktakeLines.filter(l => l.stocktake_id === targetStkId).map(l => l.unit_id)
+      );
+      let maxLineNo = mockStocktakeLines
+        .filter(l => l.stocktake_id === targetStkId)
+        .reduce((max, l) => Math.max(max, l.line_no || 0), 0);
+
+      const unitList = unit_ids || unitIds || [];
+      const now = Math.floor(Date.now() / 1000);
+
+      for (const rawUid of unitList) {
+        const uId = String(rawUid || '').trim();
+        if (!uId) {
+          throw new Error('找不到指定的商品單位 (unit_id) 或不屬於目前租戶');
+        }
+        if (existingUnits.has(uId)) {
+          throw new Error('此品項已在盤點單中');
+        }
+        existingUnits.add(uId);
+
+        const { unit, variant, product } = resolveMockUnitSnapshot(targetTenantId, uId);
+        maxLineNo++;
+        const lineId = nextMockUid('stkl');
+        mockStocktakeLines.push({
+          id: lineId,
+          stocktake_id: targetStkId,
+          line_no: maxLineNo,
+          unit_id: uId,
+          product_name_snapshot: product.name,
+          variant_name_snapshot: variant.name,
+          sku_snapshot: variant.sku || null,
+          unit_name_snapshot: unit.name,
+          system_quantity: null,
+          system_quantity_at: null,
+          counted_quantity: null,
+          created_at: now
+        });
+      }
+
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'add_stocktake_lines_from_stock': {
+      const { stocktake_id, stocktakeId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      if (stk.status !== 'draft') {
+        throw new Error(`盤點單狀態為 ${stk.status}，僅草稿狀態可新增品項`);
+      }
+
+      const balances = {};
+      for (const m of mockInventoryMovements) {
+        if ((m.tenant_id || 'tnt_mock_1') === targetTenantId && m.warehouse_id === stk.warehouse_id) {
+          balances[m.unit_id] = (balances[m.unit_id] || 0) + m.quantity_delta;
+        }
+      }
+
+      const existingUnits = new Set(
+        mockStocktakeLines.filter(l => l.stocktake_id === targetStkId).map(l => l.unit_id)
+      );
+      let maxLineNo = mockStocktakeLines
+        .filter(l => l.stocktake_id === targetStkId)
+        .reduce((max, l) => Math.max(max, l.line_no || 0), 0);
+
+      const now = Math.floor(Date.now() / 1000);
+      for (const [uId, bal] of Object.entries(balances)) {
+        if (Math.abs(bal) > 1e-6 && !existingUnits.has(uId)) {
+          existingUnits.add(uId);
+          const { unit, variant, product } = resolveMockUnitSnapshot(targetTenantId, uId);
+          maxLineNo++;
+          const lineId = nextMockUid('stkl');
+          mockStocktakeLines.push({
+            id: lineId,
+            stocktake_id: targetStkId,
+            line_no: maxLineNo,
+            unit_id: uId,
+            product_name_snapshot: product.name,
+            variant_name_snapshot: variant.name,
+            sku_snapshot: variant.sku || null,
+            unit_name_snapshot: unit.name,
+            system_quantity: null,
+            system_quantity_at: null,
+            counted_quantity: null,
+            created_at: now
+          });
+        }
+      }
+
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'remove_stocktake_line': {
+      const { line_id, lineId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetLineId = String(line_id || lineId || '').trim();
+      const line = mockStocktakeLines.find(l => l.id === targetLineId);
+      if (!line) {
+        throw new Error('找不到指定的盤點單明細行');
+      }
+      const stk = mockStocktakes.find(s => s.id === line.stocktake_id && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到指定的盤點單明細行');
+      }
+      if (stk.status !== 'draft' && stk.status !== 'counting') {
+        throw new Error(`盤點單狀態為 ${stk.status}，不可刪除明細`);
+      }
+
+      mockStocktakeLines = mockStocktakeLines.filter(l => l.id !== targetLineId);
+      const remaining = mockStocktakeLines
+        .filter(l => l.stocktake_id === stk.id)
+        .sort((a, b) => a.line_no - b.line_no);
+      for (let i = 0; i < remaining.length; i++) {
+        remaining[i].line_no = i + 1;
+      }
+
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'start_stocktake_counting': {
+      const { stocktake_id, stocktakeId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      if (stk.status !== 'draft') {
+        throw new Error(`無效的狀態轉換：不可從 ${stk.status} 轉換至 counting`);
+      }
+
+      validateMockWarehouseActive(targetTenantId, stk.warehouse_id);
+
+      const lines = mockStocktakeLines.filter(l => l.stocktake_id === targetStkId);
+      if (lines.length === 0) {
+        throw new Error('盤點單沒有任何品項');
+      }
+
+      // S-05: Check mutual exclusion in the same warehouse
+      for (const line of lines) {
+        const conflictStk = mockStocktakes.find(s =>
+          (s.tenant_id || 'tnt_mock_1') === targetTenantId &&
+          s.warehouse_id === stk.warehouse_id &&
+          s.status === 'counting' &&
+          s.id !== stk.id &&
+          mockStocktakeLines.some(otherL => otherL.stocktake_id === s.id && otherL.unit_id === line.unit_id)
+        );
+
+        if (conflictStk) {
+          throw new Error(`〔${line.product_name_snapshot}／${line.variant_name_snapshot}／${line.unit_name_snapshot}〕已在盤點單 ${conflictStk.stocktake_number} 盤點中`);
+        }
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      stk.status = 'counting';
+      stk.counting_started_at = now;
+
+      for (const line of lines) {
+        let bal = 0;
+        for (const m of mockInventoryMovements) {
+          if ((m.tenant_id || 'tnt_mock_1') === targetTenantId && m.warehouse_id === stk.warehouse_id && m.unit_id === line.unit_id) {
+            bal += m.quantity_delta;
+          }
+        }
+        line.system_quantity = bal;
+        line.system_quantity_at = now;
+        line.counted_quantity = null;
+      }
+
+      saveStorage('agent_erp_mock_stocktakes', mockStocktakes);
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'set_stocktake_counted_quantity': {
+      const { line_id, lineId, counted_quantity, countedQuantity } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetLineId = String(line_id || lineId || '').trim();
+      const line = mockStocktakeLines.find(l => l.id === targetLineId);
+      if (!line) {
+        throw new Error('找不到指定的盤點單明細行');
+      }
+      const stk = mockStocktakes.find(s => s.id === line.stocktake_id && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到指定的盤點單明細行');
+      }
+      if (stk.status !== 'counting') {
+        throw new Error('只有盤點中 (counting) 狀態可輸入實盤量');
+      }
+
+      const rawQty = counted_quantity !== undefined ? counted_quantity : countedQuantity;
+      const qty = Number(rawQty);
+      if (isNaN(qty) || qty < 0) {
+        throw new Error('實盤量不可為負');
+      }
+
+      line.counted_quantity = qty;
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'refresh_stocktake_system_quantity': {
+      const { stocktake_id, stocktakeId, line_ids, lineIds } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      if (stk.status !== 'counting') {
+        throw new Error('只有 counting 狀態可以重新取得系統量');
+      }
+
+      const targetLineIds = line_ids || lineIds || [];
+      const now = Math.floor(Date.now() / 1000);
+
+      for (const lid of targetLineIds) {
+        const line = mockStocktakeLines.find(l => l.id === lid && l.stocktake_id === targetStkId);
+        if (!line) {
+          throw new Error('找不到指定的盤點單明細行');
+        }
+
+        let bal = 0;
+        for (const m of mockInventoryMovements) {
+          if ((m.tenant_id || 'tnt_mock_1') === targetTenantId && m.warehouse_id === stk.warehouse_id && m.unit_id === line.unit_id) {
+            bal += m.quantity_delta;
+          }
+        }
+        line.system_quantity = bal;
+        line.system_quantity_at = now;
+        line.counted_quantity = null; // S-08: clear counted quantity
+      }
+
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'post_stocktake': {
+      const { stocktake_id, stocktakeId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const activeUid = mockSessions && mockSessions.user_id ? mockSessions.user_id : 'usr_mock_admin';
+      if (!activeUid || !activeUid.trim()) {
+        throw new Error('無法解析有效使用者 session，操作被拒絕');
+      }
+
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      if (stk.status !== 'counting') {
+        throw new Error(`無效的狀態轉換：不可從 ${stk.status} 轉換至 posted`);
+      }
+
+      validateMockWarehouseActive(targetTenantId, stk.warehouse_id);
+
+      const lines = mockStocktakeLines.filter(l => l.stocktake_id === targetStkId);
+      if (lines.length === 0) {
+        throw new Error('盤點單沒有任何品項');
+      }
+
+      const missingCount = lines.filter(l => l.counted_quantity === null || l.counted_quantity === undefined).length;
+      if (missingCount > 0) {
+        throw new Error(`尚有 ${missingCount} 項未輸入實盤量`);
+      }
+
+      // S-07: check movement after system_quantity_at
+      const affectedItems = [];
+      for (const line of lines) {
+        const snapAt = line.system_quantity_at || 0;
+        const hasNew = mockInventoryMovements.some(
+          m => (m.tenant_id || 'tnt_mock_1') === targetTenantId &&
+               m.warehouse_id === stk.warehouse_id &&
+               m.unit_id === line.unit_id &&
+               (m.created_at || 0) > snapAt
+        );
+        if (hasNew) {
+          affectedItems.push(`〔${line.product_name_snapshot}／${line.variant_name_snapshot}／${line.unit_name_snapshot}〕`);
+        }
+      }
+
+      if (affectedItems.length > 0) {
+        throw new Error(`以下品項在盤點期間有異動：${affectedItems.join('、')}，請重新取得系統量並重新確認實盤`);
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      stk.status = 'posted';
+      stk.posted_at = now;
+
+      for (const line of lines) {
+        const delta = (line.counted_quantity || 0) - (line.system_quantity || 0);
+        if (Math.abs(delta) > 1e-6) {
+          const imId = nextMockUid('im');
+          mockInventoryMovements.push({
+            id: imId,
+            tenant_id: targetTenantId,
+            unit_id: line.unit_id,
+            warehouse_id: stk.warehouse_id,
+            quantity_delta: delta,
+            unit_cost: null,
+            reason: 'stocktake',
+            reference_type: 'stocktake',
+            reference_id: stk.id,
+            created_by: activeUid,
+            created_at: now
+          });
+        }
+      }
+
+      saveStorage('agent_erp_mock_inventory_movements', mockInventoryMovements);
+      saveStorage('agent_erp_mock_stocktakes', mockStocktakes);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'cancel_stocktake': {
+      const { stocktake_id, stocktakeId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      if (stk.status !== 'draft' && stk.status !== 'counting') {
+        throw new Error(`無效的狀態轉換：不可從 ${stk.status} 轉換至 cancelled`);
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      stk.status = 'cancelled';
+      stk.cancelled_at = now;
+
+      saveStorage('agent_erp_mock_stocktakes', mockStocktakes);
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'get_stocktake': {
+      const { stocktake_id, stocktakeId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const targetStkId = String(stocktake_id || stocktakeId || '').trim();
+      const stk = mockStocktakes.find(s => s.id === targetStkId && (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!stk) {
+        throw new Error('找不到盤點單或不屬於目前租戶');
+      }
+      return formatMockStocktakeDetail(stk);
+    }
+
+    case 'list_stocktakes': {
+      const { status, warehouse_id, warehouseId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const targetWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+      let list = mockStocktakes.filter(s => (s.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (status && String(status).trim()) {
+        list = list.filter(s => s.status === String(status).trim());
+      }
+      if (targetWhId && String(targetWhId).trim()) {
+        list = list.filter(s => s.warehouse_id === String(targetWhId).trim());
+      }
+      return list.sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+    }
+
+    case 'reset_mock_stocktakes': {
+      const { tenant_id, tenantId } = args || {};
+      const targetTid = tenant_id || tenantId;
+      if (targetTid) {
+        const removedStkIds = new Set(
+          mockStocktakes.filter(s => (s.tenant_id || 'tnt_mock_1') === targetTid).map(s => s.id)
+        );
+        mockStocktakes = mockStocktakes.filter(s => (s.tenant_id || 'tnt_mock_1') !== targetTid);
+        mockStocktakeLines = mockStocktakeLines.filter(l => !removedStkIds.has(l.stocktake_id));
+      } else {
+        mockStocktakes = [];
+        mockStocktakeLines = [];
+      }
+      saveStorage('agent_erp_mock_stocktakes', mockStocktakes);
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
+      return true;
+    }
+
+    case 'set_mock_stocktake_line_snap_at': {
+      const { line_id, lineId, system_quantity_at, systemQuantityAt } = args || {};
+      const targetLid = line_id || lineId;
+      const targetSnap = system_quantity_at !== undefined ? system_quantity_at : systemQuantityAt;
+      const l = mockStocktakeLines.find(x => x.id === targetLid);
+      if (l) {
+        l.system_quantity_at = targetSnap;
+      }
+      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
       return true;
     }
 

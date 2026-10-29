@@ -13,6 +13,7 @@ pub mod llm_traces;
 pub mod partners;
 pub mod products;
 pub mod purchase_orders;
+pub mod stocktakes;
 pub mod tasks;
 pub mod tps2_types;
 pub mod warehouses;
@@ -171,6 +172,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     inventory_adjustments::create_inventory_adjustments_tables(&conn)
         .map_err(|e| format!("Failed to create inventory adjustments tables: {}", e))?;
+
+    stocktakes::create_stocktakes_tables(&conn)
+        .map_err(|e| format!("Failed to create stocktakes tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -464,6 +468,18 @@ pub fn run() {
             inventory_adjustments::cancel_inventory_adjustment,
             inventory_adjustments::get_inventory_adjustment,
             inventory_adjustments::list_inventory_adjustments,
+            stocktakes::create_stocktake,
+            stocktakes::update_stocktake_header,
+            stocktakes::add_stocktake_lines,
+            stocktakes::add_stocktake_lines_from_stock,
+            stocktakes::remove_stocktake_line,
+            stocktakes::start_stocktake_counting,
+            stocktakes::set_stocktake_counted_quantity,
+            stocktakes::refresh_stocktake_system_quantity,
+            stocktakes::post_stocktake,
+            stocktakes::cancel_stocktake,
+            stocktakes::get_stocktake,
+            stocktakes::list_stocktakes,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
