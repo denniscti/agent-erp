@@ -58,6 +58,8 @@
   import OnboardingScreen from './lib/components/auth/OnboardingScreen.svelte';
   import SettingsEntityCard from './lib/components/SettingsEntityCard.svelte';
   import PurchaseOrdersWorkspace from './lib/components/PurchaseOrdersWorkspace.svelte';
+  import WarehouseWorkspace from './lib/components/WarehouseWorkspace.svelte';
+  import CreateWarehouseModal from './lib/components/CreateWarehouseModal.svelte';
 
   let activeTab = $derived(appState.activeWorkspace);
   let isNotificationOpen = $state(false);
@@ -993,6 +995,7 @@
     if (ws === 'agent') navigate('/app/agent');
     else if (ws === 'settings') navigate('/app/settings');
     else if (ws === 'purchase-orders') navigate('/app/purchase-orders');
+    else if (ws === 'warehouses' || ws === 'warehouse') navigate('/app/warehouses');
     else if (ws === 'inventory') navigate('/app/inventory');
     else navigate(`/app/${ws}`);
   }
@@ -1034,17 +1037,32 @@
               </svg>
             </button>
 
-            <!-- 採購單 (Issue #165) 沿用原「銷售與訂單」按鈕位置 -->
+            <!-- 採購單 (Issue #165) -->
             <button 
-              class="rail-nav-btn {activeTab === 'purchase-orders' || activeTab === 'inventory' ? 'active' : ''}" 
+              class="rail-nav-btn {activeTab === 'purchase-orders' ? 'active' : ''}" 
               onclick={() => selectWorkspace('purchase-orders')}
               title="採購單"
               aria-label="採購單"
+              id="rail-nav-purchase-orders"
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"></path>
                 <line x1="3" y1="6" x2="21" y2="6"></line>
                 <path d="M16 10a4 4 0 0 1-8 0"></path>
+              </svg>
+            </button>
+
+            <!-- 倉庫管理 (Issue #182) -->
+            <button 
+              class="rail-nav-btn {activeTab === 'warehouses' || activeTab === 'inventory' ? 'active' : ''}" 
+              onclick={() => selectWorkspace('warehouses')}
+              title="倉庫管理"
+              aria-label="倉庫管理"
+              id="rail-nav-warehouses"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                <polyline points="9 22 9 12 15 12 15 22"></polyline>
               </svg>
             </button>
 
@@ -2825,8 +2843,11 @@
                 </SettingsEntityCard>
               </div>
             </div>
-          {:else if activeTab === 'purchase-orders' || activeTab === 'inventory'}
-            <!-- Purchase Orders & Inventory Workspace View (Issue #165) -->
+          {:else if activeTab === 'warehouses' || activeTab === 'inventory'}
+            <!-- Warehouse Management Workspace View (Issue #182) -->
+            <WarehouseWorkspace />
+          {:else if activeTab === 'purchase-orders'}
+            <!-- Purchase Orders Workspace View (Issue #165) -->
             <PurchaseOrdersWorkspace />
           {:else}
             <!-- AI Chat Conversation Primary View -->
@@ -2849,6 +2870,9 @@
         <span>Provider: NVIDIA NIM</span>
       </div>
     </footer>
+
+    <!-- Global Create Warehouse Modal (M12 Single Entry) -->
+    <CreateWarehouseModal />
   </div>
 {/if}
 

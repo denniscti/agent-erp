@@ -18,7 +18,12 @@
     confirmPurchaseOrderReceivedAction,
     cancelPurchaseOrderAction,
     recordOpeningInventoryBalanceAction,
-    fetchWarehouses
+    fetchWarehouses,
+    openCreateWarehouseModal,
+    getWarehouseName,
+    formatMovementReason,
+    formatTime,
+    formatCurrency
   } from '../store.svelte.js';
   import { invoke } from '../tauri.js';
 
@@ -68,12 +73,6 @@
     (appState.warehouses || []).find(w => w.is_default && w.is_active) || activeWarehouses[0] || null
   );
 
-  function getWarehouseName(whId) {
-    if (!whId) return '主倉 (預設)';
-    const wh = (appState.warehouses || []).find(w => w.id === whId);
-    return wh ? `${wh.name} (${wh.code})` : whId;
-  }
-
   // Modal 4: In-App Confirmation Modal (Replaces native window.confirm for WebView compatibility)
   let isConfirmModalOpen = $state(false);
   let confirmModalTitle = $state('操作確認');
@@ -115,6 +114,19 @@
   onMount(async () => {
     await reloadData();
     await loadAuxiliaryData();
+    if (appState.selectedPurchaseOrderId) {
+      const targetId = appState.selectedPurchaseOrderId;
+      appState.selectedPurchaseOrderId = null;
+      await handleSelectOrder(targetId);
+    }
+  });
+
+  $effect(() => {
+    if (appState.selectedPurchaseOrderId && appState.selectedPurchaseOrderId !== selectedOrderId) {
+      const targetId = appState.selectedPurchaseOrderId;
+      appState.selectedPurchaseOrderId = null;
+      handleSelectOrder(targetId);
+    }
   });
 
   async function reloadData() {
@@ -225,7 +237,8 @@
         const o = appState.currentPurchaseOrderDetail.order;
         editExpectedDate = o.expected_date ? new Date(o.expected_date * 1000).toISOString().slice(0, 10) : '';
         editNote = o.note || '';
-        editWarehouseId = o.warehouse_id || defaultWarehouse?.id || '';
+        const isActiveWh = activeWarehouses.some(w => w.id === o.warehouse_id);
+        editWarehouseId = (isActiveWh ? o.warehouse_id : null) || defaultWarehouse?.id || (activeWarehouses[0]?.id || '');
       }
     } catch (err) {
       orderDetailError = err.message || '無法載入採購單明細';
@@ -245,6 +258,13 @@
   // --- Modal Openers & Resets ---
   function openCreateModal() {
     actionError = '';
+    const totalWhCount = (appState.warehouses || []).length;
+    if (totalWhCount === 0) {
+      openCreateWarehouseModal(() => {
+        openCreateModal();
+      });
+      return;
+    }
     createVendorPartnerId = availableVendors.length > 0 ? availableVendors[0].id : '';
     createCurrency = 'TWD';
     createExpectedDate = '';
@@ -262,6 +282,13 @@
 
   function openOpeningBalanceModal() {
     actionError = '';
+    const totalWhCount = (appState.warehouses || []).length;
+    if (totalWhCount === 0) {
+      openCreateWarehouseModal(() => {
+        openOpeningBalanceModal();
+      });
+      return;
+    }
     openingUnitId = availableUnits.length > 0 ? availableUnits[0].unit_id : '';
     openingQuantity = 1;
     openingUnitCost = 0;
@@ -387,10 +414,16 @@
     actionLoading = true;
     try {
       const expTimestamp = editExpectedDate ? Math.floor(new Date(editExpectedDate).getTime() / 1000) : null;
+      let targetWarehouseId = editWarehouseId;
+      if (activeWarehouses.length === 1) {
+        targetWarehouseId = activeWarehouses[0].id;
+      } else if (!activeWarehouses.some(w => w.id === targetWarehouseId)) {
+        targetWarehouseId = defaultWarehouse?.id || (activeWarehouses[0]?.id || null);
+      }
       await updatePurchaseOrderHeaderAction(orderId, {
         expected_date: expTimestamp,
         note: editNote,
-        warehouse_id: editWarehouseId || null
+        warehouse_id: targetWarehouseId || null
       });
       isEditingHeader = false;
     } catch (err) {
@@ -647,23 +680,6 @@
     }
   }
 
-  function formatTime(timestamp) {
-    if (!timestamp) return '-';
-    const date = new Date(timestamp * 1000);
-    return date.toLocaleString('zh-TW', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  }
-
-  function formatCurrency(amount) {
-    const val = Number(amount || 0);
-    return `NT$ ${val.toLocaleString('zh-TW', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
-  }
-
   function getStatusBadge(status) {
     switch (status) {
       case 'draft':
@@ -677,12 +693,6 @@
       default:
         return { label: status || '未知', class: 'badge-slate' };
     }
-  }
-
-  function formatMovementReason(reason) {
-    if (reason === 'opening_balance') return '期初開帳';
-    if (reason === 'purchase_receipt') return '採購單入庫';
-    return reason;
   }
 
   // Calculate cumulative inventory history for breakdown view
@@ -903,6 +913,13 @@
                   >
                     取消採購單
                   </button>
+                  <button
+                    class="btn btn-sm"
+                    onclick={() => isEditingHeader = !isEditingHeader}
+                    id="btn-edit-header"
+                  >
+                    {isEditingHeader ? '取消編輯' : '編輯表頭'}
+                  </button>
                 {:else if order.status === 'received'}
                   <span class="badge badge-emerald">已全數到貨結案</span>
                 {:else if order.status === 'cancelled'}
@@ -931,14 +948,16 @@
                     class="form-input"
                   />
                 </div>
-                <div class="form-group flex-1">
-                  <label for="edit-warehouse">進貨倉庫</label>
-                  <select id="edit-warehouse" bind:value={editWarehouseId} class="form-select">
-                    {#each activeWarehouses as wh}
-                      <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
-                    {/each}
-                  </select>
-                </div>
+                {#if activeWarehouses.length > 1}
+                  <div class="form-group flex-1">
+                    <label for="edit-warehouse">進貨倉庫</label>
+                    <select id="edit-warehouse" bind:value={editWarehouseId} class="form-select">
+                      {#each activeWarehouses as wh}
+                        <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
+                      {/each}
+                    </select>
+                  </div>
+                {/if}
               </div>
               <div class="form-group" style="margin-top: 8px;">
                 <label for="edit-note">單據備註</label>
@@ -1606,14 +1625,16 @@
             {/each}
           </select>
         </div>
-        <div class="form-group">
-          <label for="create-po-warehouse">進貨倉庫 *</label>
-          <select id="create-po-warehouse" bind:value={createWarehouseId} class="form-select">
-            {#each activeWarehouses as wh}
-              <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
-            {/each}
-          </select>
-        </div>
+        {#if activeWarehouses.length > 1}
+          <div class="form-group">
+            <label for="create-po-warehouse">進貨倉庫 *</label>
+            <select id="create-po-warehouse" bind:value={createWarehouseId} class="form-select">
+              {#each activeWarehouses as wh}
+                <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
+              {/each}
+            </select>
+          </div>
+        {/if}
         <div class="form-row">
           <div class="form-group flex-1">
             <label for="create-po-currency">幣別</label>

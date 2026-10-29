@@ -85,6 +85,11 @@ export const appState = $state({
     }
   },
 
+  // Warehouse master modal state (M12 single warehouse creation entry)
+  isCreateWarehouseModalOpen: false,
+  /** @type {((wh?: any) => (Promise<any> | void)) | null} */
+  createWarehouseSuccessCallback: null,
+
   // Chat panel state
   /** @type {Array<{ role: string, content: string }>} */
   chatMessages: [
@@ -157,6 +162,8 @@ export const appState = $state({
   purchaseOrders: [],
   /** @type {any | null} */
   currentPurchaseOrderDetail: null,
+  /** @type {string | null} */
+  selectedPurchaseOrderId: null,
   /** @type {any[]} */
   inventoryLevels: [],
   /** @type {any[]} */
@@ -195,7 +202,127 @@ export function getWorkspaceLabel(workspace) {
   if (workspace === 'settings') return '系統設定';
   if (workspace === 'purchase-orders') return '採購單';
   if (workspace === 'inventory') return '庫存查詢';
+  if (workspace === 'warehouses' || workspace === 'warehouse') return '倉庫管理';
   return '業務工作區';
+}
+
+/**
+ * Open create warehouse modal with optional success callback
+ * @param {((wh?: any) => (Promise<any> | void)) | null} [onSuccess=null]
+ */
+export function openCreateWarehouseModal(onSuccess = null) {
+  appState.isCreateWarehouseModalOpen = true;
+  appState.createWarehouseSuccessCallback = typeof onSuccess === 'function' ? onSuccess : null;
+}
+
+export function closeCreateWarehouseModal() {
+  appState.isCreateWarehouseModalOpen = false;
+  appState.createWarehouseSuccessCallback = null;
+}
+
+/**
+ * Check if an error corresponds to W-00 (Zero Warehouse Defense)
+ * @param {any} err
+ * @returns {boolean}
+ */
+export function isZeroWarehouseError(err) {
+  const errMsg = err instanceof Error ? err.message : String(err || '');
+  return errMsg.includes('尚未建立任何倉別') || errMsg.includes('W-00');
+}
+
+/**
+ * Handle W-00 error by opening the Create Warehouse Modal
+ * @param {any} err
+ * @param {((wh?: any) => (Promise<any> | void)) | null} [onSuccess=null]
+ * @returns {boolean}
+ */
+export function handleZeroWarehouseError(err, onSuccess = null) {
+  if (isZeroWarehouseError(err)) {
+    openCreateWarehouseModal(onSuccess);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Format inventory movement reason into unified Traditional Chinese badge label
+ * @param {string} reason
+ * @returns {string}
+ */
+export function formatMovementReason(reason) {
+  switch (reason) {
+    case 'opening_balance':
+      return '期初開帳';
+    case 'purchase_receipt':
+      return '採購單入庫';
+    case 'adjustment':
+    case 'inventory_adjustment':
+      return '庫存調整';
+    case 'stocktake':
+    case 'stocktake_discrepancy':
+      return '盤點盈虧';
+    case 'transfer_out':
+      return '調撥出庫';
+    case 'transfer_in':
+      return '調撥入庫';
+    default:
+      return reason || '-';
+  }
+}
+
+/**
+ * Format currency amount with NT$ prefix
+ * @param {number | string | null | undefined} amount
+ * @returns {string}
+ */
+export function formatCurrency(amount) {
+  if (amount === undefined || amount === null) return '-';
+  const val = Number(amount || 0);
+  return `NT$ ${val.toLocaleString('zh-TW', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+/**
+ * Format unix timestamp into standard date/time string
+ * @param {number | null | undefined} timestamp
+ * @returns {string}
+ */
+export function formatTime(timestamp) {
+  if (!timestamp) return '-';
+  const date = new Date(timestamp * 1000);
+  return date.toLocaleString('zh-TW', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+/**
+ * Get warehouse display name
+ * @param {string | null | undefined} whId
+ * @param {string} [defaultLabel='未指定倉庫']
+ * @returns {string}
+ */
+export function getWarehouseName(whId, defaultLabel = '未指定倉庫') {
+  if (!whId) return defaultLabel;
+  const wh = (appState.warehouses || []).find(w => w.id === whId);
+  return wh ? `${wh.name} (${wh.code})` : whId;
+}
+
+/**
+ * Navigate to and select a purchase order in PurchaseOrdersWorkspace
+ * @param {string} orderId
+ */
+export async function selectPurchaseOrder(orderId) {
+  if (!orderId) return;
+  appState.selectedPurchaseOrderId = orderId;
+  navigate('/app/purchase-orders');
+  try {
+    await fetchPurchaseOrderDetail(orderId);
+  } catch (e) {
+    console.error("Failed to fetch purchase order detail upon selection:", e);
+  }
 }
 
 export function formatAuditDecision(decision) {
@@ -2213,6 +2340,7 @@ export async function createPurchaseOrderAction({
     return detail;
   } catch (err) {
     console.error("Failed to create purchase order:", err);
+    handleZeroWarehouseError(err);
     throw err;
   }
 }
@@ -2402,12 +2530,17 @@ export async function submitPurchaseOrderAction(orderId) {
 
 /**
  * Confirm purchase order received (ordered -> received)
- * @param {string} orderId
+ * @param {string | { order_id?: string, orderId?: string }} orderId
  * @param {Array<{ line_id?: string, lineId?: string, received_quantity?: number, receivedQuantity?: number }>} lineReceivedQuantities
  * @returns {Promise<any>}
  */
 export async function confirmPurchaseOrderReceivedAction(orderId, lineReceivedQuantities = []) {
-  const oId = String(orderId || '').trim();
+  let rawId = orderId;
+  if (orderId && typeof orderId === 'object') {
+    const obj = /** @type {any} */ (orderId);
+    rawId = obj.order_id || obj.orderId;
+  }
+  const oId = String(rawId || '').trim();
   if (!oId) throw new Error('採購單 ID 為必填項目');
 
   try {
@@ -2494,6 +2627,7 @@ export async function recordOpeningInventoryBalanceAction({
     return movement;
   } catch (err) {
     console.error("Failed to record opening inventory balance:", err);
+    handleZeroWarehouseError(err);
     throw err;
   }
 }
@@ -2521,13 +2655,19 @@ export async function fetchWarehouses(includeInactive = true) {
 
 /**
  * Create a warehouse
- * @param {string} code
- * @param {string} name
+ * @param {string | object} codeOrObj
+ * @param {string} [maybeName]
  * @returns {Promise<any>}
  */
-export async function createWarehouseAction(code, name) {
-  const trimmedCode = (code || '').trim();
-  const trimmedName = (name || '').trim();
+export async function createWarehouseAction(codeOrObj, maybeName) {
+  let rawCode = codeOrObj;
+  let rawName = maybeName;
+  if (codeOrObj && typeof codeOrObj === 'object') {
+    rawCode = codeOrObj.code;
+    rawName = codeOrObj.name;
+  }
+  const trimmedCode = (rawCode || '').trim();
+  const trimmedName = (rawName || '').trim();
   if (!trimmedCode) throw new Error('倉庫代碼為必填項目');
   if (!trimmedName) throw new Error('倉庫名稱為必填項目');
   try {
@@ -2537,6 +2677,16 @@ export async function createWarehouseAction(code, name) {
     });
     await fetchWarehouses();
     showToast(`倉庫「${wh.name} (${wh.code})」建立成功！`);
+    if (typeof appState.createWarehouseSuccessCallback === 'function') {
+      /** @type {any} */
+      const cb = appState.createWarehouseSuccessCallback;
+      appState.createWarehouseSuccessCallback = null;
+      try {
+        await cb(wh);
+      } catch (cbErr) {
+        console.error("Callback error after warehouse creation:", cbErr);
+      }
+    }
     return wh;
   } catch (err) {
     console.error("Failed to create warehouse:", err);
