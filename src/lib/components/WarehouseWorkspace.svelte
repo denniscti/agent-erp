@@ -6,6 +6,7 @@
     showToast,
     fetchWarehouses,
     fetchInventoryLevels,
+    fetchUnitInventoryLevel,
     fetchInventoryMovements,
     fetchProducts,
     getProductDetailAction,
@@ -21,7 +22,19 @@
     getWarehouseName,
     formatMovementReason,
     formatTime,
-    formatCurrency
+    formatCurrency,
+    formatAdjustmentReason,
+    formatAdjustmentStatus,
+    fetchInventoryAdjustments,
+    fetchInventoryAdjustmentDetail,
+    selectInventoryAdjustment,
+    createInventoryAdjustmentAction,
+    updateInventoryAdjustmentHeaderAction,
+    addInventoryAdjustmentLineAction,
+    updateInventoryAdjustmentLineAction,
+    removeInventoryAdjustmentLineAction,
+    postInventoryAdjustmentAction,
+    cancelInventoryAdjustmentAction
   } from '../store.svelte.js';
 
   // Subtabs: 'inventory' | 'warehouses' | 'adjustments' | 'stocktakes' | 'transfers'
@@ -35,6 +48,36 @@
 
   // Warehouse filter for inventory query
   let selectedWarehouseId = $state('');
+
+  // Adjustments list & detail state (Issue #183)
+  let selectedAdjustmentWarehouseId = $state('');
+  let selectedAdjustmentStatusFilter = $state('');
+  let selectedAdjustmentId = $state(null);
+  let adjustmentLoading = $state(false);
+  let adjustmentError = $state('');
+  let unitStockCache = $state({}); // key: `${whId}_${unitId}` -> number
+
+  // Create Adjustment Modal state
+  let isCreateAdjustmentModalOpen = $state(false);
+  let createAdjWarehouseId = $state('');
+  let createAdjReasonCode = $state('damage');
+  let createAdjNote = $state('');
+  let createAdjLines = $state([]); // array of { unit_id, quantity_delta }
+  let newAdjLineUnitId = $state('');
+  let newAdjLineDelta = $state(1);
+  let createAdjError = $state('');
+  let isCreatingAdjustment = $state(false);
+
+  // Detail inline add line state (for draft)
+  let draftDetailNewUnitId = $state('');
+  let draftDetailNewDelta = $state(1);
+  let draftDetailLineError = $state('');
+  let isAddingDraftLine = $state(false);
+
+  // Post Confirm Modal state
+  let isPostConfirmModalOpen = $state(false);
+  let postConfirmLoading = $state(false);
+  let postConfirmError = $state('');
 
   // Inventory breakdown state
   let expandedUnitId = $state(null);
@@ -84,6 +127,26 @@
     appState.inventoryLevels.every(item => item.current_quantity === 0)
   );
 
+  let filteredAdjustments = $derived(
+    (appState.inventoryAdjustments || []).filter(a => {
+      if (selectedAdjustmentWarehouseId && a.warehouse_id !== selectedAdjustmentWarehouseId) {
+        return false;
+      }
+      if (selectedAdjustmentStatusFilter && a.status !== selectedAdjustmentStatusFilter) {
+        return false;
+      }
+      return true;
+    })
+  );
+
+  let currentAdjustment = $derived(
+    appState.currentInventoryAdjustmentDetail?.adjustment || null
+  );
+
+  let currentAdjustmentLines = $derived(
+    appState.currentInventoryAdjustmentDetail?.lines || []
+  );
+
   // Sync subtab with route
   $effect(() => {
     const route = appState.route;
@@ -93,6 +156,9 @@
       activeSubTab = 'warehouses';
     } else if (route.includes('/warehouses/adjustments')) {
       activeSubTab = 'adjustments';
+      if (!selectedAdjustmentId && (!appState.inventoryAdjustments || appState.inventoryAdjustments.length === 0)) {
+        loadAdjustments();
+      }
     } else if (route.includes('/warehouses/stocktakes')) {
       activeSubTab = 'stocktakes';
     } else if (route.includes('/warehouses/transfers')) {
@@ -108,6 +174,9 @@
   onMount(async () => {
     await reloadData();
     await loadAuxiliaryData();
+    if (activeSubTab === 'adjustments') {
+      await loadAdjustments();
+    }
   });
 
   async function reloadData() {
@@ -168,6 +237,8 @@
       navigate('/app/warehouses/master');
     } else if (tab === 'adjustments') {
       navigate('/app/warehouses/adjustments');
+      selectedAdjustmentId = null;
+      loadAdjustments();
     } else if (tab === 'stocktakes') {
       navigate('/app/warehouses/stocktakes');
     } else if (tab === 'transfers') {
@@ -246,6 +317,313 @@
   function handleNavigateToPurchaseOrder(orderId) {
     if (!orderId) return;
     selectPurchaseOrder(orderId);
+  }
+
+  // Navigate to inventory adjustment detail from inventory ledger reference
+  async function handleNavigateToAdjustment(adjId) {
+    if (!adjId) return;
+    activeSubTab = 'adjustments';
+    navigate('/app/warehouses/adjustments');
+    await handleSelectAdjustment(adjId);
+  }
+
+  // Adjustments helper methods (Issue #183)
+  function getUnitLabel(unitId) {
+    if (!unitId) return '';
+    const found = availableUnits.find(u => u.unit_id === unitId);
+    if (found) return found.label;
+    const inv = (appState.inventoryLevels || []).find(l => l.unit_id === unitId);
+    if (inv) {
+      return `${inv.product_name} (${inv.variant_name || '標準'}) - ${inv.unit_name || ''}`;
+    }
+    return unitId;
+  }
+
+  async function fetchUnitStock(warehouseId, unitId) {
+    if (!warehouseId || !unitId) return 0;
+    const key = `${warehouseId}_${unitId}`;
+    try {
+      const res = await fetchUnitInventoryLevel(warehouseId, unitId);
+      const qty = res ? (res.current_quantity || 0) : 0;
+      unitStockCache[key] = qty;
+      return qty;
+    } catch (err) {
+      console.error('Failed to fetch inventory level for unit:', unitId, err);
+      return 0;
+    }
+  }
+
+  function getCachedStock(warehouseId, unitId) {
+    if (!warehouseId || !unitId) return 0;
+    const key = `${warehouseId}_${unitId}`;
+    if (unitStockCache[key] !== undefined) {
+      return unitStockCache[key];
+    }
+    fetchUnitStock(warehouseId, unitId);
+    const match = (appState.inventoryLevels || []).find(
+      l => l.unit_id === unitId && (l.warehouse_id === warehouseId || !l.warehouse_id)
+    );
+    return match ? (match.current_quantity || 0) : 0;
+  }
+
+  async function loadAdjustments() {
+    adjustmentLoading = true;
+    adjustmentError = '';
+    try {
+      await fetchInventoryAdjustments(
+        selectedAdjustmentWarehouseId || null,
+        selectedAdjustmentStatusFilter || null
+      );
+    } catch (err) {
+      adjustmentError = err.message || '載入調整單失敗';
+    } finally {
+      adjustmentLoading = false;
+    }
+  }
+
+  async function handleSelectAdjustment(id) {
+    selectedAdjustmentId = id;
+    adjustmentLoading = true;
+    adjustmentError = '';
+    try {
+      const detail = await selectInventoryAdjustment(id);
+      if (detail && detail.adjustment && detail.lines) {
+        for (const line of detail.lines) {
+          fetchUnitStock(detail.adjustment.warehouse_id, line.unit_id);
+        }
+      }
+    } catch (err) {
+      adjustmentError = err.message || '載入調整單明細失敗';
+    } finally {
+      adjustmentLoading = false;
+    }
+  }
+
+  async function handleBackToAdjustmentsList() {
+    selectedAdjustmentId = null;
+    await selectInventoryAdjustment(null);
+    await loadAdjustments();
+  }
+
+  function handleOpenCreateAdjustment(prefill = null) {
+    createAdjError = '';
+    if (prefill) {
+      createAdjWarehouseId = prefill.warehouse_id || (defaultWarehouse ? defaultWarehouse.id : (activeWarehouses[0]?.id || ''));
+      createAdjReasonCode = prefill.reason_code || 'damage';
+      createAdjNote = prefill.note || '';
+      createAdjLines = prefill.lines ? [...prefill.lines] : [];
+      newAdjLineUnitId = prefill.unit_id || '';
+      newAdjLineDelta = prefill.delta !== undefined ? prefill.delta : 1;
+    } else {
+      createAdjWarehouseId = defaultWarehouse ? defaultWarehouse.id : (activeWarehouses[0]?.id || '');
+      createAdjReasonCode = 'damage';
+      createAdjNote = '';
+      createAdjLines = [];
+      newAdjLineUnitId = '';
+      newAdjLineDelta = 1;
+    }
+    if (createAdjWarehouseId && newAdjLineUnitId) {
+      fetchUnitStock(createAdjWarehouseId, newAdjLineUnitId);
+    }
+    if (createAdjWarehouseId && createAdjLines.length > 0) {
+      for (const line of createAdjLines) {
+        fetchUnitStock(createAdjWarehouseId, line.unit_id);
+      }
+    }
+    isCreateAdjustmentModalOpen = true;
+  }
+
+  function handleCloseCreateAdjustmentModal() {
+    isCreateAdjustmentModalOpen = false;
+    createAdjError = '';
+    createAdjLines = [];
+    newAdjLineUnitId = '';
+    newAdjLineDelta = 1;
+  }
+
+  function handleAddLineToCreateModal() {
+    createAdjError = '';
+    if (!newAdjLineUnitId) {
+      createAdjError = '請先選擇商品單位';
+      return;
+    }
+    const deltaNum = Number(newAdjLineDelta);
+    if (!deltaNum || deltaNum === 0 || !Number.isInteger(deltaNum)) {
+      createAdjError = '增減數量必須為非零整數 (A-04)';
+      return;
+    }
+    if (createAdjLines.some(l => l.unit_id === newAdjLineUnitId)) {
+      createAdjError = '同一張調整單內不能包含重複的商品單位 (A-05)';
+      return;
+    }
+
+    createAdjLines = [
+      ...createAdjLines,
+      {
+        unit_id: newAdjLineUnitId,
+        quantity_delta: deltaNum
+      }
+    ];
+
+    fetchUnitStock(createAdjWarehouseId, newAdjLineUnitId);
+    newAdjLineUnitId = '';
+    newAdjLineDelta = 1;
+  }
+
+  function handleRemoveLineFromCreateModal(index) {
+    createAdjLines = createAdjLines.filter((_, idx) => idx !== index);
+  }
+
+  async function handleSubmitCreateAdjustment() {
+    createAdjError = '';
+    if (!createAdjWarehouseId) {
+      createAdjError = '請選擇倉庫 (A-01)';
+      return;
+    }
+    if (createAdjReasonCode === 'other' && (!createAdjNote || !createAdjNote.trim())) {
+      createAdjError = '調整原因為「其他」時，備註為必填 (A-03)';
+      return;
+    }
+
+    isCreatingAdjustment = true;
+    try {
+      const adj = await createInventoryAdjustmentAction({
+        warehouse_id: createAdjWarehouseId,
+        reason_code: createAdjReasonCode,
+        note: createAdjNote?.trim() ? createAdjNote.trim() : null,
+        task_id: null,
+        initial_lines: createAdjLines.map(line => ({
+          unit_id: line.unit_id,
+          quantity_delta: line.quantity_delta
+        }))
+      });
+
+      showToast('調整單草稿建立成功', 'success');
+      handleCloseCreateAdjustmentModal();
+      await handleSelectAdjustment(adj.id);
+    } catch (err) {
+      createAdjError = err.message || '建立調整單失敗';
+    } finally {
+      isCreatingAdjustment = false;
+    }
+  }
+
+  async function handleAddLineToDraftDetail() {
+    draftDetailLineError = '';
+    if (!draftDetailNewUnitId) {
+      draftDetailLineError = '請先選擇商品單位';
+      return;
+    }
+    const deltaNum = Number(draftDetailNewDelta);
+    if (!deltaNum || deltaNum === 0 || !Number.isInteger(deltaNum)) {
+      draftDetailLineError = '增減數量必須為非零整數 (A-04)';
+      return;
+    }
+    if (currentAdjustmentLines.some(l => l.unit_id === draftDetailNewUnitId)) {
+      draftDetailLineError = '此商品單位已在明細中 (A-05)';
+      return;
+    }
+
+    isAddingDraftLine = true;
+    try {
+      await addInventoryAdjustmentLineAction(
+        currentAdjustment.id,
+        draftDetailNewUnitId,
+        deltaNum
+      );
+      fetchUnitStock(currentAdjustment.warehouse_id, draftDetailNewUnitId);
+      draftDetailNewUnitId = '';
+      draftDetailNewDelta = 1;
+      showToast('明細項目已新增', 'success');
+    } catch (err) {
+      draftDetailLineError = err.message || '新增明細失敗';
+    } finally {
+      isAddingDraftLine = false;
+    }
+  }
+
+  async function handleRemoveLineFromDraftDetail(lineId) {
+    if (!currentAdjustment || currentAdjustment.status !== 'draft') return;
+    try {
+      await removeInventoryAdjustmentLineAction(lineId);
+      showToast('明細已移除', 'info');
+    } catch (err) {
+      showToast(err.message || '移除明細失敗', 'error');
+    }
+  }
+
+  function handleOpenPostConfirmModal() {
+    postConfirmError = '';
+    isPostConfirmModalOpen = true;
+  }
+
+  function handleClosePostConfirmModal() {
+    isPostConfirmModalOpen = false;
+    postConfirmError = '';
+  }
+
+  async function handleConfirmPostAdjustment() {
+    if (!currentAdjustment) return;
+    postConfirmLoading = true;
+    postConfirmError = '';
+    try {
+      const adjWhId = currentAdjustment.warehouse_id;
+      await postInventoryAdjustmentAction(currentAdjustment.id);
+      showToast('調整單已成功過帳 (庫存已更新)', 'success');
+      handleClosePostConfirmModal();
+      unitStockCache = {};
+      await fetchInventoryLevels(selectedWarehouseId || null);
+      if (adjWhId && currentAdjustmentLines?.length) {
+        for (const line of currentAdjustmentLines) {
+          fetchUnitStock(adjWhId, line.unit_id);
+        }
+      }
+    } catch (err) {
+      postConfirmError = err.message || String(err);
+    } finally {
+      postConfirmLoading = false;
+    }
+  }
+
+  async function handleCancelAdjustment() {
+    if (!currentAdjustment || currentAdjustment.status !== 'draft') return;
+    if (!confirm(`確定要取消草稿調整單 #${currentAdjustment.adjustment_number} 嗎？`)) {
+      return;
+    }
+    try {
+      await cancelInventoryAdjustmentAction(currentAdjustment.id);
+      showToast('調整單已取消', 'info');
+    } catch (err) {
+      showToast(err.message || '取消調整單失敗', 'error');
+    }
+  }
+
+  function handleCreateReverseAdjustment() {
+    if (!currentAdjustment || currentAdjustment.status !== 'posted') return;
+    const invertedLines = currentAdjustmentLines.map(l => ({
+      unit_id: l.unit_id,
+      quantity_delta: -l.quantity_delta
+    }));
+
+    handleOpenCreateAdjustment({
+      warehouse_id: currentAdjustment.warehouse_id,
+      reason_code: currentAdjustment.reason_code,
+      note: `反向調整自 ${currentAdjustment.adjustment_number}`,
+      lines: invertedLines
+    });
+  }
+
+  function handleCreateOpeningCorrectionAdjustment(whId, unitId) {
+    closeOpeningBalanceModal();
+    activeSubTab = 'adjustments';
+    navigate('/app/warehouses/adjustments');
+    handleOpenCreateAdjustment({
+      warehouse_id: whId || (defaultWarehouse ? defaultWarehouse.id : (activeWarehouses[0]?.id || '')),
+      reason_code: 'opening_correction',
+      unit_id: unitId,
+      delta: 0,
+      note: '期初更正調整'
+    });
   }
 
   // Opening Balance Modal Handlers
@@ -513,6 +891,14 @@
           >
             + 新增倉別
           </button>
+        {:else if activeSubTab === 'adjustments' && !hasZeroWarehouses}
+          <button
+            class="btn btn-primary btn-sm"
+            onclick={() => handleOpenCreateAdjustment()}
+            id="btn-open-create-adjustment-modal"
+          >
+            + 新增調整單
+          </button>
         {/if}
       </div>
     </div>
@@ -708,6 +1094,14 @@
                                             >
                                               採購單 #{mov.reference_id.slice(-6)}
                                             </button>
+                                          {:else if mov.reference_type === 'inventory_adjustment' || mov.reason === 'adjustment' || mov.reference_id.startsWith('adj_')}
+                                            <button
+                                              class="link-po-ref link-adj-ref"
+                                              onclick={() => handleNavigateToAdjustment(mov.reference_id)}
+                                              title="點擊前往此調整單明細"
+                                            >
+                                              調整單 #{mov.reference_id.slice(-6)}
+                                            </button>
                                           {:else}
                                             <span class="badge badge-slate" style="font-family: monospace;">#{mov.reference_id.slice(-6)}</span>
                                           {/if}
@@ -882,21 +1276,371 @@
         </div>
       {/if}
 
-    <!-- SUBTABS 3, 4, 5: 調整單 / 盤點單 / 調撥單 (Placeholders) -->
+    <!-- SUBTAB 3: 庫存調整單 (Issue #183) -->
     {:else if activeSubTab === 'adjustments'}
-      <div class="empty-state-panel glass-panel">
-        <div class="empty-state-icon">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"></circle>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-          </svg>
+      {#if selectedAdjustmentId && currentAdjustment}
+        <!-- DETAIL VIEW -->
+        <div class="adjustment-detail-container">
+          <!-- Top back bar & actions -->
+          <div class="detail-header-bar flex-between" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <button
+                type="button"
+                class="btn btn-outline btn-sm"
+                id="btn-back-to-adjustments"
+                onclick={handleBackToAdjustmentsList}
+              >
+                ← 返回調整單清單
+              </button>
+              <h2 style="margin: 0; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                <span>調整單 #{currentAdjustment.adjustment_number}</span>
+                <span class="badge {currentAdjustment.status === 'posted' ? 'badge-emerald' : currentAdjustment.status === 'cancelled' ? 'badge-slate' : 'badge-amber'}">
+                  {formatAdjustmentStatus(currentAdjustment.status)}
+                </span>
+              </h2>
+            </div>
+
+            <div class="detail-actions" style="display: flex; gap: 8px;">
+              {#if currentAdjustment.status === 'draft'}
+                <button
+                  type="button"
+                  class="btn btn-primary btn-sm"
+                  id="btn-post-adjustment"
+                  onclick={handleOpenPostConfirmModal}
+                  disabled={currentAdjustmentLines.length === 0}
+                  title={currentAdjustmentLines.length === 0 ? '無明細時無法過帳 (A-07)' : '過帳調整單'}
+                >
+                  過帳調整單
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-outline btn-sm text-red"
+                  id="btn-cancel-adjustment"
+                  onclick={handleCancelAdjustment}
+                >
+                  取消調整單
+                </button>
+              {:else if currentAdjustment.status === 'posted'}
+                <button
+                  type="button"
+                  class="btn btn-outline btn-sm"
+                  id="btn-reverse-adjustment"
+                  onclick={handleCreateReverseAdjustment}
+                >
+                  ↺ 建立反向調整單
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Info cards -->
+          <div class="glass-panel" style="padding: 16px; margin-bottom: 16px;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+              <div>
+                <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">調整倉庫</div>
+                <div style="font-weight: 600;">{getWarehouseName(currentAdjustment.warehouse_id)}</div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">調整原因</div>
+                <span class="badge badge-amber">{formatAdjustmentReason(currentAdjustment.reason_code)}</span>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">備註說明</div>
+                <div>{currentAdjustment.note || '無備註'}</div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">建立時間</div>
+                <div style="font-family: monospace; font-size: 0.85rem;">{formatTime(currentAdjustment.created_at)}</div>
+              </div>
+              {#if currentAdjustment.posted_at}
+                <div>
+                  <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">過帳時間</div>
+                  <div style="font-family: monospace; font-size: 0.85rem;" class="text-emerald font-semibold">{formatTime(currentAdjustment.posted_at)}</div>
+                </div>
+              {/if}
+              {#if currentAdjustment.cancelled_at}
+                <div>
+                  <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">取消時間</div>
+                  <div style="font-family: monospace; font-size: 0.85rem;" class="text-muted">{formatTime(currentAdjustment.cancelled_at)}</div>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Lines Table Card -->
+          <div class="glass-panel" style="padding: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+              <h3 style="margin: 0; font-size: 1rem; font-weight: 600;">
+                調整單明細 ({currentAdjustmentLines.length} 筆)
+              </h3>
+              {#if currentAdjustment.status !== 'draft'}
+                <span class="badge badge-slate" style="font-size: 0.75rem;">唯讀 (已過帳/已取消)</span>
+              {/if}
+            </div>
+
+            {#if currentAdjustmentLines.length > 0}
+              <div class="table-responsive">
+                <table class="inventory-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 48px;">#</th>
+                      <th>商品單位</th>
+                      <th class="text-right">目前庫存</th>
+                      <th class="text-right">增減數量</th>
+                      <th class="text-right">調整後數量</th>
+                      {#if currentAdjustment.status === 'draft'}
+                        <th class="text-center" style="width: 80px;">操作</th>
+                      {/if}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each currentAdjustmentLines as line}
+                      {@const curStock = getCachedStock(currentAdjustment.warehouse_id, line.unit_id)}
+                      {@const afterStock = curStock + line.quantity_delta}
+                      {@const isNeg = afterStock < 0}
+                      <tr class={isNeg ? 'row-warning' : ''}>
+                        <td>{line.line_no ?? line.line_number ?? ''}</td>
+                        <td class="font-medium">{getUnitLabel(line.unit_id)}</td>
+                        <td class="text-right font-mono">{curStock}</td>
+                        <td class="text-right font-mono font-bold {line.quantity_delta > 0 ? 'text-emerald' : 'text-amber'}">
+                          {line.quantity_delta > 0 ? `+${line.quantity_delta}` : line.quantity_delta}
+                        </td>
+                        <td class="text-right font-mono {isNeg ? 'text-red font-bold' : 'text-emerald font-semibold'}">
+                          {afterStock}
+                          {#if isNeg}
+                            <span class="badge badge-red ml-1">⚠️ 負數</span>
+                          {/if}
+                        </td>
+                        {#if currentAdjustment.status === 'draft'}
+                          <td class="text-center">
+                            <button
+                              type="button"
+                              class="btn-icon-danger"
+                              id="btn-remove-line-{line.id}"
+                              onclick={() => handleRemoveLineFromDraftDetail(line.id)}
+                              title="移除此明細"
+                            >
+                              ✕
+                            </button>
+                          </td>
+                        {/if}
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {:else}
+              <div class="empty-lines-hint text-center" style="padding: 24px; color: var(--text-secondary); font-size: 0.85rem;">
+                此調整單目前沒有任何明細項目。
+              </div>
+            {/if}
+
+            <!-- Draft Inline Add Line -->
+            {#if currentAdjustment.status === 'draft'}
+              <div class="add-draft-line-box" style="margin-top: 16px; padding: 12px; background: rgba(255, 255, 255, 0.02); border: 1px dashed var(--border-color); border-radius: 6px;">
+                <div style="font-size: 0.8rem; font-weight: 600; margin-bottom: 8px; color: var(--text-secondary);">+ 新增明細項目</div>
+                {#if draftDetailLineError}
+                  <div class="alert alert-danger" style="margin-bottom: 8px; padding: 6px 10px; border-radius: 4px; font-size: 0.8rem; color: #ef4444; background: rgba(239, 68, 68, 0.1);">
+                    {draftDetailLineError}
+                  </div>
+                {/if}
+                <div style="display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;">
+                  <div style="flex: 2; min-width: 200px;">
+                    <label for="draft-detail-new-unit" style="display: block; font-size: 0.75rem; margin-bottom: 4px;">商品單位</label>
+                    <select
+                      id="draft-detail-new-unit"
+                      bind:value={draftDetailNewUnitId}
+                      class="form-select form-select-sm"
+                      onchange={(e) => {
+                        fetchUnitStock(currentAdjustment.warehouse_id, e.currentTarget.value);
+                      }}
+                    >
+                      <option value="">-- 選擇商品單位 --</option>
+                      {#each availableUnits.filter(u => !currentAdjustmentLines.some(l => l.unit_id === u.unit_id)) as unit}
+                        <option value={unit.unit_id}>{unit.label}</option>
+                      {/each}
+                    </select>
+                  </div>
+                  <div style="flex: 1; min-width: 100px;">
+                    <label for="draft-detail-new-delta" style="display: block; font-size: 0.75rem; margin-bottom: 4px;">增減量 (+/-)</label>
+                    <input
+                      type="number"
+                      id="draft-detail-new-delta"
+                      bind:value={draftDetailNewDelta}
+                      class="form-input form-input-sm text-right"
+                      placeholder="非 0 整數"
+                    />
+                  </div>
+                  <div style="flex: 2; min-width: 180px;">
+                    <span style="display: block; font-size: 0.75rem; margin-bottom: 4px; color: var(--text-secondary);">庫存預覽</span>
+                    {#if draftDetailNewUnitId}
+                      {@const cur = getCachedStock(currentAdjustment.warehouse_id, draftDetailNewUnitId)}
+                      {@const after = cur + (Number(draftDetailNewDelta) || 0)}
+                      {@const isNeg = after < 0}
+                      <div style="font-size: 0.8rem; padding: 5px 8px; background: rgba(255,255,255,0.04); border-radius: 4px; display: flex; align-items: center; gap: 6px;">
+                        <span>目前: <strong>{cur}</strong></span>
+                        <span>→</span>
+                        <span class={isNeg ? 'text-red font-bold' : 'text-emerald font-semibold'}>調整後: {after}</span>
+                        {#if isNeg}
+                          <span class="badge badge-red" style="font-size: 0.7rem;">⚠️ 負數</span>
+                        {/if}
+                      </div>
+                    {:else}
+                      <div style="font-size: 0.8rem; color: var(--text-muted); padding: 5px 8px;">選擇單位預覽</div>
+                    {/if}
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      class="btn btn-primary btn-sm"
+                      id="btn-add-draft-line"
+                      onclick={handleAddLineToDraftDetail}
+                      disabled={isAddingDraftLine}
+                    >
+                      + 加入明細
+                    </button>
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </div>
         </div>
-        <h3 class="empty-state-title">庫存調整單 (Inventory Adjustments)</h3>
-        <p class="empty-state-desc">
-          記錄庫存報損、盤盈盤虧微調、期初更正等數量異動。（此畫面將於 M12 專屬 issue 交付）
-        </p>
-        <span class="badge badge-amber" style="padding: 4px 10px; font-size: 0.8rem;">功能開發中 (M12)</span>
-      </div>
+      {:else}
+        <!-- LIST VIEW -->
+        <div class="adjustments-list-container">
+          <!-- Filter bar -->
+          <div class="filter-bar glass-panel" style="display: flex; gap: 14px; align-items: center; padding: 12px 16px; margin-bottom: 16px; flex-wrap: wrap;">
+            {#if activeWarehouses.length > 1}
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <label for="filter-adj-warehouse" style="font-size: 0.85rem; color: var(--text-secondary);">倉別：</label>
+                <select
+                  id="filter-adj-warehouse"
+                  bind:value={selectedAdjustmentWarehouseId}
+                  class="form-select form-select-sm"
+                  onchange={loadAdjustments}
+                >
+                  <option value="">全部倉庫</option>
+                  {#each activeWarehouses as wh}
+                    <option value={wh.id}>{wh.name} ({wh.code})</option>
+                  {/each}
+                </select>
+              </div>
+            {/if}
+
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <label for="filter-adj-status" style="font-size: 0.85rem; color: var(--text-secondary);">狀態：</label>
+              <select
+                id="filter-adj-status"
+                bind:value={selectedAdjustmentStatusFilter}
+                class="form-select form-select-sm"
+                onchange={loadAdjustments}
+              >
+                <option value="">全部狀態</option>
+                <option value="draft">草稿 (draft)</option>
+                <option value="posted">已過帳 (posted)</option>
+                <option value="cancelled">已取消 (cancelled)</option>
+              </select>
+            </div>
+
+            <div style="margin-left: auto;">
+              <button
+                type="button"
+                class="btn btn-outline btn-sm"
+                onclick={loadAdjustments}
+                disabled={adjustmentLoading}
+              >
+                {adjustmentLoading ? '載入中...' : '重新整理'}
+              </button>
+            </div>
+          </div>
+
+          {#if adjustmentError}
+            <div class="alert alert-danger" style="margin-bottom: 14px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.85rem;">
+              {adjustmentError}
+            </div>
+          {/if}
+
+          {#if filteredAdjustments.length === 0}
+            <div class="empty-state-panel glass-panel" style="padding: 48px 24px; text-align: center;">
+              <div class="empty-state-icon" style="margin-bottom: 12px; opacity: 0.6;">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0 1.82.33l.06.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+              </div>
+              <h3 class="empty-state-title" style="margin-bottom: 6px; font-size: 1.1rem; font-weight: 600;">尚無庫存調整單</h3>
+              <p class="empty-state-desc" style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 16px;">
+                目前條件下沒有找到任何庫存調整單。您可以點擊下方按鈕建立第一筆調整單。
+              </p>
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                onclick={() => handleOpenCreateAdjustment()}
+              >
+                + 建立調整單
+              </button>
+            </div>
+          {:else}
+            <div class="table-responsive glass-panel" style="padding: 0; overflow: hidden;">
+              <table class="inventory-table">
+                <thead>
+                  <tr>
+                    <th>單號</th>
+                    <th>倉別</th>
+                    <th>原因</th>
+                    <th class="text-right">明細筆數</th>
+                    <th>建立時間</th>
+                    <th>狀態</th>
+                    <th class="text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each filteredAdjustments as adj}
+                    <tr class="table-row-hover">
+                      <td>
+                        <button
+                          type="button"
+                          class="link-po-ref"
+                          style="font-family: monospace; font-weight: 600;"
+                          id="adj-link-{adj.id}"
+                          onclick={() => handleSelectAdjustment(adj.id)}
+                        >
+                          #{adj.adjustment_number}
+                        </button>
+                      </td>
+                      <td>
+                        <span class="unit-tag" style="background: rgba(var(--accent-amber), 0.1); color: rgb(var(--accent-amber)); border: 1px solid rgba(var(--accent-amber), 0.2);">
+                          {getWarehouseName(adj.warehouse_id)}
+                        </span>
+                      </td>
+                      <td>
+                        <span class="badge badge-amber">{formatAdjustmentReason(adj.reason_code)}</span>
+                      </td>
+                      <td class="text-right font-mono">{adj.lines_count ?? '-'}</td>
+                      <td style="font-family: monospace; font-size: 0.8rem; color: var(--text-secondary);">{formatTime(adj.created_at)}</td>
+                      <td>
+                        <span class="badge {adj.status === 'posted' ? 'badge-emerald' : adj.status === 'cancelled' ? 'badge-slate' : 'badge-amber'}">
+                          {formatAdjustmentStatus(adj.status)}
+                        </span>
+                      </td>
+                      <td class="text-center">
+                        <button
+                          type="button"
+                          class="btn btn-outline btn-xs"
+                          id="btn-view-adj-{adj.id}"
+                          onclick={() => handleSelectAdjustment(adj.id)}
+                        >
+                          檢視
+                        </button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+      {/if}
 
     {:else if activeSubTab === 'stocktakes'}
       <div class="empty-state-panel glass-panel">
@@ -954,7 +1698,18 @@
 
         {#if openingModalError}
           <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.82rem;">
-            {openingModalError}
+            <div>{openingModalError}</div>
+            {#if openingModalError.includes('已開帳') || openingModalError.includes('O-01') || openingModalError.includes('重複')}
+              <button
+                type="button"
+                id="btn-open-correction-from-opening-modal"
+                class="btn-correction-link"
+                style="margin-top: 6px; font-size: 0.8rem; background: none; border: none; color: #3b82f6; text-decoration: underline; cursor: pointer; padding: 0; display: inline-block;"
+                onclick={() => handleCreateOpeningCorrectionAdjustment(openingWarehouseId || (activeWarehouses[0]?.id || ''), openingUnitId)}
+              >
+                ➜ 建立期初更正調整單
+              </button>
+            {/if}
           </div>
         {/if}
 
@@ -995,6 +1750,308 @@
         <button class="btn" onclick={closeOpeningBalanceModal}>取消</button>
         <button class="btn btn-primary" onclick={handleRecordOpeningBalance} disabled={actionLoading || !openingUnitId} id="btn-submit-opening-balance">
           登記期初開帳
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ============================================================== -->
+<!-- MODAL 3: 建立庫存調整單彈窗 (Issue #183)                       -->
+<!-- ============================================================== -->
+{#if isCreateAdjustmentModalOpen}
+  <div class="modal-backdrop" onclick={handleCloseCreateAdjustmentModal} onkeydown={(e) => e.key === 'Escape' && handleCloseCreateAdjustmentModal()} role="presentation">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="glass-modal" style="max-width: 680px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="modal-create-adj-title" tabindex="-1">
+      <div class="modal-header">
+        <h3 id="modal-create-adj-title" class="modal-title">建立庫存調整單 (Inventory Adjustment)</h3>
+        <button class="btn-close-modal" onclick={handleCloseCreateAdjustmentModal} aria-label="關閉彈窗">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">
+          建立一張調整單草稿，可輸入報廢、遺失、尋獲或期初更正等數量增減。每一項商品即時預覽調整後數量。
+        </p>
+
+        {#if createAdjError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.82rem;">
+            {createAdjError}
+          </div>
+        {/if}
+
+        <!-- 倉庫選擇器：單一啟用倉時隱藏選擇器，多倉時顯示下拉選單 -->
+        {#if activeWarehouses.length > 1}
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label for="create-adj-warehouse">調整倉庫 *</label>
+            <select
+              id="create-adj-warehouse"
+              bind:value={createAdjWarehouseId}
+              class="form-select"
+              onchange={(e) => {
+                if (newAdjLineUnitId) fetchUnitStock(e.currentTarget.value, newAdjLineUnitId);
+                for (const l of createAdjLines) fetchUnitStock(e.currentTarget.value, l.unit_id);
+              }}
+            >
+              {#each activeWarehouses as wh}
+                <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設倉' : ''}</option>
+              {/each}
+            </select>
+          </div>
+        {:else if activeWarehouses.length === 1}
+          <div class="form-group" style="margin-bottom: 12px;">
+            <span style="display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 4px; color: var(--text-secondary);">調整倉庫</span>
+            <div class="static-field-value">
+              {activeWarehouses[0].name} ({activeWarehouses[0].code})
+            </div>
+          </div>
+        {/if}
+
+        <!-- 原因與備註 -->
+        <div class="form-row" style="display: flex; gap: 12px; margin-bottom: 14px;">
+          <div class="form-group flex-1">
+            <label for="create-adj-reason">調整原因 *</label>
+            <select id="create-adj-reason" bind:value={createAdjReasonCode} class="form-select">
+              <option value="damage">報廢 / 損壞</option>
+              <option value="loss">遺失</option>
+              <option value="found">尋獲</option>
+              <option value="opening_correction">期初更正</option>
+              <option value="other">其他</option>
+            </select>
+          </div>
+          <div class="form-group flex-2">
+            <label for="create-adj-note">
+              備註說明 {createAdjReasonCode === 'other' ? '(必填 *)' : '(選填)'}
+            </label>
+            <input
+              type="text"
+              id="create-adj-note"
+              bind:value={createAdjNote}
+              class="form-input"
+              placeholder={createAdjReasonCode === 'other' ? '選其他原因時必填原因說明 (A-03)' : '選填備註說明'}
+            />
+          </div>
+        </div>
+
+        <!-- 明細清單 -->
+        <div class="create-adj-lines-section" style="border-top: 1px solid var(--border-color); padding-top: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span style="font-weight: 600; font-size: 0.85rem;">調整明細清單 ({createAdjLines.length} 項)</span>
+            <span class="text-muted" style="font-size: 0.75rem;">建立草稿後亦可在詳細頁增刪明細</span>
+          </div>
+
+          {#if createAdjLines.length > 0}
+            <div class="table-responsive" style="max-height: 180px; overflow-y: auto; margin-bottom: 12px;">
+              <table class="inventory-table create-lines-table">
+                <thead>
+                  <tr>
+                    <th style="width: 36px;">#</th>
+                    <th>商品單位</th>
+                    <th class="text-right">目前庫存</th>
+                    <th class="text-right">增減量</th>
+                    <th class="text-right">調整後數量</th>
+                    <th class="text-center" style="width: 60px;">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each createAdjLines as line, idx}
+                    {@const curStock = getCachedStock(createAdjWarehouseId, line.unit_id)}
+                    {@const afterStock = curStock + line.quantity_delta}
+                    {@const isNeg = afterStock < 0}
+                    <tr class={isNeg ? 'row-warning' : ''}>
+                      <td>{idx + 1}</td>
+                      <td class="font-medium">{getUnitLabel(line.unit_id)}</td>
+                      <td class="text-right font-mono">{curStock}</td>
+                      <td class="text-right font-mono font-bold {line.quantity_delta > 0 ? 'text-emerald' : 'text-amber'}">
+                        {line.quantity_delta > 0 ? `+${line.quantity_delta}` : line.quantity_delta}
+                      </td>
+                      <td class="text-right font-mono {isNeg ? 'text-red font-bold' : 'text-emerald font-semibold'}">
+                        {afterStock}
+                        {#if isNeg}
+                          <span class="badge badge-red ml-1" style="font-size: 0.7rem;">⚠️ 負數</span>
+                        {/if}
+                      </td>
+                      <td class="text-center">
+                        <button
+                          type="button"
+                          class="btn-icon-danger"
+                          onclick={() => handleRemoveLineFromCreateModal(idx)}
+                          title="移除項目"
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+
+          <!-- 加入明細列 -->
+          <div class="add-line-subform" style="background: rgba(255, 255, 255, 0.02); border: 1px dashed var(--border-color); border-radius: 6px; padding: 10px;">
+            <div style="font-size: 0.75rem; font-weight: 600; margin-bottom: 6px; color: var(--text-secondary);">+ 新增商品明細</div>
+            <div style="display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;">
+              <div style="flex: 2; min-width: 180px;">
+                <label for="create-adj-new-unit" style="display: block; font-size: 0.75rem; margin-bottom: 3px;">選擇單位</label>
+                <select
+                  id="create-adj-new-unit"
+                  bind:value={newAdjLineUnitId}
+                  class="form-select form-select-sm"
+                  onchange={(e) => {
+                    fetchUnitStock(createAdjWarehouseId, e.currentTarget.value);
+                  }}
+                >
+                  <option value="">-- 請選擇單位 --</option>
+                  {#each availableUnits.filter(u => !createAdjLines.some(l => l.unit_id === u.unit_id)) as unit}
+                    <option value={unit.unit_id}>{unit.label}</option>
+                  {/each}
+                </select>
+              </div>
+
+              <div style="flex: 1; min-width: 90px;">
+                <label for="create-adj-new-delta" style="display: block; font-size: 0.75rem; margin-bottom: 3px;">增減數量 (+/-)</label>
+                <input
+                  type="number"
+                  id="create-adj-new-delta"
+                  bind:value={newAdjLineDelta}
+                  class="form-input form-input-sm text-right"
+                  placeholder="非 0 整數"
+                />
+              </div>
+
+              <div style="flex: 2; min-width: 160px;">
+                <span style="display: block; font-size: 0.75rem; margin-bottom: 3px; color: var(--text-secondary);">數量預覽</span>
+                {#if newAdjLineUnitId}
+                  {@const cur = getCachedStock(createAdjWarehouseId, newAdjLineUnitId)}
+                  {@const after = cur + (Number(newAdjLineDelta) || 0)}
+                  {@const isNeg = after < 0}
+                  <div style="font-size: 0.8rem; padding: 4px 8px; background: rgba(255,255,255,0.04); border-radius: 4px; display: flex; align-items: center; gap: 4px;">
+                    <span>現有 <strong>{cur}</strong></span>
+                    <span>→</span>
+                    <span class={isNeg ? 'text-red font-bold' : 'text-emerald font-semibold'}>{after}</span>
+                    {#if isNeg}
+                      <span class="badge badge-red" style="font-size: 0.68rem; padding: 1px 4px;">⚠️ 負數</span>
+                    {/if}
+                  </div>
+                {:else}
+                  <div style="font-size: 0.78rem; color: var(--text-muted); padding: 4px 8px;">選擇單位預覽</div>
+                {/if}
+              </div>
+
+              <div>
+                <button
+                  type="button"
+                  class="btn btn-primary btn-sm"
+                  id="btn-add-line-to-modal"
+                  onclick={handleAddLineToCreateModal}
+                >
+                  + 加入
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" onclick={handleCloseCreateAdjustmentModal}>取消</button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="btn-submit-create-adjustment"
+          onclick={handleSubmitCreateAdjustment}
+          disabled={isCreatingAdjustment}
+        >
+          {isCreatingAdjustment ? '建立中...' : '建立草稿調整單'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ============================================================== -->
+<!-- MODAL 4: 調整單過帳確認彈窗 (Issue #183)                       -->
+<!-- ============================================================== -->
+{#if isPostConfirmModalOpen && currentAdjustment}
+  <div class="modal-backdrop" onclick={handleClosePostConfirmModal} onkeydown={(e) => e.key === 'Escape' && handleClosePostConfirmModal()} role="presentation">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="glass-modal" style="max-width: 600px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="modal-post-confirm-title" tabindex="-1">
+      <div class="modal-header">
+        <h3 id="modal-post-confirm-title" class="modal-title">過帳確認 (Post Confirmation)</h3>
+        <button class="btn-close-modal" onclick={handleClosePostConfirmModal} aria-label="關閉彈窗">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">
+          過帳後將正式更新倉庫即時庫存並寫入庫存流水帳，此動作<strong>無法復原</strong>。請核對以下調整資訊：
+        </p>
+
+        {#if postConfirmError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; font-size: 0.85rem;">
+            <div class="font-bold mb-1">過帳失敗 (後端拒絕)：</div>
+            <div style="font-family: monospace; white-space: pre-wrap; font-size: 0.8rem;">{postConfirmError}</div>
+          </div>
+        {/if}
+
+        <div class="summary-grid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; background: rgba(255, 255, 255, 0.03); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+          <div><span class="text-muted">單號：</span><strong>#{currentAdjustment.adjustment_number}</strong></div>
+          <div><span class="text-muted">倉庫：</span><strong>{getWarehouseName(currentAdjustment.warehouse_id)}</strong></div>
+          <div><span class="text-muted">原因：</span><span class="badge badge-amber">{formatAdjustmentReason(currentAdjustment.reason_code)}</span></div>
+          <div><span class="text-muted">備註：</span><span>{currentAdjustment.note || '無備註'}</span></div>
+        </div>
+
+        <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 8px;">調整明細與庫存預覽：</div>
+        
+        <div class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+          <table class="inventory-table">
+            <thead>
+              <tr>
+                <th style="width: 36px;">#</th>
+                <th>商品單位</th>
+                <th class="text-right">目前庫存</th>
+                <th class="text-right">增減量</th>
+                <th class="text-right">調整後庫存</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each currentAdjustmentLines as line}
+                {@const curStock = getCachedStock(currentAdjustment.warehouse_id, line.unit_id)}
+                {@const afterStock = curStock + line.quantity_delta}
+                {@const isNeg = afterStock < 0}
+                <tr class={isNeg ? 'row-warning' : ''}>
+                  <td>{line.line_no ?? line.line_number ?? ''}</td>
+                  <td class="font-medium">{getUnitLabel(line.unit_id)}</td>
+                  <td class="text-right font-mono">{curStock}</td>
+                  <td class="text-right font-mono font-bold {line.quantity_delta > 0 ? 'text-emerald' : 'text-amber'}">
+                    {line.quantity_delta > 0 ? `+${line.quantity_delta}` : line.quantity_delta}
+                  </td>
+                  <td class="text-right font-mono {isNeg ? 'text-red font-bold' : 'text-emerald font-semibold'}">
+                    {afterStock}
+                    {#if isNeg}
+                      <span class="badge badge-red ml-1" style="font-size: 0.7rem;">⚠️ 負數</span>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+
+        {#if currentAdjustmentLines.some(l => (getCachedStock(currentAdjustment.warehouse_id, l.unit_id) + l.quantity_delta) < 0)}
+          <div class="alert alert-warning" style="margin-top: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); color: #f59e0b; font-size: 0.8rem;">
+            ⚠️ 警告：包含調整後庫存為負數的明細項目，送出後後端將拒絕過帳 (A-09)。
+          </div>
+        {/if}
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" onclick={handleClosePostConfirmModal} disabled={postConfirmLoading}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="btn-confirm-post-adjustment"
+          onclick={handleConfirmPostAdjustment}
+          disabled={postConfirmLoading}
+        >
+          {postConfirmLoading ? '過帳處理中...' : '確認過帳'}
         </button>
       </div>
     </div>
@@ -1391,6 +2448,42 @@
     background: rgba(255, 255, 255, 0.08);
     color: var(--text-secondary);
     border: 1px solid var(--border-color);
+  }
+  .badge-red {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+  .text-amber {
+    color: rgb(var(--accent-amber));
+  }
+  .static-field-value {
+    padding: 7px 12px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+  .btn-icon-danger {
+    background: transparent;
+    border: none;
+    color: #ef4444;
+    cursor: pointer;
+    padding: 2px 6px;
+    font-size: 0.85rem;
+    border-radius: 4px;
+    transition: background 0.15s ease;
+  }
+  .btn-icon-danger:hover {
+    background: rgba(239, 68, 68, 0.15);
+  }
+  .row-warning {
+    background: rgba(239, 68, 68, 0.06);
+  }
+  .link-adj-ref {
+    color: rgb(var(--accent-amber)) !important;
   }
 
   .btn {

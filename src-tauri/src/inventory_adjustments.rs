@@ -41,6 +41,8 @@ pub struct InventoryAdjustment {
     pub posted_at: Option<i64>,
     pub cancelled_at: Option<i64>,
     pub task_id: Option<String>,
+    #[serde(default)]
+    pub lines_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -400,22 +402,7 @@ pub fn create_inventory_adjustment_impl(
 
     tx.commit()?;
 
-    let adjustment = InventoryAdjustment {
-        id: adj_id,
-        tenant_id: tenant_id.to_string(),
-        adjustment_number: adj_num,
-        warehouse_id: trimmed_wh.to_string(),
-        reason_code: reason_code.trim().to_string(),
-        status: "draft".to_string(),
-        note: note.map(|s| s.trim().to_string()),
-        created_by: trimmed_uid.to_string(),
-        created_at: now,
-        posted_at: None,
-        cancelled_at: None,
-        task_id,
-    };
-
-    Ok(InventoryAdjustmentDetail { adjustment, lines })
+    get_inventory_adjustment_impl(conn, tenant_id, &adj_id)
 }
 
 pub fn update_inventory_adjustment_header_impl(
@@ -873,6 +860,30 @@ pub fn cancel_inventory_adjustment_impl(
     get_inventory_adjustment_impl(conn, tenant_id, adjustment_id)
 }
 
+const INVENTORY_ADJUSTMENT_COLUMNS: &str = "
+    id, tenant_id, adjustment_number, warehouse_id, reason_code,
+    status, note, created_by, created_at, posted_at, cancelled_at, task_id,
+    (SELECT COUNT(*) FROM inventory_adjustment_lines WHERE adjustment_id = inventory_adjustments.id)
+";
+
+fn map_inventory_adjustment_row(row: &rusqlite::Row) -> rusqlite::Result<InventoryAdjustment> {
+    Ok(InventoryAdjustment {
+        id: row.get(0)?,
+        tenant_id: row.get(1)?,
+        adjustment_number: row.get(2)?,
+        warehouse_id: row.get(3)?,
+        reason_code: row.get(4)?,
+        status: row.get(5)?,
+        note: row.get(6)?,
+        created_by: row.get(7)?,
+        created_at: row.get(8)?,
+        posted_at: row.get(9)?,
+        cancelled_at: row.get(10)?,
+        task_id: row.get(11)?,
+        lines_count: row.get(12)?,
+    })
+}
+
 pub fn get_inventory_adjustment_impl(
     conn: &rusqlite::Connection,
     tenant_id: &str,
@@ -882,30 +893,17 @@ pub fn get_inventory_adjustment_impl(
         return Err(InventoryAdjustmentError::EmptyTenantId);
     }
 
-    let mut stmt = conn.prepare(
-        "SELECT 
-                id, tenant_id, adjustment_number, warehouse_id, reason_code,
-                status, note, created_by, created_at, posted_at, cancelled_at, task_id
-             FROM inventory_adjustments WHERE id = ?1 AND tenant_id = ?2",
-    )?;
+    let sql = format!(
+        "SELECT {} FROM inventory_adjustments WHERE id = ?1 AND tenant_id = ?2",
+        INVENTORY_ADJUSTMENT_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql)?;
 
     let adjustment = stmt
-        .query_row(params![adjustment_id, tenant_id], |row| {
-            Ok(InventoryAdjustment {
-                id: row.get(0)?,
-                tenant_id: row.get(1)?,
-                adjustment_number: row.get(2)?,
-                warehouse_id: row.get(3)?,
-                reason_code: row.get(4)?,
-                status: row.get(5)?,
-                note: row.get(6)?,
-                created_by: row.get(7)?,
-                created_at: row.get(8)?,
-                posted_at: row.get(9)?,
-                cancelled_at: row.get(10)?,
-                task_id: row.get(11)?,
-            })
-        })
+        .query_row(
+            params![adjustment_id, tenant_id],
+            map_inventory_adjustment_row,
+        )
         .map_err(|_| InventoryAdjustmentError::AdjustmentNotFound)?;
 
     let mut lines_stmt = conn.prepare(
@@ -948,11 +946,10 @@ pub fn list_inventory_adjustments_impl(
         return Err(InventoryAdjustmentError::EmptyTenantId);
     }
 
-    let mut query = "SELECT 
-                        id, tenant_id, adjustment_number, warehouse_id, reason_code,
-                        status, note, created_by, created_at, posted_at, cancelled_at, task_id
-                     FROM inventory_adjustments WHERE tenant_id = ?1"
-        .to_string();
+    let mut query = format!(
+        "SELECT {} FROM inventory_adjustments WHERE tenant_id = ?1",
+        INVENTORY_ADJUSTMENT_COLUMNS
+    );
 
     let mut sql_params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id.to_string())];
 
@@ -975,22 +972,7 @@ pub fn list_inventory_adjustments_impl(
     let mut stmt = conn.prepare(&query)?;
     let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|p| p.as_ref()).collect();
 
-    let list_iter = stmt.query_map(param_refs.as_slice(), |row| {
-        Ok(InventoryAdjustment {
-            id: row.get(0)?,
-            tenant_id: row.get(1)?,
-            adjustment_number: row.get(2)?,
-            warehouse_id: row.get(3)?,
-            reason_code: row.get(4)?,
-            status: row.get(5)?,
-            note: row.get(6)?,
-            created_by: row.get(7)?,
-            created_at: row.get(8)?,
-            posted_at: row.get(9)?,
-            cancelled_at: row.get(10)?,
-            task_id: row.get(11)?,
-        })
-    })?;
+    let list_iter = stmt.query_map(param_refs.as_slice(), map_inventory_adjustment_row)?;
 
     let mut result = Vec::new();
     for item in list_iter {

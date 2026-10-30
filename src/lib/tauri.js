@@ -416,7 +416,10 @@ function formatMockInventoryAdjustmentDetail(adjustment) {
     .filter(l => l.adjustment_id === adjustment.id)
     .sort((a, b) => a.line_no - b.line_no);
   return {
-    adjustment: { ...adjustment },
+    adjustment: {
+      ...adjustment,
+      lines_count: lines.length
+    },
     lines: lines.map(l => ({ ...l }))
   };
 }
@@ -2518,7 +2521,7 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'record_opening_inventory_balance': {
-      const { unit_id, unitId, quantity_delta, quantityDelta, unit_cost, unitCost, warehouse_id, warehouseId } = args || {};
+      const { unit_id, unitId, quantity, quantity_delta, quantityDelta, unit_cost, unitCost, warehouse_id, warehouseId } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
       if (!targetTenantId || !targetTenantId.trim()) {
         throw new Error('Tenant ID cannot be empty');
@@ -2535,7 +2538,8 @@ export async function invoke(cmd, args = {}) {
         targetWh = resolveMockDefaultWarehouse(targetTenantId);
       }
 
-      const qty = Number(quantity_delta !== undefined ? quantity_delta : quantityDelta);
+      const rawQty = quantity !== undefined ? quantity : (quantity_delta !== undefined ? quantity_delta : quantityDelta);
+      const qty = Number(rawQty);
       if (isNaN(qty) || qty <= 0) {
         throw new Error('期初開帳數量必須大於 0');
       }
@@ -3212,7 +3216,15 @@ export async function invoke(cmd, args = {}) {
       if (targetWhId && String(targetWhId).trim()) {
         list = list.filter(a => a.warehouse_id === String(targetWhId).trim());
       }
-      return list.sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+      return list
+        .map(a => {
+          const lines = mockInventoryAdjustmentLines.filter(l => l.adjustment_id === a.id);
+          return {
+            ...a,
+            lines_count: lines.length
+          };
+        })
+        .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
     }
 
     case 'reset_mock_inventory_adjustments': {
