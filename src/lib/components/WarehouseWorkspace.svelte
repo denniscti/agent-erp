@@ -34,7 +34,28 @@
     updateInventoryAdjustmentLineAction,
     removeInventoryAdjustmentLineAction,
     postInventoryAdjustmentAction,
-    cancelInventoryAdjustmentAction
+    cancelInventoryAdjustmentAction,
+    formatStocktakeStatus,
+    getStocktakeStatusBadgeClass,
+    formatStocktakeProgress,
+    isStocktakeMovementConflictError,
+    STOCKTAKE_VARIANCE_EPSILON,
+    fetchStocktakes,
+    fetchStocktakeDetail,
+    selectStocktake,
+    createStocktakeAction,
+    updateStocktakeHeaderAction,
+    addStocktakeLinesAction,
+    addStocktakeLinesFromStockAction,
+    removeStocktakeLineAction,
+    startStocktakeCountingAction,
+    setStocktakeCountedQuantityAction,
+    refreshStocktakeSystemQuantityAction,
+    postStocktakeAction,
+    cancelStocktakeAction,
+    calculateStocktakePostSummary,
+    parseStocktakeConflictLines,
+    isStocktakeLineCounted
   } from '../store.svelte.js';
 
   // Subtabs: 'inventory' | 'warehouses' | 'adjustments' | 'stocktakes' | 'transfers'
@@ -147,6 +168,62 @@
     appState.currentInventoryAdjustmentDetail?.lines || []
   );
 
+  // Stocktakes list & detail state (Issue #184)
+  let selectedStocktakeWarehouseId = $state('');
+  let selectedStocktakeStatusFilter = $state('');
+  let selectedStocktakeId = $derived(appState.selectedStocktakeId);
+  let lineErrors = $state({});
+  let stocktakeLoading = $state(false);
+  let stocktakeError = $state('');
+
+  // Stocktake modal state (consolidated: null | 'create' | 'editHeader' | 'startCounting' | 'post' | 'refresh')
+  let activeStocktakeModal = $state(null);
+  let stocktakeModalLoading = $state(false);
+  let stocktakeModalError = $state('');
+
+  // Modal-specific form parameters
+  let createStkWarehouseId = $state('');
+  let createStkNote = $state('');
+  let createStkAutoFill = $state(false);
+  let editStkWarehouseId = $state('');
+  let editStkNote = $state('');
+  let refreshTargetLineIds = $state([]);
+
+  // Draft add line state
+  let draftStkUnitId = $state('');
+  let draftStkError = $state('');
+  let isAddingDraftStkLine = $state(false);
+
+  // S-07 / S-08 Affected lines state
+  let affectedLineIds = $state([]);
+  let affectedErrorMsg = $state('');
+
+  let filteredStocktakes = $derived(
+    (appState.stocktakes || []).filter(s => {
+      if (selectedStocktakeWarehouseId && s.warehouse_id !== selectedStocktakeWarehouseId) {
+        return false;
+      }
+      if (selectedStocktakeStatusFilter && s.status !== selectedStocktakeStatusFilter) {
+        return false;
+      }
+      return true;
+    })
+  );
+
+  let currentStocktake = $derived(
+    appState.currentStocktakeDetail?.stocktake || null
+  );
+
+  let currentStocktakeLines = $derived(
+    appState.currentStocktakeDetail?.lines || []
+  );
+
+  let postSummary = $derived(calculateStocktakePostSummary(currentStocktakeLines));
+
+  let countedStocktakeLinesCount = $derived(
+    postSummary.matched + postSummary.surplus + postSummary.shortage
+  );
+
   // Sync subtab with route
   $effect(() => {
     const route = appState.route;
@@ -161,6 +238,9 @@
       }
     } else if (route.includes('/warehouses/stocktakes')) {
       activeSubTab = 'stocktakes';
+      if (!selectedStocktakeId && (!appState.stocktakes || appState.stocktakes.length === 0)) {
+        loadStocktakes();
+      }
     } else if (route.includes('/warehouses/transfers')) {
       activeSubTab = 'transfers';
     } else if (route.startsWith('/app/warehouses')) {
@@ -176,6 +256,9 @@
     await loadAuxiliaryData();
     if (activeSubTab === 'adjustments') {
       await loadAdjustments();
+    }
+    if (activeSubTab === 'stocktakes') {
+      await loadStocktakes();
     }
   });
 
@@ -229,6 +312,7 @@
     activeSubTab = tab;
     actionError = '';
     warehouseError = '';
+    stocktakeError = '';
     expandedUnitId = null;
 
     if (tab === 'inventory') {
@@ -241,6 +325,10 @@
       loadAdjustments();
     } else if (tab === 'stocktakes') {
       navigate('/app/warehouses/stocktakes');
+      selectStocktake(null);
+      if (appState.stocktakes && appState.stocktakes.length > 0) {
+        loadStocktakes();
+      }
     } else if (tab === 'transfers') {
       navigate('/app/warehouses/transfers');
     }
@@ -325,6 +413,385 @@
     activeSubTab = 'adjustments';
     navigate('/app/warehouses/adjustments');
     await handleSelectAdjustment(adjId);
+  }
+
+  // Navigate to stocktake detail from inventory ledger reference
+  async function handleNavigateToStocktake(stkId) {
+    if (!stkId) return;
+    activeSubTab = 'stocktakes';
+    navigate('/app/warehouses/stocktakes');
+    await handleSelectStocktake(stkId);
+  }
+
+  // Stocktakes helper methods (Issue #184)
+  async function loadStocktakes() {
+    if (stocktakeLoading) return;
+    stocktakeLoading = true;
+    stocktakeError = '';
+    try {
+      await fetchStocktakes({
+        status: selectedStocktakeStatusFilter || null,
+        warehouse_id: selectedStocktakeWarehouseId || null
+      });
+    } catch (err) {
+      console.error("Failed to load stocktakes:", err);
+      showToast(err.message || '載入盤點單失敗', 'error');
+    } finally {
+      stocktakeLoading = false;
+    }
+  }
+
+  async function handleSelectStocktake(stkId) {
+    stocktakeError = '';
+    draftStkError = '';
+    affectedLineIds = [];
+    affectedErrorMsg = '';
+    lineErrors = {};
+    if (!stkId) {
+      await selectStocktake(null);
+      return;
+    }
+    stocktakeLoading = true;
+    try {
+      await selectStocktake(stkId);
+    } catch (err) {
+      stocktakeError = err.message || '載入盤點單明細失敗';
+    } finally {
+      stocktakeLoading = false;
+    }
+  }
+
+  async function handleBackToStocktakesList() {
+    await selectStocktake(null);
+    draftStkError = '';
+    affectedLineIds = [];
+    affectedErrorMsg = '';
+    lineErrors = {};
+    await loadStocktakes();
+  }
+
+  function closeStocktakeModal() {
+    activeStocktakeModal = null;
+    stocktakeModalLoading = false;
+    stocktakeModalError = '';
+  }
+
+  function handleOpenCreateStocktake() {
+    createStkWarehouseId = defaultWarehouse ? defaultWarehouse.id : (activeWarehouses[0]?.id || '');
+    createStkNote = '';
+    createStkAutoFill = false;
+    stocktakeModalError = '';
+    activeStocktakeModal = 'create';
+  }
+
+  async function handleConfirmCreateStocktake() {
+    stocktakeModalError = '';
+    if (!createStkWarehouseId) {
+      stocktakeModalError = '請選擇盤點倉庫';
+      return;
+    }
+    stocktakeModalLoading = true;
+    try {
+      const stk = await createStocktakeAction({
+        warehouse_id: createStkWarehouseId,
+        note: createStkNote ? createStkNote.trim() : null,
+        task_id: null
+      });
+
+      closeStocktakeModal();
+      if (stk?.id) {
+        activeStocktakeTab = 'lines';
+        affectedLineIds = [];
+        affectedErrorMsg = '';
+        lineErrors = {};
+      }
+
+      if (createStkAutoFill && stk?.id) {
+        try {
+          await addStocktakeLinesFromStockAction(stk.id);
+        } catch (fillErr) {
+          console.warn("Auto-fill lines warning:", fillErr);
+          showToast(`自動帶入現有品項失敗：${fillErr.message || fillErr}`, 'error');
+        }
+      }
+    } catch (err) {
+      stocktakeModalError = err.message || '建立盤點單失敗';
+    } finally {
+      stocktakeModalLoading = false;
+    }
+  }
+
+  function handleOpenEditHeaderModal() {
+    if (!currentStocktake) return;
+    editStkWarehouseId = currentStocktake.warehouse_id || '';
+    editStkNote = currentStocktake.note || '';
+    stocktakeModalError = '';
+    activeStocktakeModal = 'editHeader';
+  }
+
+  async function handleConfirmEditHeader() {
+    if (!selectedStocktakeId) return;
+    if (!editStkWarehouseId) {
+      stocktakeModalError = '請選擇盤點倉庫';
+      return;
+    }
+    stocktakeModalLoading = true;
+    stocktakeModalError = '';
+    try {
+      await updateStocktakeHeaderAction(selectedStocktakeId, {
+        warehouse_id: editStkWarehouseId,
+        note: editStkNote
+      });
+      closeStocktakeModal();
+    } catch (err) {
+      stocktakeModalError = err.message || '更新盤點單表頭失敗';
+    } finally {
+      stocktakeModalLoading = false;
+    }
+  }
+
+  async function handleAddStocktakeLineFromDraft() {
+    if (!draftStkUnitId || !selectedStocktakeId) return;
+    draftStkError = '';
+    isAddingDraftStkLine = true;
+    try {
+      await addStocktakeLinesAction(selectedStocktakeId, [draftStkUnitId]);
+      draftStkUnitId = '';
+    } catch (err) {
+      draftStkError = err.message || '加入品項失敗';
+    } finally {
+      isAddingDraftStkLine = false;
+    }
+  }
+
+  async function handleAddStocktakeLinesFromStock() {
+    if (!selectedStocktakeId) return;
+    stocktakeError = '';
+    try {
+      await addStocktakeLinesFromStockAction(selectedStocktakeId);
+    } catch (err) {
+      stocktakeError = err.message || '帶入現有庫存品項失敗';
+    }
+  }
+
+  async function handleRemoveStocktakeLine(lineId) {
+    if (!lineId) return;
+    try {
+      await removeStocktakeLineAction(lineId);
+    } catch (err) {
+      stocktakeError = err.message || '移除品項失敗';
+    }
+  }
+
+  function handleOpenStartCountingModal() {
+    stocktakeModalError = '';
+    if (!currentStocktakeLines || currentStocktakeLines.length === 0) {
+      stocktakeError = '盤點單沒有任何品項，請先新增品項 (S-05)';
+      return;
+    }
+    activeStocktakeModal = 'startCounting';
+  }
+
+  async function handleConfirmStartCounting() {
+    if (!selectedStocktakeId) return;
+    stocktakeModalLoading = true;
+    stocktakeModalError = '';
+    try {
+      await startStocktakeCountingAction(selectedStocktakeId);
+      closeStocktakeModal();
+    } catch (err) {
+      stocktakeModalError = err.message || '開始盤點失敗';
+    } finally {
+      stocktakeModalLoading = false;
+    }
+  }
+
+  async function handleCountedQuantityChange(lineId, rawValue, inputEl = null) {
+    if (!lineId) return;
+    delete lineErrors[lineId];
+    const line = currentStocktakeLines.find(l => l.id === lineId);
+    if (!line) return;
+
+    const revertInput = () => {
+      const el = inputEl || document.getElementById(`input-counted-${lineId}`);
+      if (el) {
+        el.value = line.counted_quantity ?? '';
+      }
+    };
+
+    if (rawValue === '' || rawValue === null || rawValue === undefined) {
+      if (line.counted_quantity === null || line.counted_quantity === undefined) {
+        revertInput();
+        return;
+      }
+      try {
+        await setStocktakeCountedQuantityAction(lineId, null);
+      } catch (err) {
+        lineErrors[lineId] = err.message || '清除實盤量失敗';
+        revertInput();
+      }
+      return;
+    }
+
+    const val = Number(rawValue);
+    if (isNaN(val) || val < 0) {
+      lineErrors[lineId] = '實盤量不可為負';
+      revertInput();
+      return;
+    }
+
+    if (line.counted_quantity === val) {
+      return;
+    }
+
+    try {
+      await setStocktakeCountedQuantityAction(lineId, val);
+    } catch (err) {
+      lineErrors[lineId] = err.message || '儲存實盤量失敗';
+      revertInput();
+    }
+  }
+
+  function handleOpenPostStocktakeModal() {
+    stocktakeModalError = '';
+    if (postSummary.missing > 0) {
+      stocktakeError = `尚有 ${postSummary.missing} 項未輸入實盤量，無法過帳 (S-07)`;
+      return;
+    }
+    activeStocktakeModal = 'post';
+  }
+
+  async function handleConfirmPostStocktake() {
+    if (!selectedStocktakeId) return;
+    stocktakeModalLoading = true;
+    stocktakeModalError = '';
+    try {
+      await postStocktakeAction(selectedStocktakeId);
+      closeStocktakeModal();
+      affectedLineIds = [];
+      affectedErrorMsg = '';
+    } catch (err) {
+      const msg = err.message || String(err);
+      stocktakeModalError = msg;
+      // Detect S-07 concurrency movement error
+      if (isStocktakeMovementConflictError(err)) {
+        const matched = parseStocktakeConflictLines(err, currentStocktakeLines);
+        if (matched.length > 0) {
+          affectedLineIds = matched;
+          affectedErrorMsg = msg;
+        } else {
+          affectedLineIds = [];
+          affectedErrorMsg = '';
+          showToast(msg, 'error');
+        }
+        closeStocktakeModal();
+      } else {
+        affectedLineIds = [];
+        affectedErrorMsg = '';
+      }
+    } finally {
+      stocktakeModalLoading = false;
+    }
+  }
+
+  function handleOpenRefreshSystemQtyModal(targetLineIds) {
+    if (!Array.isArray(targetLineIds) || targetLineIds.length === 0) {
+      refreshTargetLineIds = [];
+      return;
+    }
+    refreshTargetLineIds = [...targetLineIds];
+    stocktakeModalError = '';
+    activeStocktakeModal = 'refresh';
+  }
+
+  async function handleConfirmRefreshSystemQty() {
+    if (!selectedStocktakeId || refreshTargetLineIds.length === 0) return;
+    stocktakeModalLoading = true;
+    stocktakeModalError = '';
+    try {
+      await refreshStocktakeSystemQuantityAction(selectedStocktakeId, refreshTargetLineIds);
+      closeStocktakeModal();
+      affectedErrorMsg = '';
+      affectedLineIds = [];
+    } catch (err) {
+      stocktakeModalError = err.message || '重新取得系統量失敗';
+    } finally {
+      stocktakeModalLoading = false;
+    }
+  }
+
+  const STOCKTAKE_LINE_COLUMNS = {
+    draft: [
+      { key: 'no', label: '#', width: '44px' },
+      { key: 'product', label: '商品／規格／單位' },
+      { key: 'system_qty', label: '系統量快照', align: 'right' },
+      { key: 'actions', label: '操作', align: 'center', width: '80px' }
+    ],
+    counting: [
+      { key: 'no', label: '#', width: '44px' },
+      { key: 'product', label: '商品／規格／單位' },
+      { key: 'system_qty', label: '帳面量 (快照)', align: 'right' },
+      { key: 'snapshot_at', label: '快照時間', width: '140px' },
+      { key: 'counted_qty', label: '實盤量', align: 'right', width: '130px' },
+      { key: 'delta', label: '差異', align: 'right', width: '120px' },
+      { key: 'actions', label: '狀態／操作', align: 'center', width: '130px' }
+    ],
+    posted: [
+      { key: 'no', label: '#', width: '44px' },
+      { key: 'product', label: '商品／規格／單位' },
+      { key: 'system_qty', label: '帳面量 (快照)', align: 'right' },
+      { key: 'snapshot_at', label: '快照時間', width: '140px' },
+      { key: 'counted_qty', label: '實盤量', align: 'right', width: '130px' },
+      { key: 'delta', label: '差異', align: 'right', width: '120px' }
+    ],
+    cancelled: [
+      { key: 'no', label: '#', width: '44px' },
+      { key: 'product', label: '商品／規格／單位' },
+      { key: 'system_qty', label: '帳面量 (快照)', align: 'right' },
+      { key: 'snapshot_at', label: '快照時間', width: '140px' },
+      { key: 'counted_qty', label: '實盤量', align: 'right', width: '130px' },
+      { key: 'delta', label: '差異', align: 'right', width: '120px' }
+    ]
+  };
+
+  function getStocktakeLineColumns(status) {
+    return STOCKTAKE_LINE_COLUMNS[status] || STOCKTAKE_LINE_COLUMNS.counting;
+  }
+
+  function getStocktakeStatusBanner(status) {
+    switch (status) {
+      case 'counting':
+        return { badgeClass: 'badge-sky', label: '盤點中 (隨時可中途離開，輸入內容已由本地儲存)' };
+      case 'posted':
+        return { badgeClass: 'badge-emerald', label: '唯讀 (已過帳)' };
+      case 'cancelled':
+        return { badgeClass: 'badge-slate', label: '唯讀 (已取消)' };
+      default:
+        return null;
+    }
+  }
+
+  function getAdjustmentStatusBadgeClass(status) {
+    switch (status) {
+      case 'posted':
+        return 'badge-emerald';
+      case 'cancelled':
+        return 'badge-slate';
+      default:
+        return 'badge-amber';
+    }
+  }
+
+  async function handleCancelStocktake() {
+    if (!currentStocktake) return;
+    if (!confirm(`確定要取消盤點單 #${currentStocktake.stocktake_number} 嗎？`)) {
+      return;
+    }
+    try {
+      await cancelStocktakeAction(currentStocktake.id);
+    } catch (err) {
+      showToast(err.message || '取消盤點單失敗', 'error');
+    }
   }
 
   // Adjustments helper methods (Issue #183)
@@ -1102,6 +1569,15 @@
                                             >
                                               調整單 #{mov.reference_id.slice(-6)}
                                             </button>
+                                          {:else if mov.reference_type === 'stocktake' || mov.reason === 'stocktake' || mov.reason === 'stocktake_discrepancy' || mov.reference_id.startsWith('stk_')}
+                                            <button
+                                              class="link-po-ref link-stk-ref"
+                                              onclick={() => handleNavigateToStocktake(mov.reference_id)}
+                                              title="點擊前往此盤點單明細"
+                                              id="link-stk-{mov.reference_id}"
+                                            >
+                                              盤點單 #{mov.reference_id.slice(-6)}
+                                            </button>
                                           {:else}
                                             <span class="badge badge-slate" style="font-family: monospace;">#{mov.reference_id.slice(-6)}</span>
                                           {/if}
@@ -1294,7 +1770,7 @@
               </button>
               <h2 style="margin: 0; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
                 <span>調整單 #{currentAdjustment.adjustment_number}</span>
-                <span class="badge {currentAdjustment.status === 'posted' ? 'badge-emerald' : currentAdjustment.status === 'cancelled' ? 'badge-slate' : 'badge-amber'}">
+                <span class="badge {getAdjustmentStatusBadgeClass(currentAdjustment.status)}">
                   {formatAdjustmentStatus(currentAdjustment.status)}
                 </span>
               </h2>
@@ -1619,7 +2095,7 @@
                       <td class="text-right font-mono">{adj.lines_count ?? '-'}</td>
                       <td style="font-family: monospace; font-size: 0.8rem; color: var(--text-secondary);">{formatTime(adj.created_at)}</td>
                       <td>
-                        <span class="badge {adj.status === 'posted' ? 'badge-emerald' : adj.status === 'cancelled' ? 'badge-slate' : 'badge-amber'}">
+                        <span class="badge {getAdjustmentStatusBadgeClass(adj.status)}">
                           {formatAdjustmentStatus(adj.status)}
                         </span>
                       </td>
@@ -1642,21 +2118,534 @@
         </div>
       {/if}
 
+    <!-- SUBTAB 4: 盤點單作業 (Issue #184) -->
     {:else if activeSubTab === 'stocktakes'}
-      <div class="empty-state-panel glass-panel">
-        <div class="empty-state-icon">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
-            <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
-            <path d="m9 14 2 2 4-4"></path>
-          </svg>
+      {#if selectedStocktakeId && currentStocktake}
+        <!-- DETAIL VIEW -->
+        <div class="stocktake-detail-container">
+          <!-- Top back bar & actions -->
+          <div class="detail-header-bar flex-between" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <button
+                type="button"
+                class="btn btn-outline btn-sm"
+                id="btn-back-to-stocktakes"
+                onclick={handleBackToStocktakesList}
+              >
+                ← 返回盤點單清單
+              </button>
+              <h2 style="margin: 0; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                <span>盤點單 #{currentStocktake.stocktake_number}</span>
+                <span class="badge {getStocktakeStatusBadgeClass(currentStocktake.status)}">
+                  {formatStocktakeStatus(currentStocktake.status)}
+                </span>
+              </h2>
+            </div>
+
+            <div class="detail-actions" style="display: flex; gap: 8px;">
+              {#if currentStocktake.status === 'draft'}
+                <button
+                  type="button"
+                  class="btn btn-outline btn-sm"
+                  id="btn-edit-stocktake-header"
+                  onclick={handleOpenEditHeaderModal}
+                  title="修改盤點倉庫或備註"
+                >
+                  ✏️ 編輯表頭
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-primary btn-sm"
+                  id="btn-start-counting"
+                  onclick={handleOpenStartCountingModal}
+                  disabled={currentStocktakeLines.length === 0}
+                  title={currentStocktakeLines.length === 0 ? '無明細時無法開始盤點 (S-05)' : '開始盤點並鎖定庫存快照'}
+                >
+                  開始盤點
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-outline btn-sm text-red"
+                  id="btn-cancel-stocktake"
+                  onclick={handleCancelStocktake}
+                >
+                  取消單據
+                </button>
+              {:else if currentStocktake.status === 'counting'}
+                <button
+                  type="button"
+                  class="btn btn-primary btn-sm"
+                  id="btn-post-stocktake"
+                  onclick={handleOpenPostStocktakeModal}
+                  disabled={postSummary.missing > 0}
+                  title={postSummary.missing > 0 ? `尚有 ${postSummary.missing} 項未輸入實盤量` : '過帳盤點結果'}
+                >
+                  過帳盤點單
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-outline btn-sm text-red"
+                  id="btn-cancel-stocktake"
+                  onclick={handleCancelStocktake}
+                >
+                  取消單據
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          <!-- ADR #157 Notice -->
+          <div class="alert alert-info" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 6px; background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); color: var(--text-primary); font-size: 0.85rem; display: flex; align-items: center; gap: 8px;">
+            <span>ℹ️</span>
+            <span><strong>盤點提示（包裝單位原則）：</strong>不同包裝單位請分行盤點；若有拆箱，箱與個會分別顯示盤虧與盤盈。</span>
+          </div>
+
+          <!-- S-07 Movement Warning if detected -->
+          {#if affectedErrorMsg}
+            <div class="alert alert-danger" style="margin-bottom: 16px; padding: 12px 16px; border-radius: 6px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35); color: #ef4444; font-size: 0.85rem;">
+              <div style="font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+                <span>⚠️ 異動衝突警示（S-07）</span>
+              </div>
+              <div style="margin-bottom: 8px;">
+                {affectedErrorMsg}
+              </div>
+              <button
+                type="button"
+                class="btn btn-outline btn-xs"
+                style="color: #ef4444; border-color: rgba(239, 68, 68, 0.4);"
+                id="btn-refresh-affected-lines"
+                onclick={() => handleOpenRefreshSystemQtyModal(affectedLineIds)}
+              >
+                🔄 重新取得受影響品項之系統量 (S-08)
+              </button>
+            </div>
+          {/if}
+
+          <!-- General stocktake error banner -->
+          {#if stocktakeError}
+            <div class="alert alert-danger" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.85rem;">
+              {stocktakeError}
+            </div>
+          {/if}
+
+          <!-- Header info card -->
+          <div class="glass-panel" style="padding: 16px; margin-bottom: 16px;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+              <div>
+                <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">盤點倉庫</div>
+                <div style="font-weight: 600; display: flex; align-items: center; gap: 6px;">
+                  <span>{getWarehouseName(currentStocktake.warehouse_id)}</span>
+                  {#if currentStocktake.status === 'draft'}
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs text-muted"
+                      style="padding: 1px 5px; font-size: 0.75rem;"
+                      onclick={handleOpenEditHeaderModal}
+                      title="編輯表頭"
+                    >
+                      ✏️
+                    </button>
+                  {/if}
+                </div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">備註說明</div>
+                <div>{currentStocktake.note || '無備註'}</div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">建立時間</div>
+                <div style="font-family: monospace; font-size: 0.85rem;">{formatTime(currentStocktake.created_at)}</div>
+              </div>
+              {#if currentStocktake.status === 'counting' || currentStocktake.status === 'posted'}
+                <div>
+                  <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">開始盤點時間</div>
+                  <div style="font-family: monospace; font-size: 0.85rem;">{formatTime(currentStocktake.counting_started_at)}</div>
+                </div>
+              {/if}
+              {#if currentStocktake.posted_at}
+                <div>
+                  <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">過帳時間</div>
+                  <div style="font-family: monospace; font-size: 0.85rem;" class="text-emerald font-semibold">{formatTime(currentStocktake.posted_at)}</div>
+                </div>
+              {/if}
+              {#if currentStocktake.cancelled_at}
+                <div>
+                  <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">取消時間</div>
+                  <div style="font-family: monospace; font-size: 0.85rem;" class="text-muted">{formatTime(currentStocktake.cancelled_at)}</div>
+                </div>
+              {/if}
+              {#if currentStocktake.status === 'counting'}
+                <div>
+                  <div class="text-muted" style="font-size: 0.75rem; margin-bottom: 4px;">實盤進度</div>
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <span class="badge {postSummary.missing === 0 ? 'badge-emerald' : 'badge-sky'}" style="font-size: 0.85rem;">
+                      已輸入 {countedStocktakeLinesCount} / 總數 {currentStocktakeLines.length}
+                    </span>
+                    {#if postSummary.missing > 0}
+                      <span style="font-size: 0.75rem; color: #ef4444;">(尚有 {postSummary.missing} 項未填)</span>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Lines table card -->
+          <div class="glass-panel" style="padding: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+              <div style="display: flex; align-items: center; gap: 10px;">
+                <h3 style="margin: 0; font-size: 1rem; font-weight: 600;">
+                  盤點品項明細 ({currentStocktakeLines.length} 筆)
+                </h3>
+                {#if getStocktakeStatusBanner(currentStocktake.status)}
+                  {@const banner = getStocktakeStatusBanner(currentStocktake.status)}
+                  <span class="badge {banner.badgeClass}" style="font-size: 0.75rem;">
+                    {banner.label}
+                  </span>
+                {/if}
+              </div>
+
+              {#if currentStocktake.status === 'draft'}
+                <div style="display: flex; gap: 8px;">
+                  <button
+                    type="button"
+                    class="btn btn-outline btn-sm"
+                    id="btn-add-lines-from-stock"
+                    onclick={handleAddStocktakeLinesFromStock}
+                  >
+                    + 帶入此倉現有庫存品項 (S-04)
+                  </button>
+                </div>
+              {:else if currentStocktake.status === 'counting'}
+                <div style="display: flex; gap: 8px;">
+                  <button
+                    type="button"
+                    class="btn btn-outline btn-xs"
+                    id="btn-refresh-all-system-qty"
+                    onclick={() => handleOpenRefreshSystemQtyModal(currentStocktakeLines.map(l => l.id))}
+                    title="對全單品項重新取得帳面量快照 (S-08)"
+                  >
+                    🔄 重新取得系統量快照
+                  </button>
+                </div>
+              {/if}
+            </div>
+
+            <!-- Draft: Manual Add Product Section (Supports items with 0 stock) -->
+            {#if currentStocktake.status === 'draft'}
+              <div style="background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 12px; margin-bottom: 14px;">
+                <div style="font-size: 0.82rem; font-weight: 600; margin-bottom: 8px; color: var(--text-secondary);">
+                  手動加入品項（可選帳面為 0 的品項）：
+                </div>
+                {#if draftStkError}
+                  <div class="alert alert-danger" style="margin-bottom: 8px; padding: 6px 10px; font-size: 0.8rem;">
+                    {draftStkError}
+                  </div>
+                {/if}
+                <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                  <select
+                    bind:value={draftStkUnitId}
+                    class="form-select form-select-sm"
+                    id="select-draft-stk-unit"
+                    style="flex: 1; min-width: 260px;"
+                  >
+                    <option value="">-- 請選擇品項單位 --</option>
+                    {#each availableUnits as u}
+                      <option value={u.unit_id}>{u.label}</option>
+                    {/each}
+                  </select>
+                  <button
+                    type="button"
+                    class="btn btn-primary btn-sm"
+                    id="btn-add-draft-stk-line"
+                    onclick={handleAddStocktakeLineFromDraft}
+                    disabled={!draftStkUnitId || isAddingDraftStkLine}
+                  >
+                    {isAddingDraftStkLine ? '加入中...' : '+ 加入品項'}
+                  </button>
+                </div>
+              </div>
+            {/if}
+
+            <!-- Lines Table -->
+            {#if currentStocktakeLines.length > 0}
+              <div class="table-responsive">
+                <table class="inventory-table">
+                  <thead>
+                    <tr>
+                      {#each getStocktakeLineColumns(currentStocktake.status) as col}
+                        <th
+                          class="{col.align ? `text-${col.align}` : ''}"
+                          style="{col.width ? `width: ${col.width};` : ''}"
+                        >
+                          {col.label}
+                        </th>
+                      {/each}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each currentStocktakeLines as line (line.id)}
+                      {@const isAffected = affectedLineIds.includes(line.id)}
+                      {@const hasCounted = isStocktakeLineCounted(line.counted_quantity)}
+                      {@const delta = hasCounted ? (Number(line.counted_quantity) - (line.system_quantity || 0)) : null}
+                      <tr class="{isAffected ? 'row-warning' : ''}">
+                        <td>{line.line_no}</td>
+                        <td>
+                          <div style="font-weight: 600;">{line.product_name_snapshot}</div>
+                          <div style="font-size: 0.75rem; color: var(--text-secondary); display: flex; gap: 6px; align-items: center; margin-top: 2px;">
+                            <span>規格：{line.variant_name_snapshot}</span>
+                            <span class="unit-tag">{line.unit_name_snapshot}</span>
+                            {#if line.sku_snapshot}
+                              <span style="font-family: monospace; opacity: 0.7;">SKU: {line.sku_snapshot}</span>
+                            {/if}
+                          </div>
+                        </td>
+
+                        {#if currentStocktake.status === 'draft'}
+                          <td class="text-right font-mono text-muted">開始盤點時快照</td>
+                          <td class="text-center">
+                            <button
+                              type="button"
+                              class="btn-icon-danger"
+                              id="btn-remove-line-{line.id}"
+                              onclick={() => handleRemoveStocktakeLine(line.id)}
+                              title="移除此品項"
+                            >
+                              ✕
+                            </button>
+                          </td>
+                        {:else}
+                          <td class="text-right font-mono font-medium">{line.system_quantity ?? 0}</td>
+                          <td style="font-family: monospace; font-size: 0.78rem; color: var(--text-secondary);">
+                            {formatTime(line.system_quantity_at)}
+                          </td>
+                          <td class="text-right">
+                            {#if currentStocktake.status === 'counting'}
+                              <div style="display: flex; flex-direction: column; align-items: flex-end;">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="any"
+                                  class="form-input form-input-sm text-right font-mono font-bold"
+                                  style="width: 100px; padding: 4px 8px; {lineErrors[line.id] ? 'border-color: var(--color-danger, #ef4444);' : ''}"
+                                  id="input-counted-{line.id}"
+                                  value={line.counted_quantity ?? ''}
+                                  onchange={(e) => handleCountedQuantityChange(line.id, e.target.value, e.target)}
+                                  placeholder="實盤量"
+                                />
+                                {#if lineErrors[line.id]}
+                                  <span class="text-red" style="font-size: 0.72rem; margin-top: 2px;">
+                                    {lineErrors[line.id]}
+                                  </span>
+                                {/if}
+                              </div>
+                            {:else}
+                              <span class="font-mono font-bold">{line.counted_quantity ?? '-'}</span>
+                            {/if}
+                          </td>
+                          <td class="text-right font-mono">
+                            {#if delta === null}
+                              <span class="text-muted">-</span>
+                            {:else if delta > STOCKTAKE_VARIANCE_EPSILON}
+                              <span class="text-emerald font-bold font-mono">+{delta}</span>
+                              <span class="badge badge-emerald" style="font-size: 0.65rem; padding: 2px 4px; margin-left: 2px;">盤盈</span>
+                            {:else if delta < -STOCKTAKE_VARIANCE_EPSILON}
+                              <span class="text-red font-bold font-mono">{delta}</span>
+                              <span class="badge badge-red" style="font-size: 0.65rem; padding: 2px 4px; margin-left: 2px;">盤虧</span>
+                            {:else}
+                              <span class="text-muted font-mono">0 (相符)</span>
+                            {/if}
+                          </td>
+                          {#if currentStocktake.status === 'counting'}
+                            <td class="text-center">
+                              <div style="display: flex; gap: 4px; align-items: center; justify-content: center;">
+                                {#if isAffected}
+                                  <button
+                                    type="button"
+                                    class="btn btn-outline btn-xs"
+                                    style="color: #ef4444; border-color: rgba(239, 68, 68, 0.4); font-size: 0.7rem; padding: 2px 6px;"
+                                    onclick={() => handleOpenRefreshSystemQtyModal([line.id])}
+                                    title="重新取得此行系統量快照 (S-08)"
+                                  >
+                                    重取快照
+                                  </button>
+                                {/if}
+                                <button
+                                  type="button"
+                                  class="btn-icon-danger"
+                                  id="btn-remove-line-{line.id}"
+                                  onclick={() => handleRemoveStocktakeLine(line.id)}
+                                  title="在盤點中移除此品項"
+                                >
+                                  ✕
+                                </button>
+                              </div>
+                            </td>
+                          {/if}
+                        {/if}
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {:else}
+              <div style="text-align: center; padding: 28px; color: var(--text-secondary); font-size: 0.85rem;">
+                目前尚未加入任何品項。請點擊「帶入此倉現有庫存品項」或「手動加入品項」。
+              </div>
+            {/if}
+          </div>
         </div>
-        <h3 class="empty-state-title">盤點作業 (Stocktaking)</h3>
-        <p class="empty-state-desc">
-          支援不凍結倉別之盤點快照、實盤量登記、異動偵測與差額過帳。（此畫面將於 M12 專屬 issue 交付）
-        </p>
-        <span class="badge badge-amber" style="padding: 4px 10px; font-size: 0.8rem;">功能開發中 (M12)</span>
-      </div>
+      {:else}
+        <!-- LIST VIEW -->
+        <div class="stocktakes-list-container">
+          <!-- Filter bar -->
+          <div class="filter-bar glass-panel" style="display: flex; gap: 14px; align-items: center; padding: 12px 16px; margin-bottom: 16px; flex-wrap: wrap;">
+            {#if activeWarehouses.length > 1}
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <label for="filter-stk-warehouse" style="font-size: 0.85rem; color: var(--text-secondary);">倉別：</label>
+                <select
+                  id="filter-stk-warehouse"
+                  bind:value={selectedStocktakeWarehouseId}
+                  class="form-select form-select-sm"
+                  onchange={loadStocktakes}
+                >
+                  <option value="">全部倉庫</option>
+                  {#each activeWarehouses as wh}
+                    <option value={wh.id}>{wh.name} ({wh.code})</option>
+                  {/each}
+                </select>
+              </div>
+            {/if}
+
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <label for="filter-stk-status" style="font-size: 0.85rem; color: var(--text-secondary);">狀態：</label>
+              <select
+                id="filter-stk-status"
+                bind:value={selectedStocktakeStatusFilter}
+                class="form-select form-select-sm"
+                onchange={loadStocktakes}
+              >
+                <option value="">全部狀態</option>
+                <option value="draft">草稿 (draft)</option>
+                <option value="counting">盤點中 (counting)</option>
+                <option value="posted">已過帳 (posted)</option>
+                <option value="cancelled">已取消 (cancelled)</option>
+              </select>
+            </div>
+
+            <div style="margin-left: auto; display: flex; gap: 8px;">
+              <button
+                type="button"
+                class="btn btn-outline btn-sm"
+                onclick={loadStocktakes}
+                disabled={stocktakeLoading}
+              >
+                {stocktakeLoading ? '載入中...' : '重新整理'}
+              </button>
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                id="btn-open-create-stocktake"
+                onclick={handleOpenCreateStocktake}
+              >
+                + 建立盤點單
+              </button>
+            </div>
+          </div>
+
+          {#if stocktakeError}
+            <div class="alert alert-danger" style="margin-bottom: 14px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.85rem;">
+              {stocktakeError}
+            </div>
+          {/if}
+
+          {#if filteredStocktakes.length === 0}
+            <div class="empty-state-panel glass-panel" style="padding: 48px 24px; text-align: center;">
+              <div class="empty-state-icon" style="margin-bottom: 12px; opacity: 0.6;">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                  <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+                  <path d="m9 14 2 2 4-4"></path>
+                </svg>
+              </div>
+              <h3 class="empty-state-title" style="margin-bottom: 6px; font-size: 1.1rem; font-weight: 600;">尚無盤點單</h3>
+              <p class="empty-state-desc" style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 16px;">
+                目前條件下沒有找到任何盤點單。您可以點擊下方按鈕建立第一筆實地盤點單。
+              </p>
+              <button
+                type="button"
+                class="btn btn-primary btn-sm"
+                onclick={handleOpenCreateStocktake}
+              >
+                + 建立盤點單
+              </button>
+            </div>
+          {:else}
+            <div class="table-responsive glass-panel" style="padding: 0; overflow: hidden;">
+              <table class="inventory-table">
+                <thead>
+                  <tr>
+                    <th>單號</th>
+                    <th>倉別</th>
+                    <th>狀態</th>
+                    <th class="text-right">品項數</th>
+                    <th>實盤進度</th>
+                    <th>建立時間</th>
+                    <th class="text-center">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each filteredStocktakes as stk}
+                    {@const prog = formatStocktakeProgress(stk)}
+                    <tr class="table-row-hover">
+                      <td>
+                        <button
+                          type="button"
+                          class="link-po-ref"
+                          style="font-family: monospace; font-weight: 600;"
+                          id="stk-link-{stk.id}"
+                          onclick={() => handleSelectStocktake(stk.id)}
+                        >
+                          #{stk.stocktake_number}
+                        </button>
+                      </td>
+                      <td>
+                        <span class="unit-tag" style="background: rgba(var(--accent-amber), 0.1); color: rgb(var(--accent-amber)); border: 1px solid rgba(var(--accent-amber), 0.2);">
+                          {getWarehouseName(stk.warehouse_id)}
+                        </span>
+                      </td>
+                      <td>
+                        <span class="badge {getStocktakeStatusBadgeClass(stk.status)}">
+                          {formatStocktakeStatus(stk.status)}
+                        </span>
+                      </td>
+                      <td class="text-right font-mono">{stk.lines_count !== undefined ? stk.lines_count : '-'}</td>
+                      <td>
+                        {#if prog.type === 'badge'}
+                          <span class="badge {prog.badgeClass}">{prog.label}</span>
+                        {:else}
+                          <span class="text-muted">{prog.label}</span>
+                        {/if}
+                      </td>
+                      <td style="font-family: monospace; font-size: 0.8rem; color: var(--text-secondary);">{formatTime(stk.created_at)}</td>
+                      <td class="text-center">
+                        <button
+                          type="button"
+                          class="btn btn-outline btn-xs"
+                          id="btn-view-stk-{stk.id}"
+                          onclick={() => handleSelectStocktake(stk.id)}
+                        >
+                          檢視
+                        </button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+      {/if}
 
     {:else if activeSubTab === 'transfers'}
       <div class="empty-state-panel glass-panel">
@@ -2052,6 +3041,266 @@
           disabled={postConfirmLoading}
         >
           {postConfirmLoading ? '過帳處理中...' : '確認過帳'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Create Stocktake Modal (Issue #184) -->
+{#if activeStocktakeModal === 'create'}
+  <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closeStocktakeModal(); }} onkeydown={(e) => e.key === 'Escape' && closeStocktakeModal()} role="presentation">
+    <div class="modal-card glass-panel" style="max-width: 500px; width: 100%;">
+      <div class="modal-header">
+        <h3 class="modal-title">建立實地盤點單</h3>
+        <button type="button" class="btn-close" onclick={closeStocktakeModal}>✕</button>
+      </div>
+      <div class="modal-body">
+        {#if stocktakeModalError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; font-size: 0.85rem;">
+            {stocktakeModalError}
+          </div>
+        {/if}
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label for="create-stk-warehouse" class="form-label" style="display: block; font-size: 0.85rem; margin-bottom: 6px;">盤點倉庫</label>
+          <select
+            id="create-stk-warehouse"
+            bind:value={createStkWarehouseId}
+            class="form-select"
+            style="width: 100%;"
+          >
+            {#each activeWarehouses as wh}
+              <option value={wh.id}>{wh.name} ({wh.code}) {wh.is_default ? '★ 預設' : ''}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label for="create-stk-note" class="form-label" style="display: block; font-size: 0.85rem; margin-bottom: 6px;">備註說明 (選填)</label>
+          <input
+            type="text"
+            id="create-stk-note"
+            class="form-input"
+            bind:value={createStkNote}
+            placeholder="例如：2026 Q4 年終實盤清點"
+            style="width: 100%;"
+          />
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; cursor: pointer;">
+            <input
+              type="checkbox"
+              id="chk-stk-autofill"
+              bind:checked={createStkAutoFill}
+            />
+            <span>建立後自動帶入此倉現有庫存品項 (S-04)</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick={closeStocktakeModal} disabled={stocktakeModalLoading}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="btn-confirm-create-stocktake"
+          onclick={handleConfirmCreateStocktake}
+          disabled={stocktakeModalLoading}
+        >
+          {stocktakeModalLoading ? '建立中...' : '確認建立草稿'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Edit Stocktake Header Modal (Issue #184) -->
+{#if activeStocktakeModal === 'editHeader'}
+  <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closeStocktakeModal(); }} onkeydown={(e) => e.key === 'Escape' && closeStocktakeModal()} role="presentation">
+    <div class="modal-card glass-panel" style="max-width: 500px; width: 100%;">
+      <div class="modal-header">
+        <h3 class="modal-title">編輯盤點單表頭</h3>
+        <button type="button" class="btn-close" onclick={closeStocktakeModal}>✕</button>
+      </div>
+      <div class="modal-body">
+        {#if stocktakeModalError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; font-size: 0.85rem;">
+            {stocktakeModalError}
+          </div>
+        {/if}
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label for="edit-stk-warehouse" class="form-label" style="display: block; font-size: 0.85rem; margin-bottom: 6px;">盤點倉庫</label>
+          <select
+            id="edit-stk-warehouse"
+            bind:value={editStkWarehouseId}
+            class="form-select"
+            style="width: 100%;"
+            disabled={stocktakeModalLoading}
+          >
+            {#each activeWarehouses as wh}
+              <option value={wh.id}>{wh.name} ({wh.code}) {wh.is_default ? '★ 預設' : ''}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom: 14px;">
+          <label for="edit-stk-note" class="form-label" style="display: block; font-size: 0.85rem; margin-bottom: 6px;">備註說明 (選填)</label>
+          <textarea
+            id="edit-stk-note"
+            class="form-input"
+            rows="3"
+            bind:value={editStkNote}
+            placeholder="例如：調整盤點目的或說明"
+            style="width: 100%; resize: vertical;"
+            disabled={stocktakeModalLoading}
+          ></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick={closeStocktakeModal} disabled={stocktakeModalLoading}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="btn-confirm-edit-header"
+          onclick={handleConfirmEditHeader}
+          disabled={stocktakeModalLoading || !editStkWarehouseId}
+        >
+          {stocktakeModalLoading ? '儲存中...' : '儲存變更'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Start Counting Modal (Issue #184) -->
+{#if activeStocktakeModal === 'startCounting'}
+  <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closeStocktakeModal(); }} onkeydown={(e) => e.key === 'Escape' && closeStocktakeModal()} role="presentation">
+    <div class="modal-card glass-panel" style="max-width: 480px; width: 100%;">
+      <div class="modal-header">
+        <h3 class="modal-title">確認開始盤點？</h3>
+        <button type="button" class="btn-close" onclick={closeStocktakeModal}>✕</button>
+      </div>
+      <div class="modal-body">
+        {#if stocktakeModalError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; font-size: 0.85rem;">
+            {stocktakeModalError}
+          </div>
+        {/if}
+        <div class="alert alert-warning" style="margin-bottom: 14px; padding: 12px; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); color: #f59e0b; font-size: 0.85rem;">
+          ⚠️ <strong>注意：開始後不能再新增品項</strong>（S-06）。
+          系統將對目前 {currentStocktakeLines.length} 個品項鎖定當前帳面庫存快照，並進入盤點中狀態。
+        </div>
+        <p style="font-size: 0.85rem; color: var(--text-secondary);">
+          進入盤點中狀態後，您可逐行填寫實盤量，隨時離開畫面資料均會完整保留。
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick={closeStocktakeModal} disabled={stocktakeModalLoading}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="btn-confirm-start-counting"
+          onclick={handleConfirmStartCounting}
+          disabled={stocktakeModalLoading}
+        >
+          {stocktakeModalLoading ? '處理中...' : '確認開始盤點'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Post Stocktake Summary Modal (Issue #184) -->
+{#if activeStocktakeModal === 'post'}
+  <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closeStocktakeModal(); }} onkeydown={(e) => e.key === 'Escape' && closeStocktakeModal()} role="presentation">
+    <div class="modal-card glass-panel" style="max-width: 520px; width: 100%;">
+      <div class="modal-header">
+        <h3 class="modal-title">過帳盤點單確認</h3>
+        <button type="button" class="btn-close" onclick={closeStocktakeModal}>✕</button>
+      </div>
+      <div class="modal-body">
+        {#if stocktakeModalError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; font-size: 0.85rem;">
+            {stocktakeModalError}
+          </div>
+        {/if}
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 14px;">
+          請確認以下盤點盈虧統計摘要，過帳後系統將產生庫存調整流水帳並更新各倉庫存：
+        </p>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px;">
+          <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 6px; padding: 12px; text-align: center;">
+            <div style="font-size: 0.75rem; color: #10b981; margin-bottom: 4px;">盤盈品項</div>
+            <div style="font-size: 1.3rem; font-weight: 700; color: #10b981;">{postSummary.surplus}</div>
+          </div>
+          <div style="background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 6px; padding: 12px; text-align: center;">
+            <div style="font-size: 0.75rem; color: #ef4444; margin-bottom: 4px;">盤虧品項</div>
+            <div style="font-size: 1.3rem; font-weight: 700; color: #ef4444;">{postSummary.shortage}</div>
+          </div>
+          <div style="background: rgba(148, 163, 184, 0.08); border: 1px solid rgba(148, 163, 184, 0.25); border-radius: 6px; padding: 12px; text-align: center;">
+            <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 4px;">相符品項</div>
+            <div style="font-size: 1.3rem; font-weight: 700; color: var(--text-primary);">{postSummary.matched}</div>
+          </div>
+        </div>
+        {#if postSummary.missing > 0}
+          <div class="alert alert-danger" style="padding: 8px 12px; font-size: 0.85rem;">
+            ⚠️ 尚有 {postSummary.missing} 項未輸入實盤量，無法過帳 (S-07)。
+          </div>
+        {/if}
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick={closeStocktakeModal} disabled={stocktakeModalLoading}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="btn-confirm-post-stocktake"
+          onclick={handleConfirmPostStocktake}
+          disabled={stocktakeModalLoading || postSummary.missing > 0}
+        >
+          {stocktakeModalLoading ? '過帳處理中...' : '確認過帳'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Refresh System Quantity Modal (Issue #184) -->
+{#if activeStocktakeModal === 'refresh'}
+  <div class="modal-backdrop" onclick={(e) => { if (e.target === e.currentTarget) closeStocktakeModal(); }} onkeydown={(e) => e.key === 'Escape' && closeStocktakeModal()} role="presentation">
+    <div class="modal-card glass-panel" style="max-width: 480px; width: 100%;">
+      <div class="modal-header">
+        <h3 class="modal-title">重新取得系統量確認 (S-08)</h3>
+        <button type="button" class="btn-close" onclick={closeStocktakeModal}>✕</button>
+      </div>
+      <div class="modal-body">
+        {#if stocktakeModalError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; font-size: 0.85rem;">
+            {stocktakeModalError}
+          </div>
+        {/if}
+        <div class="alert alert-warning" style="margin-bottom: 14px; padding: 12px; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); color: #f59e0b; font-size: 0.85rem;">
+          ⚠️ <strong>提示：這些行的實盤量會被清空，需要重新盤點</strong>（S-08）。
+        </div>
+        <p style="font-size: 0.85rem; color: var(--text-secondary);">
+          系統將重新讀取目標品項（共 {refreshTargetLineIds.length} 項）的最新帳面量並更新快照時間戳。
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline" onclick={closeStocktakeModal} disabled={stocktakeModalLoading}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          id="btn-confirm-refresh-system-qty"
+          onclick={handleConfirmRefreshSystemQty}
+          disabled={stocktakeModalLoading}
+        >
+          {stocktakeModalLoading ? '更新中...' : '確認重新取得系統量'}
         </button>
       </div>
     </div>

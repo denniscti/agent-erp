@@ -436,6 +436,13 @@ if (!mockStocktakeLines || !Array.isArray(mockStocktakeLines)) {
   saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
 }
 
+export function isStocktakeLineCounted(val) {
+  if (val !== null && typeof val === 'object') {
+    return val.counted_quantity !== null && val.counted_quantity !== undefined && val.counted_quantity !== '';
+  }
+  return val !== null && val !== undefined && val !== '';
+}
+
 function nextMockStkNumber(tenantId) {
   let maxSeq = 0;
   for (const stk of mockStocktakes) {
@@ -2555,7 +2562,7 @@ export async function invoke(cmd, args = {}) {
         throw new Error(`此商品單位在〔${targetWh.name}〕已開帳，數量更正請用庫存調整（原因：期初更正）`);
       }
 
-      const now = Math.floor(Date.now() / 1000);
+      const now = args?.created_at !== undefined ? args.created_at : Math.floor(Date.now() / 1000);
       const imId = nextMockUid('im');
       const newMovement = {
         id: imId,
@@ -3142,7 +3149,7 @@ export async function invoke(cmd, args = {}) {
         }
       }
 
-      const now = Math.floor(Date.now() / 1000);
+      const now = args?.created_at !== undefined ? args.created_at : Math.floor(Date.now() / 1000);
       adj.status = 'posted';
       adj.posted_at = now;
 
@@ -3328,11 +3335,12 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'update_stocktake_header': {
+      const effectiveArgs = (args && args.payload) ? args.payload : (args || {});
       const {
         stocktake_id, stocktakeId,
         warehouse_id, warehouseId,
         note
-      } = args || {};
+      } = effectiveArgs;
       const targetTenantId = resolveMockActiveTenantId();
       if (!targetTenantId || !targetTenantId.trim()) {
         throw new Error('Tenant ID cannot be empty');
@@ -3347,7 +3355,7 @@ export async function invoke(cmd, args = {}) {
       }
 
       const targetWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
-      if (targetWhId !== undefined) {
+      if (targetWhId !== undefined && targetWhId !== null) {
         const trimmedWh = String(targetWhId).trim();
         validateMockWarehouseActive(targetTenantId, trimmedWh);
         stk.warehouse_id = trimmedWh;
@@ -3552,13 +3560,16 @@ export async function invoke(cmd, args = {}) {
 
       for (const line of lines) {
         let bal = 0;
+        let count = 0;
         for (const m of mockInventoryMovements) {
           if ((m.tenant_id || 'tnt_mock_1') === targetTenantId && m.warehouse_id === stk.warehouse_id && m.unit_id === line.unit_id) {
             bal += m.quantity_delta;
+            count += 1;
           }
         }
         line.system_quantity = bal;
         line.system_quantity_at = now;
+        line.system_movements_count = count;
         line.counted_quantity = null;
       }
 
@@ -3568,7 +3579,8 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'set_stocktake_counted_quantity': {
-      const { line_id, lineId, counted_quantity, countedQuantity } = args || {};
+      const effectiveArgs = (args && args.payload) ? args.payload : (args || {});
+      const { line_id, lineId, counted_quantity, countedQuantity } = effectiveArgs;
       const targetTenantId = resolveMockActiveTenantId();
       if (!targetTenantId || !targetTenantId.trim()) {
         throw new Error('Tenant ID cannot be empty');
@@ -3586,15 +3598,23 @@ export async function invoke(cmd, args = {}) {
         throw new Error('只有盤點中 (counting) 狀態可輸入實盤量');
       }
 
-      const rawQty = counted_quantity !== undefined ? counted_quantity : countedQuantity;
-      const qty = Number(rawQty);
-      if (isNaN(qty) || qty < 0) {
-        throw new Error('實盤量不可為負');
+      const hasQty = counted_quantity !== undefined || countedQuantity !== undefined;
+      if (hasQty) {
+        const rawQty = counted_quantity !== undefined ? counted_quantity : countedQuantity;
+        if (rawQty === '' || rawQty === null) {
+          line.counted_quantity = null;
+        } else {
+          const qty = Number(rawQty);
+          if (isNaN(qty) || qty < 0) {
+            throw new Error('實盤量不可為負');
+          }
+          line.counted_quantity = qty;
+        }
+        saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
       }
-
-      line.counted_quantity = qty;
-      saveStorage('agent_erp_mock_stocktake_lines', mockStocktakeLines);
-      return formatMockStocktakeDetail(stk);
+      return {
+        ...line
+      };
     }
 
     case 'refresh_stocktake_system_quantity': {
@@ -3622,13 +3642,16 @@ export async function invoke(cmd, args = {}) {
         }
 
         let bal = 0;
+        let count = 0;
         for (const m of mockInventoryMovements) {
           if ((m.tenant_id || 'tnt_mock_1') === targetTenantId && m.warehouse_id === stk.warehouse_id && m.unit_id === line.unit_id) {
             bal += m.quantity_delta;
+            count += 1;
           }
         }
         line.system_quantity = bal;
         line.system_quantity_at = now;
+        line.system_movements_count = count;
         line.counted_quantity = null; // S-08: clear counted quantity
       }
 
@@ -3663,28 +3686,36 @@ export async function invoke(cmd, args = {}) {
         throw new Error('盤點單沒有任何品項');
       }
 
-      const missingCount = lines.filter(l => l.counted_quantity === null || l.counted_quantity === undefined).length;
+      const missingCount = lines.filter(l => !isStocktakeLineCounted(l.counted_quantity)).length;
       if (missingCount > 0) {
         throw new Error(`尚有 ${missingCount} 項未輸入實盤量`);
       }
 
-      // S-07: check movement after system_quantity_at
+      // S-07: check movement count mismatch
       const affectedItems = [];
+      const affectedLineIds = [];
       for (const line of lines) {
-        const snapAt = line.system_quantity_at || 0;
-        const hasNew = mockInventoryMovements.some(
-          m => (m.tenant_id || 'tnt_mock_1') === targetTenantId &&
-               m.warehouse_id === stk.warehouse_id &&
-               m.unit_id === line.unit_id &&
-               (m.created_at || 0) > snapAt
-        );
-        if (hasNew) {
+        const snapCount = line.system_movements_count ?? 0;
+        let currentCount = 0;
+        for (const m of mockInventoryMovements) {
+          if ((m.tenant_id || 'tnt_mock_1') === targetTenantId &&
+              m.warehouse_id === stk.warehouse_id &&
+              m.unit_id === line.unit_id) {
+            currentCount += 1;
+          }
+        }
+        if (currentCount !== snapCount) {
           affectedItems.push(`〔${line.product_name_snapshot}／${line.variant_name_snapshot}／${line.unit_name_snapshot}〕`);
+          affectedLineIds.push(line.id);
         }
       }
 
       if (affectedItems.length > 0) {
-        throw new Error(`以下品項在盤點期間有異動：${affectedItems.join('、')}，請重新取得系統量並重新確認實盤`);
+        const err = new Error(`以下品項在盤點期間有異動：${affectedItems.join('、')}，請重新取得系統量並重新確認實盤`);
+        err.code = 'MOVEMENTS_DETECTED_DURING_COUNTING';
+        err.affected_line_ids = affectedLineIds;
+        err.affectedLineIds = affectedLineIds;
+        throw err;
       }
 
       const now = Math.floor(Date.now() / 1000);
@@ -3756,6 +3787,9 @@ export async function invoke(cmd, args = {}) {
     case 'list_stocktakes': {
       const { status, warehouse_id, warehouseId } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
       const targetWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
       let list = mockStocktakes.filter(s => (s.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (status && String(status).trim()) {
@@ -3764,7 +3798,15 @@ export async function invoke(cmd, args = {}) {
       if (targetWhId && String(targetWhId).trim()) {
         list = list.filter(s => s.warehouse_id === String(targetWhId).trim());
       }
-      return list.sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+      return list.map(s => {
+        const lines = mockStocktakeLines.filter(l => l.stocktake_id === s.id);
+        const counted = lines.filter(l => isStocktakeLineCounted(l.counted_quantity)).length;
+        return {
+          ...s,
+          lines_count: lines.length,
+          counted_count: counted
+        };
+      }).sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
     }
 
     case 'reset_mock_stocktakes': {

@@ -707,13 +707,41 @@ pub fn post_inventory_adjustment_impl(
         },
     )?;
 
-    // Fetch lines
+    let now = current_timestamp();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    // Idempotency status guard
+    let affected = tx.execute(
+        "UPDATE inventory_adjustments SET status = 'posted', posted_at = ?1 
+             WHERE id = ?2 AND status = 'draft' AND tenant_id = ?3",
+        params![now, adjustment_id, tenant_id],
+    )?;
+
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "inventory_adjustments",
+        adjustment_id,
+        tenant_id,
+        affected,
+        InventoryAdjustmentError::AdjustmentNotFound,
+        |s| {
+            if s != "draft" {
+                Err(InventoryAdjustmentError::InvalidStateTransition {
+                    from: s,
+                    to: "posted".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+
+    // Fetch lines INSIDE the transaction to guarantee fresh snapshot without race conditions
     let lines: Vec<(String, i64, String, f64, String, String, String)> = {
-        let mut lines_stmt = conn
-            .prepare(
-                "SELECT id, line_no, unit_id, quantity_delta, product_name_snapshot, variant_name_snapshot, unit_name_snapshot
+        let mut lines_stmt = tx.prepare(
+            "SELECT id, line_no, unit_id, quantity_delta, product_name_snapshot, variant_name_snapshot, unit_name_snapshot
                  FROM inventory_adjustment_lines WHERE adjustment_id = ?1 ORDER BY line_no ASC",
-            )?;
+        )?;
 
         let rows = lines_stmt.query_map(params![adjustment_id], |r| {
             Ok((
@@ -740,28 +768,11 @@ pub fn post_inventory_adjustment_impl(
 
     // Re-verify A-04 & A-05
     for (_, _, uid, q_delta, _, _, _) in &lines {
-        resolve_unit_snapshot(conn, tenant_id, uid)
+        resolve_unit_snapshot(&tx, tenant_id, uid)
             .map_err(|_| InventoryAdjustmentError::UnitNotFound)?;
         if q_delta.abs() < 1e-9 {
             return Err(InventoryAdjustmentError::ZeroQuantityDelta);
         }
-    }
-
-    let now = current_timestamp();
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-    // Idempotency status guard
-    let affected = tx.execute(
-        "UPDATE inventory_adjustments SET status = 'posted', posted_at = ?1 
-             WHERE id = ?2 AND status = 'draft' AND tenant_id = ?3",
-        params![now, adjustment_id, tenant_id],
-    )?;
-
-    if affected == 0 {
-        return Err(InventoryAdjustmentError::InvalidStateTransition {
-            from: status,
-            to: "posted".to_string(),
-        });
     }
 
     // A-09: Check current stock in transaction and ensure current_qty + quantity_delta >= 0
@@ -844,18 +855,33 @@ pub fn cancel_inventory_adjustment_impl(
     }
 
     let now = current_timestamp();
-    let affected = conn.execute(
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let affected = tx.execute(
         "UPDATE inventory_adjustments SET status = 'cancelled', cancelled_at = ?1 
              WHERE id = ?2 AND status = 'draft' AND tenant_id = ?3",
         params![now, adjustment_id, tenant_id],
     )?;
 
-    if affected == 0 {
-        return Err(InventoryAdjustmentError::InvalidStateTransition {
-            from: status,
-            to: "cancelled".to_string(),
-        });
-    }
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "inventory_adjustments",
+        adjustment_id,
+        tenant_id,
+        affected,
+        InventoryAdjustmentError::AdjustmentNotFound,
+        |s| {
+            if s != "draft" {
+                Err(InventoryAdjustmentError::InvalidStateTransition {
+                    from: s,
+                    to: "cancelled".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+
+    tx.commit()?;
 
     get_inventory_adjustment_impl(conn, tenant_id, adjustment_id)
 }

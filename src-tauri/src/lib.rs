@@ -29,6 +29,53 @@ pub struct ChatResponseChunk {
     pub done: bool,
 }
 
+pub(crate) fn ensure_guarded_mutation_affected<E, F>(
+    conn: &rusqlite::Connection,
+    table: &str,
+    doc_id: &str,
+    tenant_id: &str,
+    affected: usize,
+    not_found_err: E,
+    status_validator: F,
+) -> Result<(), E>
+where
+    F: FnOnce(String) -> Result<(), E>,
+{
+    if affected > 0 {
+        return Ok(());
+    }
+
+    // Whitelist check to prevent potential SQL injection via non-literal table identifiers
+    const ALLOWED_TABLES: &[&str] = &["stocktakes", "inventory_adjustments", "purchase_orders"];
+    if !ALLOWED_TABLES.contains(&table) {
+        return Err(not_found_err);
+    }
+
+    let sql = format!(
+        "SELECT status FROM {} WHERE id = ?1 AND tenant_id = ?2",
+        table
+    );
+    let current_status: Result<String, _> =
+        conn.query_row(&sql, rusqlite::params![doc_id, tenant_id], |r| r.get(0));
+    match current_status {
+        Ok(s) => match status_validator(s) {
+            // Propagate differentiated error if status fails guard validation
+            Err(status_err) => Err(status_err),
+            // If status matches guard, affected == 0 indicates genuine row not found
+            Ok(()) => Err(not_found_err),
+        },
+        Err(_) => Err(not_found_err),
+    }
+}
+
+pub fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 // Locate SQLite DB path in secure AppData folder
 pub(crate) fn get_db_path<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> PathBuf {
     #[cfg(test)]

@@ -6,6 +6,48 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static PO_ID_COUNTER: AtomicU64 = AtomicU64::new(1000);
 
+#[derive(Debug, thiserror::Error, PartialEq, Clone)]
+pub enum PurchaseOrderError {
+    #[error("找不到採購單或不屬於目前租戶")]
+    OrderNotFound,
+
+    #[error("下單失敗：訂單狀態已變更或已被處理")]
+    NotDraftForSubmit,
+
+    #[error("確認到貨失敗：訂單狀態已非 ordered 或已被其他處理完成")]
+    NotOrderedForReceive,
+
+    #[error("取消採購單失敗：狀態已被修改")]
+    CannotCancel,
+
+    #[error("Tenant ID cannot be empty")]
+    EmptyTenantId,
+
+    #[error("無法解析有效使用者 session，操作被拒絕")]
+    EmptyUserId,
+
+    #[error("採購單至少需有 1 筆明細方可下單")]
+    EmptyOrderLines,
+
+    #[error("無效的狀態轉換：不可從 {from} 轉換至 {to}")]
+    InvalidStateTransition { from: String, to: String },
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<rusqlite::Error> for PurchaseOrderError {
+    fn from(err: rusqlite::Error) -> Self {
+        PurchaseOrderError::Other(err.to_string())
+    }
+}
+
+impl From<String> for PurchaseOrderError {
+    fn from(err: String) -> Self {
+        PurchaseOrderError::Other(err)
+    }
+}
+
 fn current_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -841,64 +883,80 @@ pub fn submit_purchase_order_impl(
     conn: &mut rusqlite::Connection,
     tenant_id: &str,
     order_id: &str,
-) -> Result<PurchaseOrderDetail, String> {
+) -> Result<PurchaseOrderDetail, PurchaseOrderError> {
     if tenant_id.trim().is_empty() {
-        return Err("Tenant ID cannot be empty".to_string());
+        return Err(PurchaseOrderError::EmptyTenantId);
     }
 
     let status: String = {
-        let mut stmt = conn
-            .prepare("SELECT status FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2")
-            .map_err(|e| e.to_string())?;
+        let mut stmt =
+            conn.prepare("SELECT status FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2")?;
         stmt.query_row(params![order_id, tenant_id], |row| row.get(0))
-            .map_err(|_| "找不到採購單或不屬於目前租戶".to_string())?
+            .map_err(|_| PurchaseOrderError::OrderNotFound)?
     };
 
     if status != "draft" {
-        return Err(format!("無效的狀態轉換：不可從 {} 轉換至 ordered", status));
+        return Err(PurchaseOrderError::InvalidStateTransition {
+            from: status,
+            to: "ordered".to_string(),
+        });
     }
 
     let detail = get_purchase_order_impl(conn, tenant_id, order_id)?;
     if detail.lines.is_empty() {
-        return Err("採購單至少需有 1 筆明細方可下單".to_string());
+        return Err(PurchaseOrderError::EmptyOrderLines);
     }
 
     // Re-validate R-03 ~ R-06
     for line in &detail.lines {
         let snap = resolve_unit_snapshot(conn, tenant_id, &line.unit_id)?;
         if !snap.is_purchasable {
-            return Err(format!(
+            return Err(PurchaseOrderError::Other(format!(
                 "明細項目「{}」設定為不可採購 (is_purchasable = 0)",
                 snap.product_name
-            ));
+            )));
         }
         if line.quantity <= 0.0 {
-            return Err("明細項目採購數量必須大於 0".to_string());
+            return Err(PurchaseOrderError::Other(
+                "明細項目採購數量必須大於 0".to_string(),
+            ));
         }
         if line.purchase_cost < 0.0 {
-            return Err("明細項目採購單價不可為負數".to_string());
+            return Err(PurchaseOrderError::Other(
+                "明細項目採購單價不可為負數".to_string(),
+            ));
         }
     }
 
     let now = current_timestamp();
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn.transaction()?;
 
     // Atomic update with status guard for idempotency
-    let affected = tx
-        .execute(
-            "UPDATE purchase_orders SET status = 'ordered', ordered_at = ?1 
+    let affected = tx.execute(
+        "UPDATE purchase_orders SET status = 'ordered', ordered_at = ?1 
          WHERE id = ?2 AND status = 'draft' AND tenant_id = ?3",
-            params![now, order_id, tenant_id],
-        )
-        .map_err(|e| e.to_string())?;
+        params![now, order_id, tenant_id],
+    )?;
 
-    if affected == 0 {
-        return Err("下單失敗：訂單狀態已變更或已被處理".to_string());
-    }
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "purchase_orders",
+        order_id,
+        tenant_id,
+        affected,
+        PurchaseOrderError::OrderNotFound,
+        |s| {
+            if s != "draft" {
+                Err(PurchaseOrderError::NotDraftForSubmit)
+            } else {
+                Ok(())
+            }
+        },
+    )?;
 
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
 
-    get_purchase_order_impl(conn, tenant_id, order_id)
+    Ok(get_purchase_order_impl(conn, tenant_id, order_id)?)
 }
 
 pub fn confirm_purchase_order_received_impl(
@@ -907,32 +965,33 @@ pub fn confirm_purchase_order_received_impl(
     user_id: &str,
     order_id: &str,
     line_received_quantities: Option<HashMap<String, f64>>,
-) -> Result<PurchaseOrderDetail, String> {
+) -> Result<PurchaseOrderDetail, PurchaseOrderError> {
     if tenant_id.trim().is_empty() {
-        return Err("Tenant ID cannot be empty".to_string());
+        return Err(PurchaseOrderError::EmptyTenantId);
     }
     let trimmed_uid = user_id.trim();
     if trimmed_uid.is_empty() {
-        return Err("無法解析有效使用者 session，操作被拒絕".to_string());
+        return Err(PurchaseOrderError::EmptyUserId);
     }
 
     let (status, po_warehouse_id): (String, String) = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT status, warehouse_id FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2",
-            )
-            .map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT status, warehouse_id FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2",
+        )?;
         stmt.query_row(params![order_id, tenant_id], |row| {
             Ok((
                 row.get(0)?,
                 row.get::<_, Option<String>>(1)?.unwrap_or_default(),
             ))
         })
-        .map_err(|_| "找不到採購單或不屬於目前租戶".to_string())?
+        .map_err(|_| PurchaseOrderError::OrderNotFound)?
     };
 
     if status != "ordered" {
-        return Err(format!("無效的狀態轉換：不可從 {} 轉換至 received", status));
+        return Err(PurchaseOrderError::InvalidStateTransition {
+            from: status,
+            to: "received".to_string(),
+        });
     }
 
     // P-03: Re-validate warehouse is active upon receipt
@@ -941,34 +1000,42 @@ pub fn confirm_purchase_order_received_impl(
     let rec_map = line_received_quantities.unwrap_or_default();
     let now = current_timestamp();
 
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn.transaction()?;
 
     // 1. Idempotency status guard
-    let affected = tx
-        .execute(
-            "UPDATE purchase_orders SET status = 'received', received_at = ?1 
+    let affected = tx.execute(
+        "UPDATE purchase_orders SET status = 'received', received_at = ?1 
          WHERE id = ?2 AND status = 'ordered' AND tenant_id = ?3",
-            params![now, order_id, tenant_id],
-        )
-        .map_err(|e| e.to_string())?;
+        params![now, order_id, tenant_id],
+    )?;
 
-    if affected == 0 {
-        return Err("確認到貨失敗：訂單狀態已非 ordered 或已被其他處理完成".to_string());
-    }
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "purchase_orders",
+        order_id,
+        tenant_id,
+        affected,
+        PurchaseOrderError::OrderNotFound,
+        |s| {
+            if s != "ordered" {
+                Err(PurchaseOrderError::NotOrderedForReceive)
+            } else {
+                Ok(())
+            }
+        },
+    )?;
 
     // 2. Query lines
     let lines_data: Vec<(String, String, f64, f64)> = {
         let mut lines_stmt = tx.prepare(
             "SELECT id, unit_id, quantity, purchase_cost FROM purchase_order_lines WHERE purchase_order_id = ?1"
-        ).map_err(|e| e.to_string())?;
-        let rows = lines_stmt
-            .query_map(params![order_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
-            .map_err(|e| e.to_string())?;
+        )?;
+        let rows = lines_stmt.query_map(params![order_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
         let mut list = Vec::new();
         for r in rows {
-            list.push(r.map_err(|e| e.to_string())?);
+            list.push(r?);
         }
         list
     };
@@ -977,7 +1044,7 @@ pub fn confirm_purchase_order_received_impl(
         let actual_qty = match rec_map.get(&lid) {
             Some(&q) => {
                 if q < 0.0 {
-                    return Err("實到數量不可為負數".to_string());
+                    return Err(PurchaseOrderError::Other("實到數量不可為負數".to_string()));
                 }
                 q
             }
@@ -988,8 +1055,7 @@ pub fn confirm_purchase_order_received_impl(
         tx.execute(
             "UPDATE purchase_order_lines SET received_quantity = ?1 WHERE id = ?2",
             params![actual_qty, lid],
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
 
         // Insert inventory movement with warehouse_id
         let im_id = format!(
@@ -1012,57 +1078,65 @@ pub fn confirm_purchase_order_received_impl(
                 now,
                 po_warehouse_id
             ],
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     }
 
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
 
-    get_purchase_order_impl(conn, tenant_id, order_id)
+    Ok(get_purchase_order_impl(conn, tenant_id, order_id)?)
 }
 
 pub fn cancel_purchase_order_impl(
     conn: &mut rusqlite::Connection,
     tenant_id: &str,
     order_id: &str,
-) -> Result<PurchaseOrderDetail, String> {
+) -> Result<PurchaseOrderDetail, PurchaseOrderError> {
     if tenant_id.trim().is_empty() {
-        return Err("Tenant ID cannot be empty".to_string());
+        return Err(PurchaseOrderError::EmptyTenantId);
     }
 
     let status: String = {
-        let mut stmt = conn
-            .prepare("SELECT status FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2")
-            .map_err(|e| e.to_string())?;
+        let mut stmt =
+            conn.prepare("SELECT status FROM purchase_orders WHERE id = ?1 AND tenant_id = ?2")?;
         stmt.query_row(params![order_id, tenant_id], |row| row.get(0))
-            .map_err(|_| "找不到採購單或不屬於目前租戶".to_string())?
+            .map_err(|_| PurchaseOrderError::OrderNotFound)?
     };
 
     if status != "draft" && status != "ordered" {
-        return Err(format!(
-            "無效的狀態轉換：不可從 {} 轉換至 cancelled",
-            status
-        ));
+        return Err(PurchaseOrderError::InvalidStateTransition {
+            from: status,
+            to: "cancelled".to_string(),
+        });
     }
 
     let now = current_timestamp();
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn.transaction()?;
 
-    let affected = tx
-        .execute(
-            "UPDATE purchase_orders SET status = 'cancelled', cancelled_at = ?1 
+    let affected = tx.execute(
+        "UPDATE purchase_orders SET status = 'cancelled', cancelled_at = ?1 
          WHERE id = ?2 AND (status = 'draft' OR status = 'ordered') AND tenant_id = ?3",
-            params![now, order_id, tenant_id],
-        )
-        .map_err(|e| e.to_string())?;
+        params![now, order_id, tenant_id],
+    )?;
 
-    if affected == 0 {
-        return Err("取消採購單失敗：狀態已被修改".to_string());
-    }
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "purchase_orders",
+        order_id,
+        tenant_id,
+        affected,
+        PurchaseOrderError::OrderNotFound,
+        |s| {
+            if s != "draft" && s != "ordered" {
+                Err(PurchaseOrderError::CannotCancel)
+            } else {
+                Ok(())
+            }
+        },
+    )?;
 
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit()?;
 
-    get_purchase_order_impl(conn, tenant_id, order_id)
+    Ok(get_purchase_order_impl(conn, tenant_id, order_id)?)
 }
 
 pub fn get_purchase_order_impl(
@@ -1588,7 +1662,7 @@ pub async fn submit_purchase_order<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    submit_purchase_order_impl(&mut conn, &active_tid, &order_id)
+    submit_purchase_order_impl(&mut conn, &active_tid, &order_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1608,6 +1682,7 @@ pub async fn confirm_purchase_order_received<R: tauri::Runtime>(
             .collect::<HashMap<String, f64>>()
     });
     confirm_purchase_order_received_impl(&mut conn, &active_tid, &active_uid, &order_id, rec_map)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1619,7 +1694,7 @@ pub async fn cancel_purchase_order<R: tauri::Runtime>(
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    cancel_purchase_order_impl(&mut conn, &active_tid, &order_id)
+    cancel_purchase_order_impl(&mut conn, &active_tid, &order_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2388,7 +2463,7 @@ mod tests {
         let err_empty =
             submit_purchase_order_impl(&mut conn, "tnt_test", &empty_order.order.id).unwrap_err();
         // Then: Rejected because at least 1 line is required
-        assert!(err_empty.contains("採購單至少需有 1 筆明細方可下單"));
+        assert_eq!(err_empty, PurchaseOrderError::EmptyOrderLines);
 
         // --- TC-PO-E-10: Illegal state transition draft -> received directly rejected ---
         // Given: Draft order
@@ -2402,7 +2477,7 @@ mod tests {
         )
         .unwrap_err();
         // Then: Rejected with invalid state transition error
-        assert!(err_jump.contains("無效的狀態轉換"));
+        assert!(err_jump.to_string().contains("無效的狀態轉換"));
 
         // --- TC-PO-E-13: Illegal state transition received -> cancelled rejected ---
         // Given: A purchase order that has already reached the terminal 'received' state
@@ -2438,7 +2513,13 @@ mod tests {
         let err_cancel_received =
             cancel_purchase_order_impl(&mut conn, "tnt_test", &received.order.id).unwrap_err();
         // Then: Rejected because 'received' is a terminal state with no permitted transitions
-        assert!(err_cancel_received.contains("無效的狀態轉換：不可從 received 轉換至 cancelled"));
+        assert_eq!(
+            err_cancel_received,
+            PurchaseOrderError::InvalidStateTransition {
+                from: "received".to_string(),
+                to: "cancelled".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -2736,7 +2817,7 @@ mod tests {
 
         // Then: Operation returns error
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("實到數量不可為負數"));
+        assert!(res.unwrap_err().to_string().contains("實到數量不可為負數"));
 
         // Then: Transaction rolled back completely: order status remains 'ordered', and zero inventory movements inserted
         let order_check = get_purchase_order_impl(&conn, "tnt_test", &detail.order.id).unwrap();

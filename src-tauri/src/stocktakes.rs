@@ -30,6 +30,8 @@ pub struct Stocktake {
     pub posted_at: Option<i64>,
     pub cancelled_at: Option<i64>,
     pub task_id: Option<String>,
+    pub lines_count: Option<i64>,
+    pub counted_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -46,12 +48,42 @@ pub struct StocktakeLine {
     pub system_quantity_at: Option<i64>,
     pub counted_quantity: Option<f64>,
     pub created_at: i64,
+    #[serde(default)]
+    pub system_movements_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
 pub struct StocktakeDetail {
     pub stocktake: Stocktake,
     pub lines: Vec<StocktakeLine>,
+}
+
+// ==========================================
+// Payload Structs for Wire Deserialization
+// ==========================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStocktakeHeaderPayload {
+    #[serde(default, alias = "stocktake_id")]
+    pub stocktake_id: String,
+    #[serde(default, alias = "warehouse_id")]
+    pub warehouse_id: Option<String>,
+    #[serde(default, deserialize_with = "crate::deserialize_some")]
+    pub note: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetStocktakeCountedQuantityPayload {
+    #[serde(default, alias = "line_id")]
+    pub line_id: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::deserialize_some",
+        alias = "counted_quantity"
+    )]
+    pub counted_quantity: Option<Option<f64>>,
 }
 
 // ==========================================
@@ -103,10 +135,16 @@ pub fn create_stocktakes_tables(conn: &rusqlite::Connection) -> Result<(), rusql
             system_quantity REAL,
             system_quantity_at INTEGER,
             counted_quantity REAL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            system_movements_count INTEGER
         )",
         [],
     )?;
+
+    let _ = conn.execute(
+        "ALTER TABLE stocktake_lines ADD COLUMN system_movements_count INTEGER",
+        [],
+    );
 
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_stkl_stocktake ON stocktake_lines (stocktake_id)",
@@ -161,6 +199,9 @@ pub enum StocktakeError {
     #[error("只有 counting 狀態可以重新取得系統量")]
     OnlyCountingForRefresh(String),
 
+    #[error("實盤量為必填欄位或請指定 null 清空")]
+    CountedQuantityRequired,
+
     #[error("實盤量不可為負")]
     NegativeCountedQuantity,
 
@@ -173,8 +214,11 @@ pub enum StocktakeError {
         stocktake_number: String,
     },
 
-    #[error("以下品項在盤點期間有異動：{0}，請重新取得系統量並重新確認實盤")]
-    MovementsDetectedDuringCounting(String),
+    #[error("以下品項在盤點期間有異動：{items}，請重新取得系統量並重新確認實盤")]
+    MovementsDetectedDuringCounting {
+        items: String,
+        affected_line_ids: Vec<String>,
+    },
 
     #[error("無效的狀態轉換：不可從 {from} 轉換至 {to}")]
     InvalidStateTransition { from: String, to: String },
@@ -210,10 +254,11 @@ impl StocktakeError {
             }
             StocktakeError::OnlyCountingForCountedQty(_) => "ONLY_COUNTING_FOR_COUNTED_QTY",
             StocktakeError::OnlyCountingForRefresh(_) => "ONLY_COUNTING_FOR_REFRESH",
+            StocktakeError::CountedQuantityRequired => "COUNTED_QUANTITY_REQUIRED",
             StocktakeError::NegativeCountedQuantity => "NEGATIVE_COUNTED_QUANTITY",
             StocktakeError::MissingCountedQuantity(_) => "MISSING_COUNTED_QUANTITY",
             StocktakeError::UnitAlreadyInCounting { .. } => "UNIT_ALREADY_IN_COUNTING",
-            StocktakeError::MovementsDetectedDuringCounting(_) => {
+            StocktakeError::MovementsDetectedDuringCounting { .. } => {
                 "MOVEMENTS_DETECTED_DURING_COUNTING"
             }
             StocktakeError::InvalidStateTransition { .. } => "INVALID_STATE_TRANSITION",
@@ -227,18 +272,28 @@ impl StocktakeError {
 pub struct StocktakeErrorPayload {
     pub code: String,
     pub message: String,
+    pub affected_line_ids: Option<Vec<String>>,
 }
 
 impl From<StocktakeError> for StocktakeErrorPayload {
     fn from(err: StocktakeError) -> Self {
+        let code = err.code().to_string();
+        let message = err.to_string();
+        let affected_line_ids = match err {
+            StocktakeError::MovementsDetectedDuringCounting {
+                affected_line_ids, ..
+            } => Some(affected_line_ids),
+            _ => None,
+        };
         Self {
-            code: err.code().to_string(),
-            message: err.to_string(),
+            code,
+            message,
+            affected_line_ids,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Default, specta::Type)]
 pub enum OptionalUpdate<T> {
     #[default]
     Keep,
@@ -258,6 +313,16 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for OptionalUpdate
     }
 }
 
+impl<T> From<Option<Option<T>>> for OptionalUpdate<T> {
+    fn from(opt: Option<Option<T>>) -> Self {
+        match opt {
+            None => OptionalUpdate::Keep,
+            Some(None) => OptionalUpdate::Clear,
+            Some(Some(v)) => OptionalUpdate::Set(v),
+        }
+    }
+}
+
 impl From<Option<String>> for OptionalUpdate<String> {
     fn from(opt: Option<String>) -> Self {
         match opt {
@@ -270,6 +335,70 @@ impl From<Option<String>> for OptionalUpdate<String> {
 // ==========================================
 // Helpers
 // ==========================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StocktakeOperation {
+    EditHeader,
+    AddLine,
+    RemoveLine,
+    InputCountedQuantity,
+    RefreshSystemQuantity,
+}
+
+pub fn allowed_statuses_for_operation(op: StocktakeOperation) -> &'static [&'static str] {
+    match op {
+        StocktakeOperation::EditHeader | StocktakeOperation::AddLine => &["draft"],
+        StocktakeOperation::RemoveLine => &["draft", "counting"],
+        StocktakeOperation::InputCountedQuantity | StocktakeOperation::RefreshSystemQuantity => {
+            &["counting"]
+        }
+    }
+}
+
+pub fn can_perform_operation(op: StocktakeOperation, status: &str) -> bool {
+    allowed_statuses_for_operation(op).contains(&status)
+}
+
+pub fn validate_operation_status(
+    op: StocktakeOperation,
+    status: &str,
+) -> Result<(), StocktakeError> {
+    if can_perform_operation(op, status) {
+        return Ok(());
+    }
+    match op {
+        StocktakeOperation::EditHeader => {
+            Err(StocktakeError::NotDraftForHeaderEdit(status.to_string()))
+        }
+        StocktakeOperation::AddLine => Err(StocktakeError::NotDraftForLineAdd(status.to_string())),
+        StocktakeOperation::RemoveLine => Err(StocktakeError::NotDraftOrCountingForLineRemove(
+            status.to_string(),
+        )),
+        StocktakeOperation::InputCountedQuantity => Err(StocktakeError::OnlyCountingForCountedQty(
+            status.to_string(),
+        )),
+        StocktakeOperation::RefreshSystemQuantity => {
+            Err(StocktakeError::OnlyCountingForRefresh(status.to_string()))
+        }
+    }
+}
+
+/// Canonical business definition of whether a stocktake line is considered "counted".
+/// In SQL (list_stocktakes_impl): `COUNT(stl.counted_quantity)` evaluates to non-NULL counted_quantity.
+/// In Rust (get_stocktake_impl / helpers): `is_stocktake_line_counted` checks `counted_quantity.is_some()`.
+#[inline]
+pub fn is_stocktake_line_counted(counted_quantity: Option<f64>) -> bool {
+    counted_quantity.is_some()
+}
+
+pub fn compute_stocktake_lines_summary(lines: &[StocktakeLine]) -> (i64, i64) {
+    let lines_count = lines.len() as i64;
+    let counted_count = lines
+        .iter()
+        .filter(|l| is_stocktake_line_counted(l.counted_quantity))
+        .count() as i64;
+    (lines_count, counted_count)
+}
 
 pub fn can_transition(from: &str, to: &str) -> bool {
     matches!(
@@ -317,6 +446,8 @@ fn map_stocktake_row(row: &rusqlite::Row<'_>) -> Result<Stocktake, rusqlite::Err
         posted_at: row.get(9)?,
         cancelled_at: row.get(10)?,
         task_id: row.get(11)?,
+        lines_count: row.get(12).ok(),
+        counted_count: row.get(13).ok(),
     })
 }
 
@@ -334,6 +465,7 @@ fn map_stocktake_line_row(row: &rusqlite::Row<'_>) -> Result<StocktakeLine, rusq
         system_quantity_at: row.get(9)?,
         counted_quantity: row.get(10)?,
         created_at: row.get(11)?,
+        system_movements_count: row.get(12).ok(),
     })
 }
 
@@ -456,6 +588,7 @@ pub fn create_stocktake_impl(
                 system_quantity_at: None,
                 counted_quantity: None,
                 created_at: now,
+                system_movements_count: None,
             });
         }
     }
@@ -475,6 +608,8 @@ pub fn create_stocktake_impl(
         posted_at: None,
         cancelled_at: None,
         task_id,
+        lines_count: Some(lines.len() as i64),
+        counted_count: Some(0),
     };
 
     Ok(StocktakeDetail { stocktake, lines })
@@ -503,9 +638,7 @@ pub fn update_stocktake_header_impl(
         Err(e) => return Err(StocktakeError::from(e)),
     };
 
-    if status != "draft" {
-        return Err(StocktakeError::NotDraftForHeaderEdit(status));
-    }
+    validate_operation_status(StocktakeOperation::EditHeader, &status)?;
 
     let target_wh = warehouse_id.as_deref().unwrap_or(&current_wh);
 
@@ -518,21 +651,22 @@ pub fn update_stocktake_header_impl(
         }
     })?;
 
+    let ensure_draft = |s: String| validate_operation_status(StocktakeOperation::EditHeader, &s);
+
     if let Some(ref wh) = warehouse_id {
         let affected = tx.execute(
             "UPDATE stocktakes SET warehouse_id = ?1 WHERE id = ?2 AND tenant_id = ?3 AND status = 'draft'",
             params![wh.trim(), stocktake_id, tenant_id],
         )?;
-        if affected == 0 {
-            let current_status: String = tx
-                .query_row(
-                    "SELECT status FROM stocktakes WHERE id = ?1 AND tenant_id = ?2",
-                    params![stocktake_id, tenant_id],
-                    |row| row.get(0),
-                )
-                .map_err(|_| StocktakeError::StocktakeNotFound)?;
-            return Err(StocktakeError::NotDraftForHeaderEdit(current_status));
-        }
+        crate::ensure_guarded_mutation_affected(
+            &tx,
+            "stocktakes",
+            stocktake_id,
+            tenant_id,
+            affected,
+            StocktakeError::StocktakeNotFound,
+            ensure_draft,
+        )?;
     }
 
     match note {
@@ -542,16 +676,15 @@ pub fn update_stocktake_header_impl(
                 "UPDATE stocktakes SET note = NULL WHERE id = ?1 AND tenant_id = ?2 AND status = 'draft'",
                 params![stocktake_id, tenant_id],
             )?;
-            if affected == 0 {
-                let current_status: String = tx
-                    .query_row(
-                        "SELECT status FROM stocktakes WHERE id = ?1 AND tenant_id = ?2",
-                        params![stocktake_id, tenant_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| StocktakeError::StocktakeNotFound)?;
-                return Err(StocktakeError::NotDraftForHeaderEdit(current_status));
-            }
+            crate::ensure_guarded_mutation_affected(
+                &tx,
+                "stocktakes",
+                stocktake_id,
+                tenant_id,
+                affected,
+                StocktakeError::StocktakeNotFound,
+                ensure_draft,
+            )?;
         }
         OptionalUpdate::Set(n) => {
             let trimmed = n.trim();
@@ -564,16 +697,15 @@ pub fn update_stocktake_header_impl(
                 "UPDATE stocktakes SET note = ?1 WHERE id = ?2 AND tenant_id = ?3 AND status = 'draft'",
                 params![note_val, stocktake_id, tenant_id],
             )?;
-            if affected == 0 {
-                let current_status: String = tx
-                    .query_row(
-                        "SELECT status FROM stocktakes WHERE id = ?1 AND tenant_id = ?2",
-                        params![stocktake_id, tenant_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|_| StocktakeError::StocktakeNotFound)?;
-                return Err(StocktakeError::NotDraftForHeaderEdit(current_status));
-            }
+            crate::ensure_guarded_mutation_affected(
+                &tx,
+                "stocktakes",
+                stocktake_id,
+                tenant_id,
+                affected,
+                StocktakeError::StocktakeNotFound,
+                ensure_draft,
+            )?;
         }
     }
 
@@ -599,9 +731,7 @@ pub fn add_stocktake_lines_impl(
             .map_err(|_| StocktakeError::StocktakeNotFound)?
     };
 
-    if status != "draft" {
-        return Err(StocktakeError::NotDraftForLineAdd(status));
-    }
+    validate_operation_status(StocktakeOperation::AddLine, &status)?;
 
     let mut existing_units: std::collections::HashSet<String> = {
         let mut stmt =
@@ -688,9 +818,7 @@ pub fn add_stocktake_lines_from_stock_impl(
         .map_err(|_| StocktakeError::StocktakeNotFound)?
     };
 
-    if status != "draft" {
-        return Err(StocktakeError::NotDraftForLineAdd(status));
-    }
+    validate_operation_status(StocktakeOperation::AddLine, &status)?;
 
     // S-04: Query units in this warehouse with balance != 0 via purchase_orders::list_inventory_levels_impl
     let levels =
@@ -773,8 +901,10 @@ pub fn remove_stocktake_line_impl(
         return Err(StocktakeError::EmptyTenantId);
     }
 
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
     let (stocktake_id, status): (String, String) = {
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT st.id, st.status 
              FROM stocktake_lines stl
              JOIN stocktakes st ON stl.stocktake_id = st.id
@@ -787,36 +917,40 @@ pub fn remove_stocktake_line_impl(
     };
 
     // Allowed in draft and counting; prohibited in posted and cancelled
-    if status != "draft" && status != "counting" {
-        return Err(StocktakeError::NotDraftOrCountingForLineRemove(status));
-    }
+    validate_operation_status(StocktakeOperation::RemoveLine, &status)?;
 
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-    tx.execute(
-        "DELETE FROM stocktake_lines WHERE id = ?1",
-        params![line_id],
+    let affected = tx.execute(
+        "DELETE FROM stocktake_lines 
+         WHERE id = ?1 
+           AND stocktake_id IN (
+               SELECT id FROM stocktakes 
+               WHERE id = ?2 AND status IN ('draft', 'counting') AND tenant_id = ?3
+           )",
+        params![line_id, stocktake_id, tenant_id],
     )?;
 
-    // Resequence line_no
-    let remaining_ids: Vec<String> = {
-        let mut stmt = tx.prepare(
-            "SELECT id FROM stocktake_lines WHERE stocktake_id = ?1 ORDER BY line_no ASC, created_at ASC",
-        )?;
-        let rows = stmt.query_map(params![stocktake_id], |r| r.get(0))?;
-        let mut ids = Vec::new();
-        for r in rows {
-            ids.push(r?);
-        }
-        ids
-    };
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "stocktakes",
+        &stocktake_id,
+        tenant_id,
+        affected,
+        StocktakeError::LineNotFound,
+        |s| validate_operation_status(StocktakeOperation::RemoveLine, &s),
+    )?;
 
-    for (idx, rid) in remaining_ids.iter().enumerate() {
-        tx.execute(
-            "UPDATE stocktake_lines SET line_no = ?1 WHERE id = ?2",
-            params![(idx + 1) as i64, rid],
-        )?;
-    }
+    // Resequence line_no in a single batched UPDATE
+    tx.execute(
+        "WITH numbered AS (
+            SELECT id, ROW_NUMBER() OVER (ORDER BY line_no ASC, created_at ASC) AS new_line_no
+            FROM stocktake_lines
+            WHERE stocktake_id = ?1
+        )
+        UPDATE stocktake_lines
+        SET line_no = (SELECT new_line_no FROM numbered WHERE numbered.id = stocktake_lines.id)
+        WHERE stocktake_id = ?1",
+        params![stocktake_id],
+    )?;
 
     tx.commit()?;
 
@@ -912,31 +1046,60 @@ pub fn start_stocktake_counting_impl(
         params![now, stocktake_id, tenant_id],
     )?;
 
-    if affected == 0 {
-        return Err(StocktakeError::InvalidStateTransition {
-            from: status,
-            to: "counting".to_string(),
-        });
-    }
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "stocktakes",
+        stocktake_id,
+        tenant_id,
+        affected,
+        StocktakeError::StocktakeNotFound,
+        |s| {
+            if s != "draft" {
+                Err(StocktakeError::InvalidStateTransition {
+                    from: s,
+                    to: "counting".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        },
+    )?;
 
-    // Write system_quantity and system_quantity_at for each line using get_inventory_level_impl
-    for (lid, uid, _, _, _) in &lines {
-        let current_balance = crate::purchase_orders::get_inventory_level_impl(
-            &tx,
-            tenant_id,
-            uid,
-            Some(&warehouse_id),
-        )
-        .map_err(StocktakeError::WarehouseError)?
-        .current_quantity;
-
-        tx.execute(
-            "UPDATE stocktake_lines 
-             SET system_quantity = ?1, system_quantity_at = ?2, counted_quantity = NULL 
-             WHERE id = ?3",
-            params![current_balance, now, lid],
+    // Write system_quantity, system_quantity_at, and system_movements_count for each line using batched query
+    let mut balances: std::collections::HashMap<String, (f64, i64)> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT unit_id, COALESCE(SUM(quantity_delta), 0.0), COUNT(*) 
+             FROM inventory_movements 
+             WHERE tenant_id = ?1 AND warehouse_id = ?2 AND unit_id IN (
+                 SELECT unit_id FROM stocktake_lines WHERE stocktake_id = ?3
+             )
+             GROUP BY unit_id",
         )?;
+        let rows = stmt.query_map(params![tenant_id, warehouse_id, stocktake_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, f64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?;
+        for r in rows {
+            let (uid, bal) = r?;
+            balances.insert(uid, bal);
+        }
     }
+
+    let mut update_line_stmt = tx.prepare(
+        "UPDATE stocktake_lines 
+         SET system_quantity = ?1, system_quantity_at = ?2, counted_quantity = NULL, system_movements_count = ?3 
+         WHERE id = ?4",
+    )?;
+
+    for (lid, uid, _, _, _) in &lines {
+        let (current_balance, movement_count) = balances.get(uid).copied().unwrap_or((0.0, 0));
+        update_line_stmt.execute(params![current_balance, now, movement_count, lid])?;
+    }
+    drop(update_line_stmt);
 
     tx.commit()?;
 
@@ -947,15 +1110,17 @@ pub fn set_stocktake_counted_quantity_impl(
     conn: &mut rusqlite::Connection,
     tenant_id: &str,
     line_id: &str,
-    counted_quantity: f64,
-) -> Result<StocktakeDetail, StocktakeError> {
+    counted_quantity: OptionalUpdate<f64>,
+) -> Result<StocktakeLine, StocktakeError> {
     if tenant_id.trim().is_empty() {
         return Err(StocktakeError::EmptyTenantId);
     }
 
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
     let (stocktake_id, status): (String, String) = {
-        let mut stmt = conn.prepare(
-            "SELECT st.id, st.status 
+        let mut stmt = tx.prepare(
+            "SELECT st.id, st.status
              FROM stocktake_lines stl
              JOIN stocktakes st ON stl.stocktake_id = st.id
              WHERE stl.id = ?1 AND st.tenant_id = ?2",
@@ -967,21 +1132,54 @@ pub fn set_stocktake_counted_quantity_impl(
     };
 
     // S-06: Only counting status
-    if status != "counting" {
-        return Err(StocktakeError::OnlyCountingForCountedQty(status));
+    validate_operation_status(StocktakeOperation::InputCountedQuantity, &status)?;
+
+    let maybe_qty_to_set = match counted_quantity {
+        OptionalUpdate::Keep => None,
+        OptionalUpdate::Clear => Some(None),
+        OptionalUpdate::Set(qty) => {
+            if !qty.is_finite() || qty < 0.0 {
+                return Err(StocktakeError::NegativeCountedQuantity);
+            }
+            Some(Some(qty))
+        }
+    };
+
+    if let Some(qty_to_set) = maybe_qty_to_set {
+        let affected = tx.execute(
+            "UPDATE stocktake_lines 
+             SET counted_quantity = ?1 
+             WHERE id = ?2 
+               AND stocktake_id IN (
+                   SELECT id FROM stocktakes 
+                   WHERE id = ?3 AND status = 'counting' AND tenant_id = ?4
+               )",
+            params![qty_to_set, line_id, stocktake_id, tenant_id],
+        )?;
+
+        crate::ensure_guarded_mutation_affected(
+            &tx,
+            "stocktakes",
+            &stocktake_id,
+            tenant_id,
+            affected,
+            StocktakeError::LineNotFound,
+            |s| validate_operation_status(StocktakeOperation::InputCountedQuantity, &s),
+        )?;
     }
 
-    // S-06: counted_quantity must be a finite, non-negative number
-    if !counted_quantity.is_finite() || counted_quantity < 0.0 {
-        return Err(StocktakeError::NegativeCountedQuantity);
-    }
+    tx.commit()?;
 
-    conn.execute(
-        "UPDATE stocktake_lines SET counted_quantity = ?1 WHERE id = ?2",
-        params![counted_quantity, line_id],
+    let updated_line = conn.query_row(
+        "SELECT id, stocktake_id, line_no, unit_id, product_name_snapshot,
+                variant_name_snapshot, sku_snapshot, unit_name_snapshot,
+                system_quantity, system_quantity_at, counted_quantity, created_at,
+                system_movements_count
+         FROM stocktake_lines WHERE id = ?1",
+        params![line_id],
+        map_stocktake_line_row,
     )?;
-
-    get_stocktake_impl(conn, tenant_id, &stocktake_id)
+    Ok(updated_line)
 }
 
 pub fn refresh_stocktake_system_quantity_impl(
@@ -1005,39 +1203,93 @@ pub fn refresh_stocktake_system_quantity_impl(
     };
 
     // S-08: Only counting status
-    if status != "counting" {
-        return Err(StocktakeError::OnlyCountingForRefresh(status));
-    }
+    validate_operation_status(StocktakeOperation::RefreshSystemQuantity, &status)?;
 
     let now = current_timestamp();
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-    for lid in line_ids {
-        let uid: String = tx
-            .query_row(
-                "SELECT unit_id FROM stocktake_lines WHERE id = ?1 AND stocktake_id = ?2",
-                params![lid, stocktake_id],
-                |r| r.get(0),
-            )
-            .map_err(|_| StocktakeError::LineNotFound)?;
+    let mut target_lines: Vec<(String, String)> = Vec::with_capacity(line_ids.len());
+    {
+        let mut find_stmt = tx.prepare(
+            "SELECT id, unit_id FROM stocktake_lines WHERE id = ?1 AND stocktake_id = ?2",
+        )?;
+        for lid in &line_ids {
+            let uid: String = find_stmt
+                .query_row(params![lid, stocktake_id], |r| r.get(1))
+                .map_err(|_| StocktakeError::LineNotFound)?;
+            target_lines.push((lid.clone(), uid));
+        }
+    }
 
-        let current_balance = crate::purchase_orders::get_inventory_level_impl(
+    // Batched query to calculate current_balance and movement_count for all target units
+    let mut balances: std::collections::HashMap<String, (f64, i64)> =
+        std::collections::HashMap::new();
+    if !target_lines.is_empty() {
+        let placeholders = target_lines
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT unit_id, COALESCE(SUM(quantity_delta), 0.0), COUNT(*) 
+             FROM inventory_movements 
+             WHERE tenant_id = ?1 AND warehouse_id = ?2 AND unit_id IN ({}) 
+             GROUP BY unit_id",
+            placeholders
+        );
+        let mut stmt = tx.prepare(&sql)?;
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(2 + target_lines.len());
+        params_vec.push(&tenant_id);
+        params_vec.push(&warehouse_id);
+        for (_, uid) in &target_lines {
+            params_vec.push(uid);
+        }
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, f64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        })?;
+        for r in rows {
+            let (uid, bal) = r?;
+            balances.insert(uid, bal);
+        }
+    }
+
+    let mut update_stmt = tx.prepare(
+        "UPDATE stocktake_lines 
+         SET system_quantity = ?1, system_quantity_at = ?2, counted_quantity = NULL, system_movements_count = ?3 
+         WHERE id = ?4 
+           AND stocktake_id IN (
+               SELECT id FROM stocktakes 
+               WHERE id = ?5 AND status = 'counting' AND tenant_id = ?6
+           )",
+    )?;
+
+    for (lid, uid) in &target_lines {
+        let (current_balance, movement_count) = balances.get(uid).copied().unwrap_or((0.0, 0));
+
+        // S-08: Re-write system_quantity, update system_quantity_at, system_movements_count, and CLEAR counted_quantity with atomic guard
+        let affected = update_stmt.execute(params![
+            current_balance,
+            now,
+            movement_count,
+            lid,
+            stocktake_id,
+            tenant_id
+        ])?;
+
+        crate::ensure_guarded_mutation_affected(
             &tx,
+            "stocktakes",
+            stocktake_id,
             tenant_id,
-            &uid,
-            Some(&warehouse_id),
-        )
-        .map_err(StocktakeError::WarehouseError)?
-        .current_quantity;
-
-        // S-08: Re-write system_quantity, update system_quantity_at, and CLEAR counted_quantity
-        tx.execute(
-            "UPDATE stocktake_lines 
-             SET system_quantity = ?1, system_quantity_at = ?2, counted_quantity = NULL 
-             WHERE id = ?3",
-            params![current_balance, now, lid],
+            affected,
+            StocktakeError::LineNotFound,
+            |s| validate_operation_status(StocktakeOperation::RefreshSystemQuantity, &s),
         )?;
     }
+    drop(update_stmt);
 
     tx.commit()?;
 
@@ -1079,12 +1331,42 @@ pub fn post_stocktake_impl(
         }
     })?;
 
-    // Fetch lines
+    let now = current_timestamp();
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    // S-09 & Idempotency: conditional update status
+    let affected = tx.execute(
+        "UPDATE stocktakes SET status = 'posted', posted_at = ?1 
+         WHERE id = ?2 AND status = 'counting' AND tenant_id = ?3",
+        params![now, stocktake_id, tenant_id],
+    )?;
+
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "stocktakes",
+        stocktake_id,
+        tenant_id,
+        affected,
+        StocktakeError::StocktakeNotFound,
+        |s| {
+            if s != "counting" {
+                Err(StocktakeError::InvalidStateTransition {
+                    from: s,
+                    to: "posted".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+
+    // Fetch lines INSIDE the transaction to guarantee fresh snapshot without race conditions
     let lines: Vec<StocktakeLine> = {
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT id, stocktake_id, line_no, unit_id, product_name_snapshot,
                     variant_name_snapshot, sku_snapshot, unit_name_snapshot,
-                    system_quantity, system_quantity_at, counted_quantity, created_at
+                    system_quantity, system_quantity_at, counted_quantity, created_at,
+                    system_movements_count
              FROM stocktake_lines WHERE stocktake_id = ?1 ORDER BY line_no ASC",
         )?;
         let rows = stmt.query_map(params![stocktake_id], map_stocktake_line_row)?;
@@ -1112,54 +1394,50 @@ pub fn post_stocktake_impl(
         ));
     }
 
-    let now = current_timestamp();
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-    // S-09 & Idempotency: conditional update status
-    let affected = tx.execute(
-        "UPDATE stocktakes SET status = 'posted', posted_at = ?1 
-         WHERE id = ?2 AND status = 'counting' AND tenant_id = ?3",
-        params![now, stocktake_id, tenant_id],
-    )?;
-
-    if affected == 0 {
-        return Err(StocktakeError::InvalidStateTransition {
-            from: status,
-            to: "posted".to_string(),
-        });
+    // S-07: Invariant documentation:
+    // `COUNT(*)` comparison against `system_movements_count` assumes inventory_movements is an
+    // append-only ledger without physical row deletion or substitution (delete + reinsert with identical net count).
+    // In our system, inventory_movements is strictly append-only (auditable ledger invariant).
+    // Batched query with GROUP BY unit_id detects any concurrent movements inserted during counting.
+    let mut current_counts: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    {
+        let mut count_stmt = tx.prepare(
+            "SELECT unit_id, COUNT(*) 
+             FROM inventory_movements 
+             WHERE tenant_id = ?1 AND warehouse_id = ?2 AND unit_id IN (
+                 SELECT unit_id FROM stocktake_lines WHERE stocktake_id = ?3
+             )
+             GROUP BY unit_id",
+        )?;
+        let rows = count_stmt.query_map(params![tenant_id, warehouse_id, stocktake_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for r in rows {
+            let (uid, cnt) = r?;
+            current_counts.insert(uid, cnt);
+        }
     }
 
-    // S-07: Detect new inventory movements in this warehouse created after system_quantity_at
     let mut affected_items = Vec::new();
+    let mut affected_line_ids = Vec::new();
     for l in &lines {
-        let snap_at = l.system_quantity_at.unwrap_or(0);
-        let has_movement: bool = match tx.query_row(
-            "SELECT 1 FROM inventory_movements 
-             WHERE tenant_id = ?1 
-               AND warehouse_id = ?2 
-               AND unit_id = ?3 
-               AND created_at > ?4 
-             LIMIT 1",
-            params![tenant_id, warehouse_id, l.unit_id, snap_at],
-            |_| Ok(true),
-        ) {
-            Ok(v) => v,
-            Err(rusqlite::Error::QueryReturnedNoRows) => false,
-            Err(e) => return Err(StocktakeError::from(e)),
-        };
-
-        if has_movement {
+        let current_count = current_counts.get(&l.unit_id).copied().unwrap_or(0);
+        let snap_count = l.system_movements_count.unwrap_or(0);
+        if current_count != snap_count {
             affected_items.push(format!(
                 "〔{}／{}／{}〕",
                 l.product_name_snapshot, l.variant_name_snapshot, l.unit_name_snapshot
             ));
+            affected_line_ids.push(l.id.clone());
         }
     }
 
     if !affected_items.is_empty() {
-        return Err(StocktakeError::MovementsDetectedDuringCounting(
-            affected_items.join("、"),
-        ));
+        return Err(StocktakeError::MovementsDetectedDuringCounting {
+            items: affected_items.join("、"),
+            affected_line_ids,
+        });
     }
 
     // Write inventory movements for lines with difference != 0
@@ -1226,12 +1504,24 @@ pub fn cancel_stocktake_impl(
         params![now, stocktake_id, tenant_id],
     )?;
 
-    if affected == 0 {
-        return Err(StocktakeError::InvalidStateTransition {
-            from: status,
-            to: "cancelled".to_string(),
-        });
-    }
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "stocktakes",
+        stocktake_id,
+        tenant_id,
+        affected,
+        StocktakeError::StocktakeNotFound,
+        |s| {
+            if s != "draft" && s != "counting" {
+                Err(StocktakeError::InvalidStateTransition {
+                    from: s,
+                    to: "cancelled".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        },
+    )?;
 
     tx.commit()?;
 
@@ -1253,14 +1543,15 @@ pub fn get_stocktake_impl(
          FROM stocktakes WHERE id = ?1 AND tenant_id = ?2",
     )?;
 
-    let stocktake = stmt
+    let mut stocktake = stmt
         .query_row(params![stocktake_id, tenant_id], map_stocktake_row)
         .map_err(|_| StocktakeError::StocktakeNotFound)?;
 
     let mut lines_stmt = conn.prepare(
         "SELECT id, stocktake_id, line_no, unit_id, product_name_snapshot,
                 variant_name_snapshot, sku_snapshot, unit_name_snapshot,
-                system_quantity, system_quantity_at, counted_quantity, created_at
+                system_quantity, system_quantity_at, counted_quantity, created_at,
+                system_movements_count
          FROM stocktake_lines WHERE stocktake_id = ?1 ORDER BY line_no ASC",
     )?;
 
@@ -1269,6 +1560,10 @@ pub fn get_stocktake_impl(
     for r in rows {
         lines.push(r?);
     }
+
+    let (lines_count, counted_count) = compute_stocktake_lines_summary(&lines);
+    stocktake.lines_count = Some(lines_count);
+    stocktake.counted_count = Some(counted_count);
 
     Ok(StocktakeDetail { stocktake, lines })
 }
@@ -1283,17 +1578,24 @@ pub fn list_stocktakes_impl(
         return Err(StocktakeError::EmptyTenantId);
     }
 
+    // lines_count and counted_count in SQL strictly mirror compute_stocktake_lines_summary:
+    // - COUNT(stl.id) mirrors lines.len()
+    // - COUNT(stl.counted_quantity) skips NULLs, mirroring is_stocktake_line_counted
     let mut query = String::from(
-        "SELECT id, tenant_id, stocktake_number, warehouse_id, status, note,
-                created_by, created_at, counting_started_at, posted_at, cancelled_at, task_id
-         FROM stocktakes WHERE tenant_id = ?1",
+        "SELECT st.id, st.tenant_id, st.stocktake_number, st.warehouse_id, st.status, st.note,
+                st.created_by, st.created_at, st.counting_started_at, st.posted_at, st.cancelled_at, st.task_id,
+                COUNT(stl.id) AS lines_count,
+                COUNT(stl.counted_quantity) AS counted_count
+         FROM stocktakes st
+         LEFT JOIN stocktake_lines stl ON stl.stocktake_id = st.id
+         WHERE st.tenant_id = ?1",
     );
     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant_id.to_string())];
 
     if let Some(ref st) = status {
         let trimmed_st = st.trim();
         if !trimmed_st.is_empty() {
-            query.push_str(" AND status = ?");
+            query.push_str(" AND st.status = ?");
             params_vec.push(Box::new(trimmed_st.to_string()));
         }
     }
@@ -1301,12 +1603,12 @@ pub fn list_stocktakes_impl(
     if let Some(ref wh) = warehouse_id {
         let trimmed_wh = wh.trim();
         if !trimmed_wh.is_empty() {
-            query.push_str(" AND warehouse_id = ?");
+            query.push_str(" AND st.warehouse_id = ?");
             params_vec.push(Box::new(trimmed_wh.to_string()));
         }
     }
 
-    query.push_str(" ORDER BY created_at DESC, id DESC");
+    query.push_str(" GROUP BY st.id ORDER BY st.created_at DESC, st.id DESC");
 
     let mut stmt = conn.prepare(&query)?;
     let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
@@ -1327,6 +1629,7 @@ fn map_ipc_err(e: impl ToString) -> StocktakeErrorPayload {
     StocktakeErrorPayload {
         code: "IPC_ERROR".to_string(),
         message: e.to_string(),
+        affected_line_ids: None,
     }
 }
 
@@ -1359,15 +1662,19 @@ pub async fn create_stocktake<R: tauri::Runtime>(
 #[specta::specta]
 pub async fn update_stocktake_header<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    stocktake_id: String,
-    warehouse_id: Option<String>,
-    note: OptionalUpdate<String>,
+    payload: UpdateStocktakeHeaderPayload,
 ) -> Result<StocktakeDetail, StocktakeErrorPayload> {
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(map_ipc_err)?;
     let active_tid = crate::resolve_active_tenant_id(&conn).map_err(map_ipc_err)?;
-    update_stocktake_header_impl(&mut conn, &active_tid, &stocktake_id, warehouse_id, note)
-        .map_err(StocktakeErrorPayload::from)
+    update_stocktake_header_impl(
+        &mut conn,
+        &active_tid,
+        &payload.stocktake_id,
+        payload.warehouse_id,
+        payload.note.into(),
+    )
+    .map_err(StocktakeErrorPayload::from)
 }
 
 #[tauri::command]
@@ -1427,14 +1734,18 @@ pub async fn start_stocktake_counting<R: tauri::Runtime>(
 #[specta::specta]
 pub async fn set_stocktake_counted_quantity<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    line_id: String,
-    counted_quantity: f64,
-) -> Result<StocktakeDetail, StocktakeErrorPayload> {
+    payload: SetStocktakeCountedQuantityPayload,
+) -> Result<StocktakeLine, StocktakeErrorPayload> {
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(map_ipc_err)?;
     let active_tid = crate::resolve_active_tenant_id(&conn).map_err(map_ipc_err)?;
-    set_stocktake_counted_quantity_impl(&mut conn, &active_tid, &line_id, counted_quantity)
-        .map_err(StocktakeErrorPayload::from)
+    set_stocktake_counted_quantity_impl(
+        &mut conn,
+        &active_tid,
+        &payload.line_id,
+        payload.counted_quantity.into(),
+    )
+    .map_err(StocktakeErrorPayload::from)
 }
 
 #[tauri::command]
@@ -1821,9 +2132,34 @@ mod tests {
         let line_2_id = in_counting.lines[1].id.clone();
 
         // When: Setting counted quantity on line 1
-        let updated =
-            set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &line_1_id, 15.0).unwrap();
-        assert_eq!(updated.lines[0].counted_quantity, Some(15.0));
+        let updated = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_1_id,
+            OptionalUpdate::Set(15.0),
+        )
+        .unwrap();
+        assert_eq!(updated.counted_quantity, Some(15.0));
+
+        // When: Clearing counted quantity on line 1 (persisting null)
+        let cleared = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_1_id,
+            OptionalUpdate::Clear,
+        )
+        .unwrap();
+        assert_eq!(cleared.counted_quantity, None);
+
+        // When: Re-entering counted quantity
+        let updated = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_1_id,
+            OptionalUpdate::Set(15.0),
+        )
+        .unwrap();
+        assert_eq!(updated.counted_quantity, Some(15.0));
 
         // When: Removing line 2 while in counting state
         let after_remove = remove_stocktake_line_impl(&mut conn, "tnt_test", &line_2_id).unwrap();
@@ -1863,12 +2199,27 @@ mod tests {
 
         let in_counting =
             start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &in_counting.lines[0].id, 15.0)
-            .unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &in_counting.lines[1].id, 8.0)
-            .unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &in_counting.lines[2].id, 10.0)
-            .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &in_counting.lines[0].id,
+            OptionalUpdate::Set(15.0),
+        )
+        .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &in_counting.lines[1].id,
+            OptionalUpdate::Set(8.0),
+        )
+        .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &in_counting.lines[2].id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap();
 
         // When: Posting stocktake
         let posted =
@@ -1949,19 +2300,18 @@ mod tests {
         let in_counting =
             start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
         let line_id = in_counting.lines[0].id.clone();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &line_id, 12.0).unwrap();
-
-        let snap_at = in_counting.lines[0].system_quantity_at.unwrap();
-
-        // Simulate snapshot was taken at t = snap_at - 100
-        conn.execute(
-            "UPDATE stocktake_lines SET system_quantity_at = ?1 WHERE id = ?2",
-            params![snap_at - 100, line_id],
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(12.0),
         )
         .unwrap();
 
-        // When: A new movement is created in the same warehouse at t = snap_at - 50
-        seed_movement(&conn, "tnt_test", &wh.id, &unit_a, 5.0, snap_at - 50);
+        let snap_at = in_counting.lines[0].system_quantity_at.unwrap();
+
+        // When: A new movement is created in the same warehouse during counting
+        seed_movement(&conn, "tnt_test", &wh.id, &unit_a, 5.0, snap_at);
 
         // When: Attempting to post stocktake
         let post_err = post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id)
@@ -1970,7 +2320,7 @@ mod tests {
         // Then: TC-STK-E-13: Blocked by S-07 movement detection
         assert!(matches!(
             post_err,
-            StocktakeError::MovementsDetectedDuringCounting(_)
+            StocktakeError::MovementsDetectedDuringCounting { .. }
         ));
         assert!(post_err
             .to_string()
@@ -1990,7 +2340,13 @@ mod tests {
         assert!(refreshed.lines[0].counted_quantity.is_none());
 
         // When: User re-counts and sets counted quantity to 15.0
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &line_id, 15.0).unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(15.0),
+        )
+        .unwrap();
 
         // When: Posting stocktake again
         let posted =
@@ -2055,8 +2411,13 @@ mod tests {
         .unwrap();
         let counting =
             start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &counting.lines[0].id, 0.0)
-            .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &counting.lines[0].id,
+            OptionalUpdate::Set(0.0),
+        )
+        .unwrap();
 
         // When: Posting stocktake
         let posted =
@@ -2186,8 +2547,13 @@ mod tests {
         .unwrap();
         let counting =
             start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &counting.lines[0].id, 22.0)
-            .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &counting.lines[0].id,
+            OptionalUpdate::Set(22.0),
+        )
+        .unwrap();
         let posted =
             post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id).unwrap();
 
@@ -2311,8 +2677,13 @@ mod tests {
         let line_id = detail.lines[0].id.clone();
 
         // When: Trying to set counted quantity while still in draft (E-08)
-        let err_draft =
-            set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &line_id, 10.0).unwrap_err();
+        let err_draft = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap_err();
         assert!(matches!(
             err_draft,
             StocktakeError::OnlyCountingForCountedQty(_)
@@ -2320,8 +2691,13 @@ mod tests {
 
         // When: In counting, trying to set negative counted quantity (E-09)
         start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
-        let err_neg =
-            set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &line_id, -1.0).unwrap_err();
+        let err_neg = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(-1.0),
+        )
+        .unwrap_err();
         assert_eq!(err_neg, StocktakeError::NegativeCountedQuantity);
     }
 
@@ -2387,8 +2763,13 @@ mod tests {
         .unwrap();
         let counting =
             start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &counting.lines[0].id, 10.0)
-            .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &counting.lines[0].id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap();
 
         // When: Posting with line 2 counted_quantity = NULL
         let err = post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id)
@@ -2419,8 +2800,13 @@ mod tests {
         .unwrap();
         let counting =
             start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &counting.lines[0].id, 10.0)
-            .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &counting.lines[0].id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap();
 
         let snap_at = counting.lines[0].system_quantity_at.unwrap();
 
@@ -2453,8 +2839,13 @@ mod tests {
         .unwrap();
         let counting =
             start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
-        set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &counting.lines[0].id, 5.0)
-            .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &counting.lines[0].id,
+            OptionalUpdate::Set(5.0),
+        )
+        .unwrap();
         let posted =
             post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id).unwrap();
 
@@ -2570,7 +2961,7 @@ mod tests {
             &mut conn,
             "tnt_test",
             &counting.lines[0].id,
-            f64::NAN,
+            OptionalUpdate::Set(f64::NAN),
         )
         .unwrap_err();
 
@@ -2590,5 +2981,947 @@ mod tests {
         assert!(!can_transition("posted", "draft"));
         assert!(!can_transition("posted", "cancelled"));
         assert!(!can_transition("cancelled", "counting"));
+    }
+
+    #[test]
+    fn test_tc_stk_r2_01_lines_and_counted_count_in_list_and_get() {
+        // Given: Stocktake with 2 lines
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "品項A", "resale");
+        let (_, unit_b) = create_test_product(&mut conn, "tnt_test", "品項B", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_a, unit_b]),
+        )
+        .unwrap();
+
+        // When: Newly created in draft
+        let list_draft = list_stocktakes_impl(&conn, "tnt_test", None, None).unwrap();
+        assert_eq!(list_draft.len(), 1);
+        assert_eq!(list_draft[0].lines_count, Some(2));
+        assert_eq!(list_draft[0].counted_count, Some(0));
+
+        let get_draft = get_stocktake_impl(&conn, "tnt_test", &detail.stocktake.id).unwrap();
+        assert_eq!(get_draft.stocktake.lines_count, Some(2));
+        assert_eq!(get_draft.stocktake.counted_count, Some(0));
+
+        // When: In counting, 1 line counted
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &counting.lines[0].id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap();
+
+        // Then: lines_count = 2, counted_count = 1
+        let list_counting = list_stocktakes_impl(&conn, "tnt_test", None, None).unwrap();
+        assert_eq!(list_counting[0].lines_count, Some(2));
+        assert_eq!(list_counting[0].counted_count, Some(1));
+
+        let get_counting = get_stocktake_impl(&conn, "tnt_test", &detail.stocktake.id).unwrap();
+        assert_eq!(get_counting.stocktake.lines_count, Some(2));
+        assert_eq!(get_counting.stocktake.counted_count, Some(1));
+    }
+
+    #[test]
+    fn test_tc_stk_r2_02_optional_update_keep_preserves_value() {
+        // Given: Stocktake in counting state
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "品項A", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_a]),
+        )
+        .unwrap();
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_id = &counting.lines[0].id;
+
+        // Set initial counted quantity
+        let set_res = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            line_id,
+            OptionalUpdate::Set(42.0),
+        )
+        .unwrap();
+        assert_eq!(set_res.counted_quantity, Some(42.0));
+
+        // When: Passing OptionalUpdate::Keep (simulating omitted argument)
+        let kept = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            line_id,
+            OptionalUpdate::Keep,
+        )
+        .unwrap();
+
+        // Then: Counted quantity remains unchanged (no-op)
+        assert_eq!(kept.counted_quantity, Some(42.0));
+    }
+
+    #[test]
+    fn test_tc_stk_r2_03_atomic_status_guards() {
+        // Given: Stocktake in counting state, line id
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "品項A", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_a]),
+        )
+        .unwrap();
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_id = counting.lines[0].id.clone();
+
+        // When: Stocktake status is concurrently updated to cancelled behind the scenes
+        conn.execute(
+            "UPDATE stocktakes SET status = 'cancelled' WHERE id = ?1",
+            params![detail.stocktake.id],
+        )
+        .unwrap();
+
+        // When: Attempting to set counted quantity
+        let err_count = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap_err();
+
+        // Then: Atomic guard rejects with OnlyCountingForCountedQty("cancelled")
+        assert_eq!(
+            err_count,
+            StocktakeError::OnlyCountingForCountedQty("cancelled".to_string())
+        );
+
+        // When: Attempting to remove line
+        let err_remove = remove_stocktake_line_impl(&mut conn, "tnt_test", &line_id).unwrap_err();
+
+        // Then: Atomic guard rejects with NotDraftOrCountingForLineRemove("cancelled")
+        assert_eq!(
+            err_remove,
+            StocktakeError::NotDraftOrCountingForLineRemove("cancelled".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tc_stk_r3_01_error_precedence_line_not_found_before_negative_quantity() {
+        // Given: Stocktake in counting state, but an invalid/non-existent line ID
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "品項A", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_a]),
+        )
+        .unwrap();
+        start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+
+        // When: Calling with invalid line ID and negative counted quantity
+        let err = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            "non_existent_line_id",
+            OptionalUpdate::Set(-5.0),
+        )
+        .unwrap_err();
+
+        // Then: LineNotFound is returned, NOT NegativeCountedQuantity
+        assert_eq!(err, StocktakeError::LineNotFound);
+        assert_eq!(err.code(), "LINE_NOT_FOUND");
+    }
+
+    #[test]
+    fn test_tc_stk_r4_01_optional_update_json_null_clears_counted_qty_and_note() {
+        // Given: Stocktake in draft with note, and then in counting with counted_quantity = 12.0
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "品項A", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            Some("初始備註".to_string()),
+            None,
+            Some(vec![unit_a]),
+        )
+        .unwrap();
+        assert_eq!(detail.stocktake.note.as_deref(), Some("初始備註"));
+
+        // When: Deserializing JSON null directly into OptionalUpdate<String> (matching command arg type)
+        let null_note: OptionalUpdate<String> =
+            serde_json::from_value(serde_json::json!(null)).unwrap();
+        assert_eq!(null_note, OptionalUpdate::Clear);
+
+        let cleared_header = update_stocktake_header_impl(
+            &mut conn,
+            "tnt_test",
+            &detail.stocktake.id,
+            None,
+            null_note,
+        )
+        .unwrap();
+
+        // Then: Note is cleared to None in SQLite
+        assert_eq!(cleared_header.stocktake.note, None);
+
+        // When: Starting counting, setting counted_quantity to 12.0, then deserializing JSON null into OptionalUpdate<f64>
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_id = counting.lines[0].id.clone();
+
+        let set_qty: OptionalUpdate<f64> = serde_json::from_value(serde_json::json!(12.0)).unwrap();
+        assert_eq!(set_qty, OptionalUpdate::Set(12.0));
+        let with_qty =
+            set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &line_id, set_qty).unwrap();
+        assert_eq!(with_qty.counted_quantity, Some(12.0));
+
+        let null_qty: OptionalUpdate<f64> =
+            serde_json::from_value(serde_json::json!(null)).unwrap();
+        assert_eq!(null_qty, OptionalUpdate::Clear);
+        let cleared_qty =
+            set_stocktake_counted_quantity_impl(&mut conn, "tnt_test", &line_id, null_qty).unwrap();
+
+        // Then: counted_quantity is cleared to None without CountedQuantityRequired error
+        assert_eq!(cleared_qty.counted_quantity, None);
+    }
+
+    #[test]
+    fn test_tc_stk_r4_02_s07_error_payload_returns_structured_affected_line_ids() {
+        // Given: Two products whose names contain delimiters ／ and brackets 〔〕 and substring overlap
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_special) =
+            create_test_product(&mut conn, "tnt_test", "品項A〔特規〕／豪華版", "resale");
+        let (_, unit_plain) = create_test_product(&mut conn, "tnt_test", "品項A", "resale");
+
+        seed_movement(&conn, "tnt_test", &wh.id, &unit_special, 10.0, 50);
+        seed_movement(&conn, "tnt_test", &wh.id, &unit_plain, 20.0, 50);
+
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_special.clone(), unit_plain]),
+        )
+        .unwrap();
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_special_id = counting.lines[0].id.clone();
+        let line_plain_id = counting.lines[1].id.clone();
+
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_special_id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_plain_id,
+            OptionalUpdate::Set(20.0),
+        )
+        .unwrap();
+
+        let snap_at = counting.lines[0].system_quantity_at.unwrap();
+        seed_movement(&conn, "tnt_test", &wh.id, &unit_special, 5.0, snap_at);
+
+        // When: Attempting to post stocktake
+        let post_err = post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id)
+            .unwrap_err();
+        let payload = StocktakeErrorPayload::from(post_err);
+
+        // Then: Structured affected_line_ids contains ONLY line_special_id
+        assert_eq!(payload.code, "MOVEMENTS_DETECTED_DURING_COUNTING");
+        assert_eq!(payload.affected_line_ids, Some(vec![line_special_id]));
+    }
+
+    #[test]
+    fn test_tc_stk_r5_01_atomic_guarded_refresh_system_quantity() {
+        // Given: Stocktake in counting state, then concurrently cancelled or posted
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit) = create_test_product(&mut conn, "tnt_test", "防併發測試品", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit]),
+        )
+        .unwrap();
+
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_id = counting.lines[0].id.clone();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(42.0),
+        )
+        .unwrap();
+
+        // Concurrently cancel the stocktake
+        cancel_stocktake_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+
+        // When: Trying to refresh system quantity on the cancelled stocktake
+        let err = refresh_stocktake_system_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &detail.stocktake.id,
+            vec![line_id.clone()],
+        )
+        .unwrap_err();
+
+        // Then: Guard returns OnlyCountingForRefresh and counted_quantity remains intact
+        assert!(matches!(err, StocktakeError::OnlyCountingForRefresh(_)));
+        let counted_qty: Option<f64> = conn
+            .query_row(
+                "SELECT counted_quantity FROM stocktake_lines WHERE id = ?1",
+                params![line_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(counted_qty, Some(42.0));
+    }
+
+    #[test]
+    fn test_tc_stk_r5_02_post_stocktake_reads_fresh_counted_quantity_inside_tx() {
+        // Given: Stocktake in counting state with all lines having counted quantity
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit) = create_test_product(&mut conn, "tnt_test", "事務內新鮮度測試品", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit]),
+        )
+        .unwrap();
+
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_id = counting.lines[0].id.clone();
+
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(50.0),
+        )
+        .unwrap();
+
+        // When: Posting stocktake
+        let posted =
+            post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id).unwrap();
+
+        // Then: Posted stocktake reflects status posted and line counted quantity
+        assert_eq!(posted.stocktake.status, "posted");
+        assert_eq!(posted.lines[0].counted_quantity, Some(50.0));
+    }
+
+    #[test]
+    fn test_tc_stk_r6_01_s07_same_second_movement_detected_as_conflict() {
+        // Spec Addendum v2 §2: Movement count comparison prevents S-07 same-second false negatives/positives
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "品項A同秒衝擊", "resale");
+        let (_, unit_b) = create_test_product(&mut conn, "tnt_test", "品項B穩定對照", "resale");
+
+        // Given: Existing movements before counting (counted in snapshot, must NOT trigger S-07)
+        seed_movement(&conn, "tnt_test", &wh.id, &unit_a, 10.0, 50);
+        seed_movement(&conn, "tnt_test", &wh.id, &unit_b, 20.0, 50);
+
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_a.clone(), unit_b.clone()]),
+        )
+        .unwrap();
+
+        let in_counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_a_id = in_counting.lines[0].id.clone();
+        let line_b_id = in_counting.lines[1].id.clone();
+
+        assert_eq!(in_counting.lines[0].system_movements_count, Some(1));
+        assert_eq!(in_counting.lines[1].system_movements_count, Some(1));
+
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_a_id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_b_id,
+            OptionalUpdate::Set(20.0),
+        )
+        .unwrap();
+
+        let snap_at = in_counting.lines[0].system_quantity_at.unwrap();
+
+        // When: A movement occurs at the exact same second: created_at == snap_at for unit_a only
+        // No sleep, no timestamp shift!
+        seed_movement(&conn, "tnt_test", &wh.id, &unit_a, 3.0, snap_at);
+
+        // When: Attempting to post stocktake
+        let post_err = post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id)
+            .unwrap_err();
+
+        // Then: Movement is detected via movement count mismatch. Only line_a is affected; line_b is not!
+        match post_err {
+            StocktakeError::MovementsDetectedDuringCounting {
+                ref affected_line_ids,
+                ..
+            } => {
+                assert_eq!(affected_line_ids, &vec![line_a_id.clone()]);
+            }
+            other => panic!("Expected MovementsDetectedDuringCounting, got: {:?}", other),
+        }
+
+        // When: Refreshing system quantity for line A
+        let refreshed = refresh_stocktake_system_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &detail.stocktake.id,
+            vec![line_a_id.clone()],
+        )
+        .unwrap();
+        assert_eq!(refreshed.lines[0].system_quantity, Some(13.0));
+        assert_eq!(refreshed.lines[0].system_movements_count, Some(2));
+        assert!(refreshed.lines[0].counted_quantity.is_none());
+
+        // Re-count line A
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_a_id,
+            OptionalUpdate::Set(13.0),
+        )
+        .unwrap();
+
+        // Then: Post now succeeds cleanly
+        let posted =
+            post_stocktake_impl(&mut conn, "tnt_test", "usr_test", &detail.stocktake.id).unwrap();
+        assert_eq!(posted.stocktake.status, "posted");
+    }
+
+    #[test]
+    fn test_tc_stk_r6_02_optional_update_wire_format_deserialization() {
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "線路反序列化品項", "resale");
+
+        let draft = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            Some("初始備註".to_string()),
+            None,
+            Some(vec![unit_a]),
+        )
+        .unwrap();
+
+        // DoD verification per Spec Addendum v2 §1 & §6:
+        // Test UpdateStocktakeHeaderPayload with serde_json::from_str
+        let omitted: UpdateStocktakeHeaderPayload = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(omitted.note, None);
+
+        let cleared: UpdateStocktakeHeaderPayload =
+            serde_json::from_str(r#"{"note": null}"#).unwrap();
+        assert_eq!(cleared.note, Some(None));
+
+        let set_val: UpdateStocktakeHeaderPayload =
+            serde_json::from_str(r#"{"note": "hello"}"#).unwrap();
+        assert_eq!(set_val.note, Some(Some("hello".to_string())));
+
+        // Test SetStocktakeCountedQuantityPayload with serde_json::from_str
+        let qty_omitted: SetStocktakeCountedQuantityPayload =
+            serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(qty_omitted.counted_quantity, None);
+
+        let qty_cleared: SetStocktakeCountedQuantityPayload =
+            serde_json::from_str(r#"{"counted_quantity": null}"#).unwrap();
+        assert_eq!(qty_cleared.counted_quantity, Some(None));
+
+        let qty_set: SetStocktakeCountedQuantityPayload =
+            serde_json::from_str(r#"{"counted_quantity": 42.5}"#).unwrap();
+        assert_eq!(qty_set.counted_quantity, Some(Some(42.5)));
+
+        // Test execution against usecases with .into() conversion:
+        // 1) Keep preserves note
+        let kept = update_stocktake_header_impl(
+            &mut conn,
+            "tnt_test",
+            &draft.stocktake.id,
+            None,
+            omitted.note.into(),
+        )
+        .unwrap();
+        assert_eq!(kept.stocktake.note.as_deref(), Some("初始備註"));
+
+        // 2) Set changes note
+        let updated = update_stocktake_header_impl(
+            &mut conn,
+            "tnt_test",
+            &draft.stocktake.id,
+            None,
+            set_val.note.into(),
+        )
+        .unwrap();
+        assert_eq!(updated.stocktake.note.as_deref(), Some("hello"));
+
+        // 3) Clear erases note
+        let emptied = update_stocktake_header_impl(
+            &mut conn,
+            "tnt_test",
+            &draft.stocktake.id,
+            None,
+            cleared.note.into(),
+        )
+        .unwrap();
+        assert_eq!(emptied.stocktake.note, None);
+
+        // Counted quantity in counting state:
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &draft.stocktake.id).unwrap();
+        let line_id = counting.lines[0].id.clone();
+
+        // Omitted -> Keep -> Preserves existing (None initially)
+        let kept_line = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            qty_omitted.counted_quantity.into(),
+        )
+        .unwrap();
+        assert_eq!(kept_line.counted_quantity, None);
+
+        // Set -> Sets 42.5
+        let set_line = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            qty_set.counted_quantity.into(),
+        )
+        .unwrap();
+        assert_eq!(set_line.counted_quantity, Some(42.5));
+
+        // Omitted -> Keep -> Preserves 42.5
+        let kept_again = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            qty_omitted.counted_quantity.into(),
+        )
+        .unwrap();
+        assert_eq!(kept_again.counted_quantity, Some(42.5));
+
+        // Clear -> Clears to None
+        let cleared_line = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            qty_cleared.counted_quantity.into(),
+        )
+        .unwrap();
+        assert_eq!(cleared_line.counted_quantity, None);
+    }
+
+    #[test]
+    fn test_tc_stk_r8_inventory_adjustments_note_deserialization_audit() {
+        // Spec Addendum v2 §1 point 5:
+        // Audit inventory_adjustments note deserialization without `deserialize_some`.
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct StandardOptionWithoutHelper {
+            #[serde(default)]
+            note: Option<Option<String>>,
+        }
+
+        let omitted: StandardOptionWithoutHelper = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(omitted.note, None);
+
+        // Standard serde short-circuits JSON null on Option<T> to None:
+        // Without `deserialize_some`, `{"note": null}` becomes None (indistinguishable from missing!)
+        let null_val: StandardOptionWithoutHelper =
+            serde_json::from_str(r#"{"note": null}"#).unwrap();
+        assert_eq!(null_val.note, None);
+
+        let set_val: StandardOptionWithoutHelper =
+            serde_json::from_str(r#"{"note": "test"}"#).unwrap();
+        assert_eq!(set_val.note, Some(Some("test".to_string())));
+    }
+
+    #[test]
+    fn test_tc_stk_r6_03_database_row_returned_on_set_counted_quantity() {
+        // Given: Stocktake in counting state with one line (asserting row is re-queried from DB, not patched in-memory)
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "即時補丁品項", "resale");
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_a]),
+        )
+        .unwrap();
+
+        let counting =
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let line_id = counting.lines[0].id.clone();
+
+        // When: Setting counted quantity to 88.0
+        let updated_line = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Set(88.0),
+        )
+        .unwrap();
+
+        // Then: Returned line has counted_quantity = Some(88.0) and preserved snapshots
+        assert_eq!(updated_line.counted_quantity, Some(88.0));
+        assert_eq!(updated_line.product_name_snapshot, "即時補丁品項");
+
+        // When: Clearing counted quantity
+        let cleared_line = set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &line_id,
+            OptionalUpdate::Clear,
+        )
+        .unwrap();
+
+        // Then: Returned line has counted_quantity = None
+        assert_eq!(cleared_line.counted_quantity, None);
+    }
+
+    #[tokio::test]
+    async fn test_tauri_command_payload_mock_app() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let c = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let db_name = format!("agent_erp_stk_cmd_test_{}.db", c);
+        let mut db_path = std::path::PathBuf::from("target");
+        let _ = std::fs::create_dir_all(&db_path);
+        db_path.push(db_name);
+
+        if db_path.exists() {
+            let _ = std::fs::remove_file(&db_path);
+        }
+
+        crate::TEST_DB_PATH.with(|path| {
+            *path.borrow_mut() = Some(db_path.clone());
+        });
+
+        let (stocktake_id, line_id) = {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS tenants (
+                    id TEXT PRIMARY KEY,
+                    code TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    company_name TEXT NOT NULL DEFAULT ''
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT ''
+                )",
+                [],
+            )
+            .unwrap();
+            crate::partners::create_partners_table(&conn).unwrap();
+            crate::products::create_products_tables(&conn).unwrap();
+            create_warehouses_tables(&conn).unwrap();
+            crate::purchase_orders::create_purchase_orders_tables(&conn).unwrap();
+            create_stocktakes_tables(&conn).unwrap();
+
+            conn.execute(
+                "INSERT INTO tenants (id, code, name, company_name) VALUES ('tnt_test', 'test', 'Test Tenant', 'Test Inc.')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users (id, email, password, name) VALUES ('usr_1', 'u1@example.com', 'hash', 'User One')",
+                [],
+            )
+            .unwrap();
+
+            let mut mut_conn = conn;
+            let wh = create_warehouse_impl(&mut mut_conn, "tnt_test", "MAIN", "主倉").unwrap();
+            let (_, unit_a) =
+                create_test_product(&mut mut_conn, "tnt_test", "IPC測試品項", "resale");
+
+            let draft = create_stocktake_impl(
+                &mut mut_conn,
+                "tnt_test",
+                "usr_1",
+                &wh.id,
+                Some("初始備註".to_string()),
+                None,
+                Some(vec![unit_a]),
+            )
+            .unwrap();
+
+            (draft.stocktake.id, draft.lines[0].id.clone())
+        };
+
+        // 1. Test UpdateStocktakeHeaderPayload deserialized via serde_json::from_str
+        let header_json = format!(
+            r#"{{"stocktakeId": "{}", "note": "新IPC備註"}}"#,
+            stocktake_id
+        );
+        let payload_header: UpdateStocktakeHeaderPayload =
+            serde_json::from_str(&header_json).unwrap();
+        assert_eq!(payload_header.stocktake_id, stocktake_id);
+        assert_eq!(payload_header.note, Some(Some("新IPC備註".to_string())));
+
+        // Execute update_stocktake_header command with mock_app
+        let detail = update_stocktake_header(handle.clone(), payload_header)
+            .await
+            .unwrap();
+        assert_eq!(detail.stocktake.note.as_deref(), Some("新IPC備註"));
+
+        // Transition stocktake to counting
+        {
+            let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+            start_stocktake_counting_impl(&mut conn, "tnt_test", &stocktake_id).unwrap();
+        }
+
+        // 2. Test SetStocktakeCountedQuantityPayload deserialized via serde_json::from_str
+        let set_qty_json = format!(r#"{{"lineId": "{}", "countedQuantity": 25.5}}"#, line_id);
+        let payload_set: SetStocktakeCountedQuantityPayload =
+            serde_json::from_str(&set_qty_json).unwrap();
+        assert_eq!(payload_set.line_id, line_id);
+        assert_eq!(payload_set.counted_quantity, Some(Some(25.5)));
+
+        let line_after_set = set_stocktake_counted_quantity(handle.clone(), payload_set)
+            .await
+            .unwrap();
+        assert_eq!(line_after_set.counted_quantity, Some(25.5));
+
+        // 3. Test clearing counted quantity with null
+        let clear_qty_json = format!(r#"{{"lineId": "{}", "countedQuantity": null}}"#, line_id);
+        let payload_clear: SetStocktakeCountedQuantityPayload =
+            serde_json::from_str(&clear_qty_json).unwrap();
+        assert_eq!(payload_clear.counted_quantity, Some(None));
+
+        let line_after_clear = set_stocktake_counted_quantity(handle.clone(), payload_clear)
+            .await
+            .unwrap();
+        assert_eq!(line_after_clear.counted_quantity, None);
+
+        // 4. Test omitting counted quantity preserves existing value (no-op)
+        let omit_qty_json = format!(r#"{{"lineId": "{}"}}"#, line_id);
+        let payload_omit: SetStocktakeCountedQuantityPayload =
+            serde_json::from_str(&omit_qty_json).unwrap();
+        assert_eq!(payload_omit.counted_quantity, None);
+
+        let line_after_omit = set_stocktake_counted_quantity(handle.clone(), payload_omit)
+            .await
+            .unwrap();
+        assert_eq!(line_after_omit.counted_quantity, None);
+
+        if db_path.exists() {
+            let _ = std::fs::remove_file(&db_path);
+        }
+    }
+
+    #[test]
+    fn test_stocktake_operations_status_validation() {
+        use StocktakeOperation::*;
+
+        // Allowed checks
+        assert!(can_perform_operation(EditHeader, "draft"));
+        assert!(!can_perform_operation(EditHeader, "counting"));
+        assert!(!can_perform_operation(EditHeader, "posted"));
+        assert!(!can_perform_operation(EditHeader, "cancelled"));
+
+        assert!(can_perform_operation(AddLine, "draft"));
+        assert!(!can_perform_operation(AddLine, "counting"));
+
+        assert!(can_perform_operation(RemoveLine, "draft"));
+        assert!(can_perform_operation(RemoveLine, "counting"));
+        assert!(!can_perform_operation(RemoveLine, "posted"));
+        assert!(!can_perform_operation(RemoveLine, "cancelled"));
+
+        assert!(!can_perform_operation(InputCountedQuantity, "draft"));
+        assert!(can_perform_operation(InputCountedQuantity, "counting"));
+        assert!(!can_perform_operation(InputCountedQuantity, "posted"));
+
+        assert!(!can_perform_operation(RefreshSystemQuantity, "draft"));
+        assert!(can_perform_operation(RefreshSystemQuantity, "counting"));
+        assert!(!can_perform_operation(RefreshSystemQuantity, "posted"));
+
+        // Error variant checks
+        assert_eq!(
+            validate_operation_status(EditHeader, "counting"),
+            Err(StocktakeError::NotDraftForHeaderEdit(
+                "counting".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_operation_status(AddLine, "cancelled"),
+            Err(StocktakeError::NotDraftForLineAdd("cancelled".to_string()))
+        );
+        assert_eq!(
+            validate_operation_status(RemoveLine, "posted"),
+            Err(StocktakeError::NotDraftOrCountingForLineRemove(
+                "posted".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_operation_status(InputCountedQuantity, "draft"),
+            Err(StocktakeError::OnlyCountingForCountedQty(
+                "draft".to_string()
+            ))
+        );
+        assert_eq!(
+            validate_operation_status(RefreshSystemQuantity, "posted"),
+            Err(StocktakeError::OnlyCountingForRefresh("posted".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_stocktake_lines_summary_consistency() {
+        let mut conn = setup_test_db();
+        let wh = create_warehouse_impl(&mut conn, "tnt_test", "WH_SUMM", "彙總測試倉").unwrap();
+        let (_, unit_a) = create_test_product(&mut conn, "tnt_test", "品項A", "resale");
+        let (_, unit_b) = create_test_product(&mut conn, "tnt_test", "品項B", "resale");
+        let (_, unit_c) = create_test_product(&mut conn, "tnt_test", "品項C", "resale");
+
+        let detail = create_stocktake_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_test",
+            &wh.id,
+            None,
+            None,
+            Some(vec![unit_a, unit_b, unit_c]),
+        )
+        .unwrap();
+
+        // 1. Initial draft: 3 lines, 0 counted
+        let get1 = get_stocktake_impl(&conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let list1 = list_stocktakes_impl(&conn, "tnt_test", None, None).unwrap();
+        let list_item1 = list1.iter().find(|s| s.id == detail.stocktake.id).unwrap();
+        assert_eq!(get1.stocktake.lines_count, Some(3));
+        assert_eq!(get1.stocktake.counted_count, Some(0));
+        assert_eq!(list_item1.lines_count, Some(3));
+        assert_eq!(list_item1.counted_count, Some(0));
+
+        // 2. Start counting, count 1 line
+        start_stocktake_counting_impl(&mut conn, "tnt_test", &detail.stocktake.id).unwrap();
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &detail.lines[0].id,
+            OptionalUpdate::Set(10.0),
+        )
+        .unwrap();
+
+        let get2 = get_stocktake_impl(&conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let list2 = list_stocktakes_impl(&conn, "tnt_test", None, None).unwrap();
+        let list_item2 = list2.iter().find(|s| s.id == detail.stocktake.id).unwrap();
+        assert_eq!(get2.stocktake.lines_count, Some(3));
+        assert_eq!(get2.stocktake.counted_count, Some(1));
+        assert_eq!(list_item2.lines_count, Some(3));
+        assert_eq!(list_item2.counted_count, Some(1));
+
+        // 3. Clear counted quantity on line 0
+        set_stocktake_counted_quantity_impl(
+            &mut conn,
+            "tnt_test",
+            &detail.lines[0].id,
+            OptionalUpdate::Clear,
+        )
+        .unwrap();
+
+        let get3 = get_stocktake_impl(&conn, "tnt_test", &detail.stocktake.id).unwrap();
+        let list3 = list_stocktakes_impl(&conn, "tnt_test", None, None).unwrap();
+        let list_item3 = list3.iter().find(|s| s.id == detail.stocktake.id).unwrap();
+        assert_eq!(get3.stocktake.lines_count, Some(3));
+        assert_eq!(get3.stocktake.counted_count, Some(0));
+        assert_eq!(list_item3.lines_count, Some(3));
+        assert_eq!(list_item3.counted_count, Some(0));
+    }
+
+    #[test]
+    fn test_ensure_guarded_mutation_affected_unrecognized_table_returns_err() {
+        // Given: Preconditions with an unrecognized table name
+        let conn = setup_test_db();
+        // When: Mutation guard checks affected count 0 with unwhitelisted table
+        let res = crate::ensure_guarded_mutation_affected(
+            &conn,
+            "malicious_table_injection",
+            "doc_1",
+            "tnt_1",
+            0,
+            StocktakeError::StocktakeNotFound,
+            |_| Ok(()),
+        );
+        // Then: Return typed not_found_err instead of panicking
+        assert_eq!(res, Err(StocktakeError::StocktakeNotFound));
     }
 }

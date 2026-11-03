@@ -239,7 +239,7 @@ test('TC-STK-N-07 & 08: Set counted quantity and remove line in counting', async
     line_id: counting.lines[0].id,
     counted_quantity: 18.0
   });
-  assert.equal(afterSet.lines[0].counted_quantity, 18.0);
+  assert.equal(afterSet.counted_quantity, 18.0);
 
   // When: Removing line 2 in counting state (TC-STK-N-08)
   const afterRemove = await invoke('remove_stocktake_line', { line_id: counting.lines[1].id });
