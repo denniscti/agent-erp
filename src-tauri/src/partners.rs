@@ -14,6 +14,8 @@ pub struct Partner {
     pub is_customer: bool,
     pub is_vendor: bool,
     pub tax_id: Option<String>,
+    pub payment_terms_type: Option<String>,
+    pub payment_terms_days: Option<i64>,
     pub created_at: i64,
 }
 
@@ -33,6 +35,8 @@ pub fn create_partners_table(conn: &rusqlite::Connection) -> Result<(), rusqlite
             is_customer INTEGER NOT NULL DEFAULT 1,
             is_vendor INTEGER NOT NULL DEFAULT 0,
             tax_id TEXT,
+            payment_terms_type TEXT,
+            payment_terms_days INTEGER,
             created_at INTEGER NOT NULL
         )",
         [],
@@ -40,6 +44,16 @@ pub fn create_partners_table(conn: &rusqlite::Connection) -> Result<(), rusqlite
 
     let _ = conn.execute(
         "ALTER TABLE partners ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN payment_terms_type TEXT",
+        [],
+    );
+
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN payment_terms_days INTEGER",
         [],
     );
 
@@ -104,6 +118,34 @@ pub fn validate_tax_id(tax_id: Option<String>) -> Result<Option<String>, String>
     Ok(Some(trimmed))
 }
 
+// Helper: validate_payment_terms (PT-01, PT-02, PT-03)
+pub fn validate_payment_terms(
+    is_vendor: bool,
+    payment_terms_type: Option<String>,
+    payment_terms_days: Option<i64>,
+) -> Result<(Option<String>, Option<i64>), String> {
+    let normalized_type = payment_terms_type
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    match (normalized_type, payment_terms_days) {
+        (None, None) => Ok((None, None)),
+        (Some(_), None) | (None, Some(_)) => Err("付款條件類型與天數需同時設定".to_string()),
+        (Some(t), Some(d)) => {
+            if !is_vendor {
+                return Err("僅供應商可設定付款條件".to_string());
+            }
+            if t != "net" && t != "month_end" {
+                return Err("付款條件類型需為 net 或 month_end".to_string());
+            }
+            if !(0..=365).contains(&d) {
+                return Err("付款天數需為 0～365 的整數".to_string());
+            }
+            Ok((Some(t), Some(d)))
+        }
+    }
+}
+
 // Usecase: create_partner
 pub fn create_partner_impl(
     conn: &rusqlite::Connection,
@@ -112,6 +154,29 @@ pub fn create_partner_impl(
     is_customer: Option<bool>,
     is_vendor: Option<bool>,
     tax_id: Option<String>,
+) -> Result<Partner, String> {
+    create_partner_with_terms_impl(
+        conn,
+        tenant_id,
+        name,
+        is_customer,
+        is_vendor,
+        tax_id,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_partner_with_terms_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    name: String,
+    is_customer: Option<bool>,
+    is_vendor: Option<bool>,
+    tax_id: Option<String>,
+    payment_terms_type: Option<String>,
+    payment_terms_days: Option<i64>,
 ) -> Result<Partner, String> {
     let trimmed_tenant_id = tenant_id.trim();
     if trimmed_tenant_id.is_empty() {
@@ -129,7 +194,7 @@ pub fn create_partner_impl(
     let target_is_cust = is_customer.unwrap_or(!target_is_vend);
 
     let mut check_stmt = conn
-        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, created_at FROM partners WHERE tenant_id = ?1 AND LOWER(TRIM(name)) = LOWER(?2) LIMIT 1")
+        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at FROM partners WHERE tenant_id = ?1 AND LOWER(TRIM(name)) = LOWER(?2) LIMIT 1")
         .map_err(|e| format!("Failed to prepare duplicate check query: {}", e))?;
 
     let mut existing_rows = check_stmt
@@ -143,7 +208,9 @@ pub fn create_partner_impl(
                 is_customer: is_cust_int == 1,
                 is_vendor: is_vend_int == 1,
                 tax_id: row.get(5)?,
-                created_at: row.get(6)?,
+                payment_terms_type: row.get(6)?,
+                payment_terms_days: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })
         .map_err(|e| format!("Failed to check for duplicate partner: {}", e))?;
@@ -174,12 +241,21 @@ pub fn create_partner_impl(
             let merged_is_vend = existing.is_vendor || target_is_vend;
             let merged_tax_id = trimmed_tax_id.or(existing.tax_id);
 
+            let (final_terms_type, final_terms_days) =
+                if payment_terms_type.is_some() || payment_terms_days.is_some() {
+                    validate_payment_terms(merged_is_vend, payment_terms_type, payment_terms_days)?
+                } else {
+                    (existing.payment_terms_type, existing.payment_terms_days)
+                };
+
             conn.execute(
-                "UPDATE partners SET is_customer = ?1, is_vendor = ?2, tax_id = ?3 WHERE id = ?4",
+                "UPDATE partners SET is_customer = ?1, is_vendor = ?2, tax_id = ?3, payment_terms_type = ?4, payment_terms_days = ?5 WHERE id = ?6",
                 params![
                     if merged_is_cust { 1 } else { 0 },
                     if merged_is_vend { 1 } else { 0 },
                     merged_tax_id,
+                    final_terms_type,
+                    final_terms_days,
                     existing.id
                 ],
             )
@@ -192,6 +268,8 @@ pub fn create_partner_impl(
                 is_customer: merged_is_cust,
                 is_vendor: merged_is_vend,
                 tax_id: merged_tax_id,
+                payment_terms_type: final_terms_type,
+                payment_terms_days: final_terms_days,
                 created_at: existing.created_at,
             });
         }
@@ -221,6 +299,9 @@ pub fn create_partner_impl(
         }
     }
 
+    let (final_terms_type, final_terms_days) =
+        validate_payment_terms(target_is_vend, payment_terms_type, payment_terms_days)?;
+
     let now = current_timestamp();
     let id = format!(
         "part_{}_{}",
@@ -229,8 +310,8 @@ pub fn create_partner_impl(
     );
 
     conn.execute(
-        "INSERT INTO partners (id, tenant_id, name, is_customer, is_vendor, tax_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO partners (id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             id,
             trimmed_tenant_id,
@@ -238,6 +319,8 @@ pub fn create_partner_impl(
             if target_is_cust { 1 } else { 0 },
             if target_is_vend { 1 } else { 0 },
             trimmed_tax_id,
+            final_terms_type,
+            final_terms_days,
             now
         ],
     )
@@ -250,6 +333,8 @@ pub fn create_partner_impl(
         is_customer: target_is_cust,
         is_vendor: target_is_vend,
         tax_id: trimmed_tax_id,
+        payment_terms_type: final_terms_type,
+        payment_terms_days: final_terms_days,
         created_at: now,
     })
 }
@@ -261,6 +346,20 @@ pub fn update_partner_impl(
     id: String,
     name: Option<String>,
     tax_id: Option<String>,
+) -> Result<Partner, String> {
+    update_partner_with_terms_impl(conn, tenant_id, id, name, tax_id, None, None, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_partner_with_terms_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    id: String,
+    name: Option<String>,
+    tax_id: Option<String>,
+    payment_terms_type: Option<String>,
+    payment_terms_days: Option<i64>,
+    clear_payment_terms: Option<bool>,
 ) -> Result<Partner, String> {
     let trimmed_tenant_id = tenant_id.trim();
     if trimmed_tenant_id.is_empty() {
@@ -274,7 +373,7 @@ pub fn update_partner_impl(
 
     // Tenant isolation: fetch existing partner strictly within active tenant
     let mut stmt = conn
-        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, created_at FROM partners WHERE id = ?1 AND tenant_id = ?2 LIMIT 1")
+        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at FROM partners WHERE id = ?1 AND tenant_id = ?2 LIMIT 1")
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
     let existing = stmt
@@ -288,7 +387,9 @@ pub fn update_partner_impl(
                 is_customer: is_cust_int == 1,
                 is_vendor: is_vend_int == 1,
                 tax_id: row.get(5)?,
-                created_at: row.get(6)?,
+                payment_terms_type: row.get(6)?,
+                payment_terms_days: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })
         .map_err(|_| "Partner not found".to_string())?;
@@ -340,9 +441,23 @@ pub fn update_partner_impl(
         None => existing.tax_id,
     };
 
+    // Handle payment terms update, clearing, and validation (PT-01, PT-02, PT-03)
+    let (new_terms_type, new_terms_days) = if clear_payment_terms == Some(true) {
+        (None, None)
+    } else if payment_terms_type.is_some() || payment_terms_days.is_some() {
+        if payment_terms_type.as_deref().map(str::trim) == Some("") && payment_terms_days.is_none()
+        {
+            (None, None)
+        } else {
+            validate_payment_terms(existing.is_vendor, payment_terms_type, payment_terms_days)?
+        }
+    } else {
+        (existing.payment_terms_type, existing.payment_terms_days)
+    };
+
     conn.execute(
-        "UPDATE partners SET name = ?1, tax_id = ?2 WHERE id = ?3 AND tenant_id = ?4",
-        params![new_name, new_tax_id, trimmed_id, trimmed_tenant_id],
+        "UPDATE partners SET name = ?1, tax_id = ?2, payment_terms_type = ?3, payment_terms_days = ?4 WHERE id = ?5 AND tenant_id = ?6",
+        params![new_name, new_tax_id, new_terms_type, new_terms_days, trimmed_id, trimmed_tenant_id],
     )
     .map_err(|e| format!("Failed to update partner: {}", e))?;
 
@@ -353,6 +468,8 @@ pub fn update_partner_impl(
         is_customer: existing.is_customer,
         is_vendor: existing.is_vendor,
         tax_id: new_tax_id,
+        payment_terms_type: new_terms_type,
+        payment_terms_days: new_terms_days,
         created_at: existing.created_at,
     })
 }
@@ -370,7 +487,7 @@ pub fn list_partners_impl(
     }
 
     let mut query =
-        "SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, created_at FROM partners WHERE tenant_id = ?1".to_string();
+        "SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at FROM partners WHERE tenant_id = ?1".to_string();
     let mut conditions = Vec::new();
 
     if let Some(true) = filter_customer {
@@ -401,7 +518,9 @@ pub fn list_partners_impl(
                 is_customer: is_cust_int == 1,
                 is_vendor: is_vend_int == 1,
                 tax_id: row.get(5)?,
-                created_at: row.get(6)?,
+                payment_terms_type: row.get(6)?,
+                payment_terms_days: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })
         .map_err(|e| format!("Failed to query partners: {}", e))?;
@@ -423,12 +542,23 @@ pub async fn create_partner<R: tauri::Runtime>(
     is_customer: Option<bool>,
     is_vendor: Option<bool>,
     tax_id: Option<String>,
+    payment_terms_type: Option<String>,
+    payment_terms_days: Option<i64>,
 ) -> Result<Partner, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    create_partner_impl(&conn, &active_tid, name, is_customer, is_vendor, tax_id)
+    create_partner_with_terms_impl(
+        &conn,
+        &active_tid,
+        name,
+        is_customer,
+        is_vendor,
+        tax_id,
+        payment_terms_type,
+        payment_terms_days,
+    )
 }
 
 #[tauri::command]
@@ -452,12 +582,24 @@ pub async fn update_partner<R: tauri::Runtime>(
     id: String,
     name: Option<String>,
     tax_id: Option<String>,
+    payment_terms_type: Option<String>,
+    payment_terms_days: Option<i64>,
+    clear_payment_terms: Option<bool>,
 ) -> Result<Partner, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    update_partner_impl(&conn, &active_tid, id, name, tax_id)
+    update_partner_with_terms_impl(
+        &conn,
+        &active_tid,
+        id,
+        name,
+        tax_id,
+        payment_terms_type,
+        payment_terms_days,
+        clear_payment_terms,
+    )
 }
 
 #[cfg(test)]
@@ -1559,5 +1701,315 @@ pub mod tests {
         assert_eq!(list_b.len(), 1);
         assert_eq!(list_b[0].name, "秘密客戶");
         assert_eq!(list_b[0].tax_id, None);
+    }
+
+    #[test]
+    fn test_tc_pt_n_01_create_and_update_vendor_payment_terms_success() {
+        // Given: Clean database
+        let conn = setup_test_db();
+
+        // When: create_partner_with_terms_impl is called with vendor and net 30
+        let created = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "優質供應商".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("net".to_string()),
+            Some(30),
+        )
+        .unwrap();
+
+        // Then: Successfully saved with payment terms
+        assert_eq!(created.payment_terms_type, Some("net".to_string()));
+        assert_eq!(created.payment_terms_days, Some(30));
+
+        // When: update_partner_with_terms_impl is called with month_end 60
+        let updated = update_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            None,
+            Some("month_end".to_string()),
+            Some(60),
+            None,
+        )
+        .unwrap();
+
+        // Then: Successfully updated
+        assert_eq!(updated.payment_terms_type, Some("month_end".to_string()));
+        assert_eq!(updated.payment_terms_days, Some(60));
+    }
+
+    #[test]
+    fn test_tc_pt_n_02_and_03_payment_terms_boundaries_0_and_365() {
+        // Given: Clean database
+        let conn = setup_test_db();
+
+        // When: Creating vendor with month_end 0 days (boundary: 0)
+        let p1 = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商A".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("month_end".to_string()),
+            Some(0),
+        )
+        .unwrap();
+
+        // Then: Succeeds with 0 days
+        assert_eq!(p1.payment_terms_type, Some("month_end".to_string()));
+        assert_eq!(p1.payment_terms_days, Some(0));
+
+        // When: Creating vendor with net 365 days (boundary: 365)
+        let p2 = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商B".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("net".to_string()),
+            Some(365),
+        )
+        .unwrap();
+
+        // Then: Succeeds with 365 days
+        assert_eq!(p2.payment_terms_type, Some("net".to_string()));
+        assert_eq!(p2.payment_terms_days, Some(365));
+    }
+
+    #[test]
+    fn test_tc_pt_n_04_default_unconfigured_payment_terms() {
+        // Given: Clean database
+        let conn = setup_test_db();
+
+        // When: Creating partner without payment terms
+        let p = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "無條件廠商".to_string(),
+            None,
+            Some(true),
+            None,
+        )
+        .unwrap();
+
+        // Then: payment terms are None
+        assert_eq!(p.payment_terms_type, None);
+        assert_eq!(p.payment_terms_days, None);
+    }
+
+    #[test]
+    fn test_tc_pt_n_05_clear_payment_terms() {
+        // Given: Vendor with configured payment terms
+        let conn = setup_test_db();
+        let created = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "待清空廠商".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("net".to_string()),
+            Some(30),
+        )
+        .unwrap();
+        assert_eq!(created.payment_terms_type, Some("net".to_string()));
+
+        // When: Updating with clear_payment_terms = Some(true)
+        let cleared = update_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            created.id.clone(),
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+        )
+        .unwrap();
+
+        // Then: Payment terms are reset to None
+        assert_eq!(cleared.payment_terms_type, None);
+        assert_eq!(cleared.payment_terms_days, None);
+    }
+
+    #[test]
+    fn test_tc_pt_e_01_and_02_pt01_must_set_both_or_neither() {
+        // Given: Clean database
+        let conn = setup_test_db();
+
+        // When: Only type provided, days is None
+        let err1 = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商_缺天數".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("net".to_string()),
+            None,
+        );
+
+        // Then: Fails with PT-01 error message
+        assert!(err1.is_err());
+        assert_eq!(err1.unwrap_err(), "付款條件類型與天數需同時設定");
+
+        // When: Only days provided, type is None
+        let err2 = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商_缺類型".to_string(),
+            None,
+            Some(true),
+            None,
+            None,
+            Some(30),
+        );
+
+        // Then: Fails with PT-01 error message
+        assert!(err2.is_err());
+        assert_eq!(err2.unwrap_err(), "付款條件類型與天數需同時設定");
+    }
+
+    #[test]
+    fn test_tc_pt_e_03_to_05_pt02_invalid_type_and_days_boundaries() {
+        // Given: Clean database
+        let conn = setup_test_db();
+
+        // When: Invalid type "quarterly"
+        let err_type = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商_非法類型".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("quarterly".to_string()),
+            Some(30),
+        );
+        // Then: Fails with type error
+        assert!(err_type.is_err());
+        assert_eq!(err_type.unwrap_err(), "付款條件類型需為 net 或 month_end");
+
+        // When: Days < 0 (-1)
+        let err_neg = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商_負數天數".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("net".to_string()),
+            Some(-1),
+        );
+        // Then: Fails with days error
+        assert!(err_neg.is_err());
+        assert_eq!(err_neg.unwrap_err(), "付款天數需為 0～365 的整數");
+
+        // When: Days > 365 (366)
+        let err_over = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商_超長天數".to_string(),
+            None,
+            Some(true),
+            None,
+            Some("net".to_string()),
+            Some(366),
+        );
+        // Then: Fails with days error
+        assert!(err_over.is_err());
+        assert_eq!(err_over.unwrap_err(), "付款天數需為 0～365 的整數");
+    }
+
+    #[test]
+    fn test_tc_pt_e_06_pt03_non_vendor_cannot_set_payment_terms() {
+        // Given: Clean database
+        let conn = setup_test_db();
+
+        // When: Customer (is_vendor = false) tries to create partner with payment terms
+        let err = create_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "純客戶".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            Some("net".to_string()),
+            Some(30),
+        );
+
+        // Then: Fails with PT-03 error message
+        assert!(err.is_err());
+        assert_eq!(err.unwrap_err(), "僅供應商可設定付款條件");
+
+        // When: Existing customer tries to update with payment terms
+        let cust = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "現有純客戶".to_string(),
+            Some(true),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        let err_update = update_partner_with_terms_impl(
+            &conn,
+            TEST_TENANT,
+            cust.id,
+            None,
+            None,
+            Some("net".to_string()),
+            Some(30),
+            None,
+        );
+
+        // Then: Fails with PT-03 error message
+        assert!(err_update.is_err());
+        assert_eq!(err_update.unwrap_err(), "僅供應商可設定付款條件");
+    }
+
+    #[test]
+    fn test_tc_pt_b_01_backward_compatibility_legacy_records() {
+        // Given: Database table created with legacy schema without payment terms columns
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE partners (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL,
+                is_customer INTEGER NOT NULL DEFAULT 1,
+                is_vendor INTEGER NOT NULL DEFAULT 0,
+                tax_id TEXT,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        // Insert legacy partner
+        conn.execute(
+            "INSERT INTO partners (id, tenant_id, name, is_customer, is_vendor, tax_id, created_at)
+             VALUES ('legacy_1', 'tnt_1', '舊時代廠商', 0, 1, '12345678', 100000)",
+            [],
+        )
+        .unwrap();
+
+        // When: Running table upgrade / migrations
+        create_partners_table(&conn).unwrap();
+
+        // Then: Querying legacy partner returns None for both new fields
+        let partners = list_partners_impl(&conn, "tnt_1", None, None).unwrap();
+        assert_eq!(partners.len(), 1);
+        assert_eq!(partners[0].name, "舊時代廠商");
+        assert_eq!(partners[0].payment_terms_type, None);
+        assert_eq!(partners[0].payment_terms_days, None);
     }
 }

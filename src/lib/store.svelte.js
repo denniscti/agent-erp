@@ -1053,7 +1053,7 @@ export async function fetchPartners(filter = {}) {
 
 /**
  * Create a partner / customer
- * @param {string | { name: string, tax_id?: string, taxId?: string, is_customer?: boolean, isCustomer?: boolean, is_vendor?: boolean, isVendor?: boolean }} input
+ * @param {string | { name: string, tax_id?: string, taxId?: string, is_customer?: boolean, isCustomer?: boolean, is_vendor?: boolean, isVendor?: boolean, payment_terms_type?: string | null, paymentTermsType?: string | null, payment_terms_days?: number | string | null, paymentTermsDays?: number | string | null }} input
  * @param {string | null} [taxId]
  * @returns {Promise<any>}
  */
@@ -1098,6 +1098,12 @@ export async function createPartnerAction(input, taxId = null) {
     throw new Error('客戶名稱為必填項目');
   }
   const normalizedTaxId = targetTaxId && typeof targetTaxId === 'string' && targetTaxId.trim() ? targetTaxId.trim() : null;
+  const rawTermsType = typeof input === 'object' && input !== null
+    ? (input.payment_terms_type !== undefined ? input.payment_terms_type : input.paymentTermsType)
+    : undefined;
+  const rawTermsDays = typeof input === 'object' && input !== null
+    ? (input.payment_terms_days !== undefined ? input.payment_terms_days : input.paymentTermsDays)
+    : undefined;
 
   try {
     const partner = await invoke('create_partner', {
@@ -1107,7 +1113,11 @@ export async function createPartnerAction(input, taxId = null) {
       taxId: normalizedTaxId,
       is_customer,
       is_vendor,
-      tax_id: normalizedTaxId
+      tax_id: normalizedTaxId,
+      payment_terms_type: rawTermsType,
+      paymentTermsType: rawTermsType,
+      payment_terms_days: rawTermsDays !== undefined && rawTermsDays !== null && rawTermsDays !== '' ? Number(rawTermsDays) : undefined,
+      paymentTermsDays: rawTermsDays !== undefined && rawTermsDays !== null && rawTermsDays !== '' ? Number(rawTermsDays) : undefined
     });
     await fetchPartners();
     if (is_vendor && !is_customer) {
@@ -1155,8 +1165,8 @@ export async function fetchVendors() {
 }
 
 /**
- * Update an existing partner's name and/or tax_id
- * @param {{ id: string, name?: string, taxId?: string, tax_id?: string }} input
+ * Update an existing partner's name, tax_id, and/or payment terms
+ * @param {{ id: string, name?: string, taxId?: string, tax_id?: string, payment_terms_type?: string | null, paymentTermsType?: string | null, payment_terms_days?: number | string | null, paymentTermsDays?: number | string | null, clear_payment_terms?: boolean, clearPaymentTerms?: boolean }} input
  * @returns {Promise<any>}
  */
 export async function updatePartnerAction(input) {
@@ -1190,6 +1200,21 @@ export async function updatePartnerAction(input) {
       payload.tax_id = trimmedTaxId;
       payload.taxId = trimmedTaxId;
     }
+  }
+
+  const rawTermsType = input.payment_terms_type !== undefined ? input.payment_terms_type : input.paymentTermsType;
+  if (rawTermsType !== undefined) {
+    payload.payment_terms_type = rawTermsType;
+    payload.paymentTermsType = rawTermsType;
+  }
+  const rawTermsDays = input.payment_terms_days !== undefined ? input.payment_terms_days : input.paymentTermsDays;
+  if (rawTermsDays !== undefined) {
+    payload.payment_terms_days = rawTermsDays !== null && rawTermsDays !== '' ? Number(rawTermsDays) : null;
+    payload.paymentTermsDays = payload.payment_terms_days;
+  }
+  if (input.clear_payment_terms !== undefined || input.clearPaymentTerms !== undefined) {
+    payload.clear_payment_terms = input.clear_payment_terms !== undefined ? input.clear_payment_terms : input.clearPaymentTerms;
+    payload.clearPaymentTerms = payload.clear_payment_terms;
   }
 
   try {

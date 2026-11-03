@@ -98,6 +98,8 @@
   let editingPartnerId = $state(null);
   let editingPartnerName = $state('');
   let editingPartnerTaxId = $state('');
+  let editingPartnerPaymentTermsType = $state('');
+  let editingPartnerPaymentTermsDays = $state(0);
   let isUpdatingPartner = $state(false);
   let editPartnerError = $state('');
 
@@ -411,6 +413,8 @@
     editingPartnerId = partner.id;
     editingPartnerName = partner.name || '';
     editingPartnerTaxId = partner.tax_id || '';
+    editingPartnerPaymentTermsType = partner.payment_terms_type || '';
+    editingPartnerPaymentTermsDays = partner.payment_terms_days !== null && partner.payment_terms_days !== undefined ? partner.payment_terms_days : 0;
     editPartnerError = '';
   }
 
@@ -418,6 +422,8 @@
     editingPartnerId = null;
     editingPartnerName = '';
     editingPartnerTaxId = '';
+    editingPartnerPaymentTermsType = '';
+    editingPartnerPaymentTermsDays = 0;
     editPartnerError = '';
   }
 
@@ -432,14 +438,32 @@
       editPartnerError = '統一編號必須為 8 碼半形數字';
       return;
     }
+
+    const currentPartner = appState.partners.find(p => p.id === editingPartnerId);
+    let payload = {
+      id: editingPartnerId,
+      name: editingPartnerName.trim(),
+      taxId: trimmedTax || ''
+    };
+
+    if (currentPartner && currentPartner.is_vendor) {
+      if (!editingPartnerPaymentTermsType) {
+        payload.clear_payment_terms = true;
+      } else {
+        const days = Number(editingPartnerPaymentTermsDays);
+        if (!Number.isInteger(days) || days < 0 || days > 365) {
+          editPartnerError = '付款天數需為 0～365 的整數';
+          return;
+        }
+        payload.payment_terms_type = editingPartnerPaymentTermsType;
+        payload.payment_terms_days = days;
+      }
+    }
+
     isUpdatingPartner = true;
     editPartnerError = '';
     try {
-      await updatePartnerAction({
-        id: editingPartnerId,
-        name: editingPartnerName.trim(),
-        taxId: trimmedTax || ''
-      });
+      await updatePartnerAction(payload);
       cancelEditPartner();
     } catch (err) {
       editPartnerError = err?.message || '更新夥伴失敗';
@@ -1847,6 +1871,38 @@
                             </button>
                           </div>
                         </div>
+                        {#if partner.is_vendor}
+                          <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; padding-top: 6px; border-top: 1px dashed rgba(255, 255, 255, 0.08);">
+                            <div style="flex: 1.5; min-width: 140px;">
+                              <label for="edit-partner-terms-type-{partner.id}" style="display: block; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 3px;">供應商付款條件</label>
+                              <select
+                                id="edit-partner-terms-type-{partner.id}"
+                                class="form-input"
+                                bind:value={editingPartnerPaymentTermsType}
+                                style="width: 100%; padding: 6px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                              >
+                                <option value="">未設定付款條件（清空）</option>
+                                <option value="net">貨到後 N 天 (net)</option>
+                                <option value="month_end">月結後 N 天 (month_end)</option>
+                              </select>
+                            </div>
+                            {#if editingPartnerPaymentTermsType}
+                              <div style="flex: 1; min-width: 110px;">
+                                <label for="edit-partner-terms-days-{partner.id}" style="display: block; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 3px;">天數（0～365）</label>
+                                <input
+                                  id="edit-partner-terms-days-{partner.id}"
+                                  type="number"
+                                  min="0"
+                                  max="365"
+                                  class="form-input"
+                                  placeholder="天數"
+                                  bind:value={editingPartnerPaymentTermsDays}
+                                  style="width: 100%; padding: 6px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                                />
+                              </div>
+                            {/if}
+                          </div>
+                        {/if}
                         {#if editPartnerError}
                           <div class="field-error-msg" style="color: var(--status-error); font-size: 0.75rem; margin-top: 2px;">
                             ⚠️ {editPartnerError}
@@ -1892,6 +1948,15 @@
                                 <span class="badge badge-amber" style="font-size: 0.7rem;">
                                   供應商
                                 </span>
+                                {#if partner.payment_terms_type}
+                                  <span class="badge" style="font-size: 0.7rem; background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3);">
+                                    付款條件：{partner.payment_terms_type === 'net' ? '貨到 ' : '月結 '}{partner.payment_terms_days} 天
+                                  </span>
+                                {:else}
+                                  <span class="badge" style="font-size: 0.7rem; color: var(--text-muted); border: 1px dashed var(--border-color);" title="此供應商未設定付款條件">
+                                    付款條件：未設定
+                                  </span>
+                                {/if}
                               {/if}
                             </div>
                             <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{partner.id}</div>
