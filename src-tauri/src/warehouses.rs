@@ -650,6 +650,35 @@ pub fn deactivate_warehouse_impl(
         }
     }
 
+    // W-03 Extension: Cannot deactivate if referenced by draft stock transfers (from or to)
+    let has_trf_table = match conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stock_transfers'",
+        [],
+        |_| Ok(true),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    if has_trf_table {
+        let pending_trf: Option<String> = match conn.query_row(
+            "SELECT transfer_number FROM stock_transfers 
+             WHERE tenant_id = ?1 AND (from_warehouse_id = ?2 OR to_warehouse_id = ?2) AND status = 'draft' 
+             ORDER BY created_at ASC LIMIT 1",
+            params![tenant_id, trimmed_id],
+            |r| r.get(0),
+        ) {
+            Ok(trf_num) => Some(trf_num),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.to_string()),
+        };
+
+        if let Some(trf_num) = pending_trf {
+            return Err(format!("此倉仍被未結案單據引用：{}", trf_num));
+        }
+    }
+
     conn.execute(
         "UPDATE warehouses SET is_active = 0 WHERE id = ?1 AND tenant_id = ?2",
         params![trimmed_id, tenant_id],
@@ -1219,6 +1248,50 @@ mod tests {
             err_po,
             format!("此倉仍被未結案單據引用：{}", po_draft.order.po_number)
         );
+    }
+
+    #[test]
+    fn test_tc_wh_e_05_w03_stock_transfer_guard() {
+        // Given: Warehouses wh_src, wh_dst and draft stock transfer
+        let mut conn = setup_test_db();
+        let _wh_default = create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉").unwrap();
+        let wh_src = create_warehouse_impl(&mut conn, "tnt_test", "SRC", "來源倉").unwrap();
+        let wh_dst = create_warehouse_impl(&mut conn, "tnt_test", "DST", "目的倉").unwrap();
+
+        crate::stock_transfers::create_stock_transfers_tables(&conn).unwrap();
+        let trf = crate::stock_transfers::create_stock_transfer_impl(
+            &mut conn, "tnt_test", "usr_1", &wh_src.id, &wh_dst.id, None, None, None,
+        )
+        .unwrap();
+
+        // When: Attempting to deactivate wh_src (referenced as from_warehouse_id)
+        let err_src = deactivate_warehouse_impl(&mut conn, "tnt_test", &wh_src.id).unwrap_err();
+        // Then: Blocked by draft stock transfer
+        assert_eq!(
+            err_src,
+            format!("此倉仍被未結案單據引用：{}", trf.transfer.transfer_number)
+        );
+
+        // When: Attempting to deactivate wh_dst (referenced as to_warehouse_id)
+        let err_dst = deactivate_warehouse_impl(&mut conn, "tnt_test", &wh_dst.id).unwrap_err();
+        // Then: Blocked by draft stock transfer
+        assert_eq!(
+            err_dst,
+            format!("此倉仍被未結案單據引用：{}", trf.transfer.transfer_number)
+        );
+
+        // When: Cancelling the draft transfer
+        crate::stock_transfers::cancel_stock_transfer_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_1",
+            &trf.transfer.id,
+        )
+        .unwrap();
+
+        // Then: Deactivation now succeeds (since stock is 0 and transfer is cancelled)
+        let deactivated = deactivate_warehouse_impl(&mut conn, "tnt_test", &wh_src.id);
+        assert!(deactivated.is_ok());
     }
 
     #[test]

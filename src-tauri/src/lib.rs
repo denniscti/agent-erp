@@ -13,6 +13,7 @@ pub mod llm_traces;
 pub mod partners;
 pub mod products;
 pub mod purchase_orders;
+pub mod stock_transfers;
 pub mod stocktakes;
 pub mod tasks;
 pub mod tps2_types;
@@ -46,7 +47,12 @@ where
     }
 
     // Whitelist check to prevent potential SQL injection via non-literal table identifiers
-    const ALLOWED_TABLES: &[&str] = &["stocktakes", "inventory_adjustments", "purchase_orders"];
+    const ALLOWED_TABLES: &[&str] = &[
+        "stocktakes",
+        "inventory_adjustments",
+        "purchase_orders",
+        "stock_transfers",
+    ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
     }
@@ -222,6 +228,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     stocktakes::create_stocktakes_tables(&conn)
         .map_err(|e| format!("Failed to create stocktakes tables: {}", e))?;
+
+    stock_transfers::create_stock_transfers_tables(&conn)
+        .map_err(|e| format!("Failed to create stock transfers tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -527,6 +536,15 @@ pub fn run() {
             stocktakes::cancel_stocktake,
             stocktakes::get_stocktake,
             stocktakes::list_stocktakes,
+            stock_transfers::create_stock_transfer,
+            stock_transfers::update_stock_transfer_header,
+            stock_transfers::add_stock_transfer_line,
+            stock_transfers::update_stock_transfer_line,
+            stock_transfers::remove_stock_transfer_line,
+            stock_transfers::post_stock_transfer,
+            stock_transfers::cancel_stock_transfer,
+            stock_transfers::get_stock_transfer,
+            stock_transfers::list_stock_transfers,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,

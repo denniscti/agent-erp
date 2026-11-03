@@ -55,7 +55,16 @@
     cancelStocktakeAction,
     calculateStocktakePostSummary,
     parseStocktakeConflictLines,
-    isStocktakeLineCounted
+    isStocktakeLineCounted,
+    fetchStockTransfers,
+    fetchStockTransferDetail,
+    createStockTransferAction,
+    updateStockTransferHeaderAction,
+    addStockTransferLineAction,
+    updateStockTransferLineAction,
+    removeStockTransferLineAction,
+    postStockTransferAction,
+    cancelStockTransferAction
   } from '../store.svelte.js';
 
   // Subtabs: 'inventory' | 'warehouses' | 'adjustments' | 'stocktakes' | 'transfers'
@@ -123,6 +132,36 @@
   let editWarehouseCode = $state('');
   let editWarehouseName = $state('');
   let isSavingWarehouse = $state(false);
+
+  // Transfers list & detail state (Issue #185)
+  let selectedTransferStatusFilter = $state('');
+  let selectedTransferFromWhFilter = $state('');
+  let selectedTransferToWhFilter = $state('');
+  let selectedTransferId = $state(null);
+  let transferLoading = $state(false);
+  let transferError = $state('');
+
+  // Create Transfer Modal state
+  let isCreateTransferModalOpen = $state(false);
+  let createTransferFromWhId = $state('');
+  let createTransferToWhId = $state('');
+  let createTransferNote = $state('');
+  let createTransferLines = $state([]); // array of { unit_id, quantity }
+  let newTransferLineUnitId = $state('');
+  let newTransferLineQty = $state(1);
+  let createTransferError = $state('');
+  let isCreatingTransfer = $state(false);
+
+  // Detail inline add line (draft)
+  let draftTransferNewUnitId = $state('');
+  let draftTransferNewQty = $state(1);
+  let draftTransferLineError = $state('');
+  let isAddingDraftTransferLine = $state(false);
+
+  // Post Confirm Modal state for transfer
+  let isPostTransferConfirmModalOpen = $state(false);
+  let postTransferLoading = $state(false);
+  let postTransferError = $state('');
 
   // Local state for Create Warehouse Modal
   let newWarehouseCode = $state('');
@@ -224,6 +263,29 @@
     postSummary.matched + postSummary.surplus + postSummary.shortage
   );
 
+  let filteredTransfers = $derived(
+    (appState.stockTransfers || []).filter(t => {
+      if (selectedTransferStatusFilter && t.status !== selectedTransferStatusFilter) {
+        return false;
+      }
+      if (selectedTransferFromWhFilter && t.from_warehouse_id !== selectedTransferFromWhFilter) {
+        return false;
+      }
+      if (selectedTransferToWhFilter && t.to_warehouse_id !== selectedTransferToWhFilter) {
+        return false;
+      }
+      return true;
+    })
+  );
+
+  let currentTransfer = $derived(
+    appState.currentStockTransferDetail?.transfer || null
+  );
+
+  let currentTransferLines = $derived(
+    appState.currentStockTransferDetail?.lines || []
+  );
+
   // Sync subtab with route
   $effect(() => {
     const route = appState.route;
@@ -243,6 +305,9 @@
       }
     } else if (route.includes('/warehouses/transfers')) {
       activeSubTab = 'transfers';
+      if (!selectedTransferId && (!appState.stockTransfers || appState.stockTransfers.length === 0)) {
+        loadTransfers();
+      }
     } else if (route.startsWith('/app/warehouses')) {
       // Default to inventory view if just /app/warehouses
       if (activeSubTab !== 'warehouses' && activeSubTab !== 'adjustments' && activeSubTab !== 'stocktakes' && activeSubTab !== 'transfers') {
@@ -331,6 +396,8 @@
       }
     } else if (tab === 'transfers') {
       navigate('/app/warehouses/transfers');
+      handleSelectTransfer(null);
+      loadTransfers();
     }
   }
 
@@ -1093,6 +1160,266 @@
     });
   }
 
+  // ==============================================================
+  // Transfers helper methods (Issue #185)
+  // ==============================================================
+  async function handleNavigateToTransfer(trfId) {
+    if (!trfId) return;
+    activeSubTab = 'transfers';
+    navigate('/app/warehouses/transfers');
+    await handleSelectTransfer(trfId);
+  }
+
+  function formatTransferStatus(status) {
+    switch (status) {
+      case 'draft':
+        return '草稿';
+      case 'posted':
+        return '已過帳';
+      case 'cancelled':
+        return '已取消';
+      default:
+        return status || '-';
+    }
+  }
+
+  function getTransferStatusBadgeClass(status) {
+    switch (status) {
+      case 'draft':
+        return 'badge-amber';
+      case 'posted':
+        return 'badge-emerald';
+      case 'cancelled':
+        return 'badge-slate';
+      default:
+        return 'badge-slate';
+    }
+  }
+
+  async function loadTransfers() {
+    if (transferLoading) return;
+    transferLoading = true;
+    transferError = '';
+    try {
+      await fetchStockTransfers({
+        status: selectedTransferStatusFilter || undefined,
+        fromWarehouseId: selectedTransferFromWhFilter || undefined,
+        toWarehouseId: selectedTransferToWhFilter || undefined
+      });
+    } catch (err) {
+      transferError = err.message || String(err);
+    } finally {
+      transferLoading = false;
+    }
+  }
+
+  async function handleSelectTransfer(transferId) {
+    if (!transferId) {
+      selectedTransferId = null;
+      appState.currentStockTransferDetail = null;
+      appState.selectedStockTransferId = null;
+      return;
+    }
+    selectedTransferId = transferId;
+    transferLoading = true;
+    transferError = '';
+    draftTransferLineError = '';
+    try {
+      const detail = await fetchStockTransferDetail(transferId);
+      if (detail && detail.transfer && detail.lines) {
+        for (const line of detail.lines) {
+          fetchUnitStock(detail.transfer.from_warehouse_id, line.unit_id);
+        }
+      }
+    } catch (err) {
+      transferError = err.message || String(err);
+    } finally {
+      transferLoading = false;
+    }
+  }
+
+  function handleOpenCreateTransferModal(reverseData = null) {
+    createTransferError = '';
+    if (reverseData) {
+      createTransferFromWhId = reverseData.fromWarehouseId || '';
+      createTransferToWhId = reverseData.toWarehouseId || '';
+      createTransferNote = reverseData.note || '';
+      createTransferLines = Array.isArray(reverseData.lines) ? reverseData.lines.map(l => ({ ...l })) : [];
+    } else {
+      createTransferFromWhId = activeWarehouses[0]?.id || '';
+      createTransferToWhId = activeWarehouses[1]?.id || '';
+      createTransferNote = '';
+      createTransferLines = [];
+    }
+    newTransferLineUnitId = '';
+    newTransferLineQty = 1;
+    isCreateTransferModalOpen = true;
+  }
+
+  function handleCloseCreateTransferModal() {
+    isCreateTransferModalOpen = false;
+    createTransferError = '';
+    createTransferLines = [];
+  }
+
+  function handleAddCreateTransferLine() {
+    createTransferError = '';
+    if (!newTransferLineUnitId) {
+      createTransferError = '請選擇調撥品項';
+      return;
+    }
+    const qty = Number(newTransferLineQty);
+    if (isNaN(qty) || qty <= 0) {
+      createTransferError = '調撥數量必須大於 0';
+      return;
+    }
+    if (createTransferLines.some(l => l.unit_id === newTransferLineUnitId)) {
+      createTransferError = '同一調撥單內商品單位不可重複';
+      return;
+    }
+    createTransferLines = [
+      ...createTransferLines,
+      {
+        unit_id: newTransferLineUnitId,
+        quantity: qty
+      }
+    ];
+    newTransferLineUnitId = '';
+    newTransferLineQty = 1;
+  }
+
+  function handleRemoveCreateTransferLine(index) {
+    createTransferLines = createTransferLines.filter((_, idx) => idx !== index);
+  }
+
+  async function handleSubmitCreateTransfer() {
+    if (!createTransferFromWhId || !createTransferToWhId) {
+      createTransferError = '請選擇來源倉與目的倉';
+      return;
+    }
+    if (createTransferFromWhId === createTransferToWhId) {
+      createTransferError = '來源倉與目的倉不可相同';
+      return;
+    }
+    isCreatingTransfer = true;
+    createTransferError = '';
+    try {
+      const detail = await createStockTransferAction({
+        fromWarehouseId: createTransferFromWhId,
+        toWarehouseId: createTransferToWhId,
+        note: createTransferNote || null,
+        initialLines: createTransferLines
+      });
+      handleCloseCreateTransferModal();
+      await handleSelectTransfer(detail.transfer.id);
+    } catch (err) {
+      createTransferError = err.message || String(err);
+    } finally {
+      isCreatingTransfer = false;
+    }
+  }
+
+  async function handleAddDraftTransferLine() {
+    if (!currentTransfer) return;
+    draftTransferLineError = '';
+    if (!draftTransferNewUnitId) {
+      draftTransferLineError = '請選擇品項單位';
+      return;
+    }
+    const qty = Number(draftTransferNewQty);
+    if (isNaN(qty) || qty <= 0) {
+      draftTransferLineError = '調撥數量必須大於 0';
+      return;
+    }
+    isAddingDraftTransferLine = true;
+    try {
+      await addStockTransferLineAction(currentTransfer.id, draftTransferNewUnitId, qty);
+      const addedUid = draftTransferNewUnitId;
+      draftTransferNewUnitId = '';
+      draftTransferNewQty = 1;
+      fetchUnitStock(currentTransfer.from_warehouse_id, addedUid);
+    } catch (err) {
+      draftTransferLineError = err.message || String(err);
+    } finally {
+      isAddingDraftTransferLine = false;
+    }
+  }
+
+  async function handleRemoveTransferLine(lineId) {
+    if (!currentTransfer || !lineId) return;
+    try {
+      await removeStockTransferLineAction(lineId);
+    } catch (err) {
+      showToast(err.message || String(err), 'error');
+    }
+  }
+
+  async function handleUpdateTransferLineQty(lineId, newQty) {
+    if (!lineId) return;
+    const qty = Number(newQty);
+    if (isNaN(qty) || qty <= 0) {
+      showToast('調撥數量必須大於 0', 'error');
+      return;
+    }
+    try {
+      await updateStockTransferLineAction(lineId, qty);
+    } catch (err) {
+      showToast(err.message || String(err), 'error');
+    }
+  }
+
+  function handleOpenPostTransferConfirm() {
+    postTransferError = '';
+    isPostTransferConfirmModalOpen = true;
+  }
+
+  function handleClosePostTransferConfirm() {
+    isPostTransferConfirmModalOpen = false;
+    postTransferError = '';
+  }
+
+  async function handleConfirmPostTransfer() {
+    if (!currentTransfer) return;
+    postTransferLoading = true;
+    postTransferError = '';
+    try {
+      await postStockTransferAction(currentTransfer.id);
+      handleClosePostTransferConfirm();
+      await handleSelectTransfer(currentTransfer.id);
+    } catch (err) {
+      postTransferError = err.message || String(err);
+    } finally {
+      postTransferLoading = false;
+    }
+  }
+
+  async function handleCancelTransfer() {
+    if (!currentTransfer || currentTransfer.status !== 'draft') return;
+    if (!confirm(`確定要取消調撥單「${currentTransfer.transfer_number}」嗎？取消後將無法過帳。`)) {
+      return;
+    }
+    try {
+      await cancelStockTransferAction(currentTransfer.id);
+      await handleSelectTransfer(currentTransfer.id);
+    } catch (err) {
+      showToast(err.message || String(err), 'error');
+    }
+  }
+
+  function handleCreateReverseTransfer() {
+    if (!currentTransfer || currentTransfer.status !== 'posted') return;
+    const reverseLines = currentTransferLines.map(l => ({
+      unit_id: l.unit_id,
+      quantity: l.quantity
+    }));
+    handleOpenCreateTransferModal({
+      fromWarehouseId: currentTransfer.to_warehouse_id,
+      toWarehouseId: currentTransfer.from_warehouse_id,
+      note: `反向調撥（參照 ${currentTransfer.transfer_number}）`,
+      lines: reverseLines
+    });
+  }
+
   // Opening Balance Modal Handlers
   function resetOpeningBalanceForm() {
     openingUnitId = '';
@@ -1577,6 +1904,15 @@
                                               id="link-stk-{mov.reference_id}"
                                             >
                                               盤點單 #{mov.reference_id.slice(-6)}
+                                            </button>
+                                          {:else if mov.reference_type === 'stock_transfer' || mov.reason === 'transfer_out' || mov.reason === 'transfer_in' || mov.reference_id.startsWith('trf_')}
+                                            <button
+                                              class="link-po-ref link-trf-ref"
+                                              onclick={() => handleNavigateToTransfer(mov.reference_id)}
+                                              title="點擊前往此調撥單明細"
+                                              id="link-trf-{mov.reference_id}"
+                                            >
+                                              調撥單 #{mov.reference_id.slice(-6)}
                                             </button>
                                           {:else}
                                             <span class="badge badge-slate" style="font-family: monospace;">#{mov.reference_id.slice(-6)}</span>
@@ -2648,21 +2984,457 @@
       {/if}
 
     {:else if activeSubTab === 'transfers'}
-      <div class="empty-state-panel glass-panel">
-        <div class="empty-state-icon">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="17 1 21 5 17 9"></polyline>
-            <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-            <polyline points="7 23 3 19 7 15"></polyline>
-            <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-          </svg>
+      {#if activeWarehouses.length < 2}
+        <div class="empty-state-panel glass-panel" id="transfer-single-warehouse-guide" style="padding: 48px 24px; text-align: center;">
+          <div class="empty-state-icon" style="color: rgb(var(--accent-amber)); margin-bottom: 16px;">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+          </div>
+          <h3 class="empty-state-title" style="font-size: 1.25rem; font-weight: 600; margin-bottom: 8px;">需要至少兩個倉別才能調撥</h3>
+          <p class="empty-state-desc" style="max-width: 520px; margin: 0 auto 20px; color: var(--color-text-muted); line-height: 1.6;">
+            目前啟用中的倉別不足（目前僅有 {activeWarehouses.length} 個啟用倉）。倉庫調撥作業需要指定不同的來源倉與目的倉，請先前往「倉別管理」建立或啟用更多倉別。
+          </p>
+          <button
+            class="primary-btn"
+            id="btn-goto-warehouse-management"
+            onclick={() => handleTabSwitch('warehouses')}
+            style="padding: 8px 20px; font-weight: 500;"
+          >
+            前往倉別管理
+          </button>
         </div>
-        <h3 class="empty-state-title">倉庫調撥單 (Warehouse Transfers)</h3>
-        <p class="empty-state-desc">
-          多倉之間調撥出庫與調撥入庫作業。（此畫面將於 M12 專屬 issue 交付）
-        </p>
-        <span class="badge badge-amber" style="padding: 4px 10px; font-size: 0.8rem;">功能開發中 (M12)</span>
-      </div>
+      {:else if selectedTransferId && currentTransfer}
+        <!-- ========================================== -->
+        <!-- TRANSFER DETAIL VIEW                      -->
+        <!-- ========================================== -->
+        <div class="stocktake-detail-view" id="transfer-detail-card">
+          <!-- Top bar -->
+          <div class="detail-top-nav">
+            <button
+              class="back-btn"
+              onclick={() => handleSelectTransfer(null)}
+              id="btn-back-to-transfers-list"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="19" y1="12" x2="5" y2="12"></line>
+                <polyline points="12 19 5 12 12 5"></polyline>
+              </svg>
+              返回調撥單列表
+            </button>
+            <div class="detail-actions">
+              {#if currentTransfer.status === 'draft'}
+                <button
+                  class="secondary-btn"
+                  id="btn-cancel-transfer"
+                  onclick={handleCancelTransfer}
+                  style="color: var(--color-error); border-color: rgba(239, 68, 68, 0.4);"
+                >
+                  取消單據
+                </button>
+                <button
+                  class="primary-btn"
+                  id="btn-post-transfer"
+                  onclick={handleOpenPostTransferConfirm}
+                  disabled={currentTransferLines.length === 0}
+                  style="background: #10b981; color: white;"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                  過帳
+                </button>
+              {:else if currentTransfer.status === 'posted'}
+                <button
+                  class="secondary-btn"
+                  id="btn-create-reverse-transfer"
+                  onclick={handleCreateReverseTransfer}
+                  title="以此單為基底建立方向相反的調撥單"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="17 1 21 5 17 9"></polyline>
+                    <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                    <polyline points="7 23 3 19 7 15"></polyline>
+                    <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                  </svg>
+                  建立反向調撥單
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Header summary card -->
+          <div class="glass-panel" style="padding: 20px; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px;">
+              <div>
+                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px;">
+                  <h2 style="font-size: 1.35rem; font-weight: 700; margin: 0;">
+                    調撥單 #{currentTransfer.transfer_number}
+                  </h2>
+                  <span class="badge {getTransferStatusBadgeClass(currentTransfer.status)}">
+                    {formatTransferStatus(currentTransfer.status)}
+                  </span>
+                </div>
+                <div style="font-size: 0.85rem; color: var(--color-text-muted);">
+                  建立人：{currentTransfer.created_by} ｜ 建立時間：{formatTime(currentTransfer.created_at)}
+                  {#if currentTransfer.posted_at}
+                    ｜ 過帳時間：{formatTime(currentTransfer.posted_at)}
+                  {/if}
+                  {#if currentTransfer.cancelled_at}
+                    ｜ 取消時間：{formatTime(currentTransfer.cancelled_at)}
+                  {/if}
+                </div>
+              </div>
+            </div>
+
+            <!-- Transfer Route Banner -->
+            <div style="display: flex; align-items: center; gap: 16px; padding: 12px 16px; background: rgba(255,255,255,0.03); border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+              <div style="flex: 1;">
+                <div style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 2px;">來源倉別</div>
+                <div style="font-weight: 600; font-size: 1rem; color: #f59e0b;">
+                  📦 {getWarehouseName(currentTransfer.from_warehouse_id)}
+                </div>
+              </div>
+
+              <div style="color: var(--color-text-muted);">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                  <polyline points="12 5 19 12 12 19"></polyline>
+                </svg>
+              </div>
+
+              <div style="flex: 1;">
+                <div style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 2px;">目的倉別</div>
+                <div style="font-weight: 600; font-size: 1rem; color: #10b981;">
+                  🏢 {getWarehouseName(currentTransfer.to_warehouse_id)}
+                </div>
+              </div>
+
+              {#if currentTransfer.note}
+                <div style="flex: 1.5; border-left: 1px solid rgba(255,255,255,0.08); padding-left: 16px;">
+                  <div style="font-size: 0.75rem; color: var(--color-text-muted); margin-bottom: 2px;">備註說明</div>
+                  <div style="font-size: 0.88rem; color: var(--color-text);">{currentTransfer.note}</div>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <!-- Lines table card -->
+          <div class="glass-panel" style="padding: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+              <h3 style="font-size: 1.1rem; font-weight: 600; margin: 0;">
+                調撥明細品項 ({currentTransferLines.length})
+              </h3>
+            </div>
+
+            <!-- Inline Add Line for Draft -->
+            {#if currentTransfer.status === 'draft'}
+              <div style="display: flex; gap: 12px; align-items: flex-end; margin-bottom: 16px; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px solid rgba(255,255,255,0.06);">
+                <div style="flex: 2; min-width: 220px;">
+                  <label for="select-draft-trf-unit" style="display: block; font-size: 0.8rem; color: var(--color-text-muted); margin-bottom: 4px;">選擇品項單位</label>
+                  <select
+                    class="form-select form-select-sm"
+                    id="select-draft-trf-unit"
+                    bind:value={draftTransferNewUnitId}
+                    onchange={(e) => {
+                      if (e.currentTarget.value) {
+                        fetchUnitStock(currentTransfer.from_warehouse_id, e.currentTarget.value);
+                      }
+                    }}
+                    style="width: 100%;"
+                  >
+                    <option value="">-- 請選擇商品單位 --</option>
+                    {#each availableUnits.filter(u => !currentTransferLines.some(l => l.unit_id === u.unit_id)) as u}
+                      <option value={u.unit_id}>{u.label}</option>
+                    {/each}
+                  </select>
+                </div>
+
+                {#if draftTransferNewUnitId}
+                  <div style="flex: 1; min-width: 120px;">
+                    <span style="display: block; font-size: 0.8rem; color: var(--color-text-muted); margin-bottom: 4px;">來源倉現有</span>
+                    <span style="font-weight: 600; font-size: 0.95rem; color: {getCachedStock(currentTransfer.from_warehouse_id, draftTransferNewUnitId) > 0 ? '#10b981' : '#ef4444'};">
+                      {getCachedStock(currentTransfer.from_warehouse_id, draftTransferNewUnitId)}
+                    </span>
+                  </div>
+                {/if}
+
+                <div style="flex: 1; min-width: 120px;">
+                  <label for="input-draft-trf-qty" style="display: block; font-size: 0.8rem; color: var(--color-text-muted); margin-bottom: 4px;">調撥數量</label>
+                  <input
+                    type="number"
+                    step="any"
+                    min="0.000001"
+                    class="form-input form-input-sm"
+                    id="input-draft-trf-qty"
+                    bind:value={draftTransferNewQty}
+                    placeholder="數量 > 0"
+                    style="width: 100%;"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  class="primary-btn"
+                  id="btn-add-draft-transfer-line"
+                  onclick={handleAddDraftTransferLine}
+                  disabled={isAddingDraftTransferLine || !draftTransferNewUnitId}
+                  style="padding: 6px 16px; white-space: nowrap;"
+                >
+                  加入明細
+                </button>
+              </div>
+
+              {#if draftTransferLineError}
+                <div class="alert alert-danger" style="margin-bottom: 12px; font-size: 0.82rem; padding: 6px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444;">
+                  {draftTransferLineError}
+                </div>
+              {/if}
+            {/if}
+
+            {#if currentTransferLines.length === 0}
+              <div style="text-align: center; padding: 32px; color: var(--color-text-muted);">
+                尚未加入任何調撥明細品項。請使用上方表單加入明細。
+              </div>
+            {:else}
+              <div class="table-responsive">
+                <table class="inventory-table" id="transfer-lines-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 48px;">#</th>
+                      <th>品項名稱</th>
+                      <th>規格名稱</th>
+                      <th>單位</th>
+                      <th class="text-right">來源倉現有量</th>
+                      <th class="text-right">調撥數量</th>
+                      {#if currentTransfer.status === 'draft'}
+                        <th style="width: 80px; text-align: center;">操作</th>
+                      {/if}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each currentTransferLines as line}
+                      {@const availStock = getCachedStock(currentTransfer.from_warehouse_id, line.unit_id)}
+                      {@const isOverStock = line.quantity > (availStock + 1e-9)}
+                      <tr class="table-row-hover">
+                        <td>{line.line_no}</td>
+                        <td style="font-weight: 500;">{line.product_name_snapshot}</td>
+                        <td class="text-muted">{line.variant_name_snapshot}</td>
+                        <td>
+                          <span class="badge badge-slate" style="font-size: 0.75rem;">
+                            {line.unit_name_snapshot}
+                          </span>
+                        </td>
+                        <td class="text-right" style="font-family: monospace;">
+                          <span style="color: {availStock > 0 ? '#10b981' : 'var(--color-text-muted)'}; font-weight: 500;">
+                            {availStock}
+                          </span>
+                        </td>
+                        <td class="text-right" style="font-family: monospace;">
+                          <span
+                            class="{isOverStock ? 'text-error' : ''}"
+                            style="font-weight: 600; font-size: 0.95rem; {isOverStock ? 'color: #ef4444;' : ''}"
+                          >
+                            {line.quantity}
+                          </span>
+                          {#if isOverStock}
+                            <span
+                              class="badge badge-red"
+                              style="font-size: 0.7rem; margin-left: 6px; padding: 2px 6px; background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);"
+                              title="調撥量大於現有量，過帳時將被系統拒絕"
+                            >
+                              庫存不足
+                            </span>
+                          {/if}
+                        </td>
+                        {#if currentTransfer.status === 'draft'}
+                          <td style="text-align: center;">
+                            <button
+                              class="action-btn-sm btn-delete"
+                              onclick={() => handleRemoveTransferLine(line.id)}
+                              id="btn-remove-line-{line.id}"
+                              title="刪除此明細"
+                              style="color: var(--color-error); background: transparent; border: none; cursor: pointer; padding: 4px;"
+                            >
+                              ✕
+                            </button>
+                          </td>
+                        {/if}
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
+          </div>
+        </div>
+
+      {:else}
+        <!-- ========================================== -->
+        <!-- TRANSFERS LIST VIEW                        -->
+        <!-- ========================================== -->
+        <div class="table-container glass-panel">
+          <!-- Filter toolbar -->
+          <div class="filter-bar" style="display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap;">
+            <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+              <!-- Status filter -->
+              <div class="filter-group">
+                <select
+                  class="form-select form-select-sm"
+                  id="filter-transfer-status"
+                  bind:value={selectedTransferStatusFilter}
+                  onchange={loadTransfers}
+                >
+                  <option value="">所有狀態</option>
+                  <option value="draft">草稿</option>
+                  <option value="posted">已過帳</option>
+                  <option value="cancelled">已取消</option>
+                </select>
+              </div>
+
+              <!-- From Warehouse filter -->
+              <div class="filter-group">
+                <select
+                  class="form-select form-select-sm"
+                  id="filter-transfer-from-wh"
+                  bind:value={selectedTransferFromWhFilter}
+                  onchange={loadTransfers}
+                >
+                  <option value="">全部來源倉</option>
+                  {#each activeWarehouses as wh}
+                    <option value={wh.id}>{wh.name} ({wh.code})</option>
+                  {/each}
+                </select>
+              </div>
+
+              <!-- To Warehouse filter -->
+              <div class="filter-group">
+                <select
+                  class="form-select form-select-sm"
+                  id="filter-transfer-to-wh"
+                  bind:value={selectedTransferToWhFilter}
+                  onchange={loadTransfers}
+                >
+                  <option value="">全部目的倉</option>
+                  {#each activeWarehouses as wh}
+                    <option value={wh.id}>{wh.name} ({wh.code})</option>
+                  {/each}
+                </select>
+              </div>
+            </div>
+
+            <!-- New Transfer Button -->
+            <button
+              class="primary-btn"
+              id="btn-open-create-transfer"
+              onclick={() => handleOpenCreateTransferModal()}
+              style="padding: 6px 16px; font-weight: 500;"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              新建調撥單
+            </button>
+          </div>
+
+          {#if transferError}
+            <div class="alert alert-danger" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444;">
+              {transferError}
+            </div>
+          {/if}
+
+          {#if transferLoading}
+            <div style="text-align: center; padding: 40px; color: var(--color-text-muted);">
+              載入調撥單列表中...
+            </div>
+          {:else if filteredTransfers.length === 0}
+            <div class="empty-state-panel glass-panel" style="padding: 40px 20px; text-align: center;">
+              <div class="empty-state-icon">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="17 1 21 5 17 9"></polyline>
+                  <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                  <polyline points="7 23 3 19 7 15"></polyline>
+                  <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                </svg>
+              </div>
+              <h4 style="font-size: 1.1rem; font-weight: 600; margin-bottom: 6px;">尚無調撥單紀錄</h4>
+              <p style="font-size: 0.85rem; color: var(--color-text-muted); margin-bottom: 16px;">
+                點擊上方「新建調撥單」按鈕，開始多倉調撥作業。
+              </p>
+              <button
+                class="primary-btn"
+                id="btn-empty-create-transfer"
+                onclick={() => handleOpenCreateTransferModal()}
+              >
+                新建第一張調撥單
+              </button>
+            </div>
+          {:else}
+            <div class="table-responsive">
+              <table class="inventory-table" id="transfers-list-table">
+                <thead>
+                  <tr>
+                    <th>調撥單號</th>
+                    <th>來源倉別</th>
+                    <th>目的倉別</th>
+                    <th>狀態</th>
+                    <th class="text-right">明細項數</th>
+                    <th>備註說明</th>
+                    <th>建立時間</th>
+                    <th style="width: 100px; text-align: center;">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each filteredTransfers as trf}
+                    <tr class="table-row-hover" style="cursor: pointer;" onclick={() => handleSelectTransfer(trf.id)}>
+                      <td style="font-family: monospace; font-weight: 600; color: rgb(var(--accent-primary, 59, 130, 246));">
+                        {trf.transfer_number}
+                      </td>
+                      <td>
+                        <span style="color: #f59e0b; font-weight: 500;">
+                          📦 {getWarehouseName(trf.from_warehouse_id)}
+                        </span>
+                      </td>
+                      <td>
+                        <span style="color: #10b981; font-weight: 500;">
+                          🏢 {getWarehouseName(trf.to_warehouse_id)}
+                        </span>
+                      </td>
+                      <td>
+                        <span class="badge {getTransferStatusBadgeClass(trf.status)}">
+                          {formatTransferStatus(trf.status)}
+                        </span>
+                      </td>
+                      <td class="text-right" style="font-family: monospace;">
+                        {trf.lines_count || 0}
+                      </td>
+                      <td class="text-muted" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                        {trf.note || '-'}
+                      </td>
+                      <td class="text-muted" style="font-size: 0.82rem;">
+                        {formatTime(trf.created_at)}
+                      </td>
+                      <td style="text-align: center;" onclick={(e) => e.stopPropagation()}>
+                        <button
+                          class="action-btn-sm"
+                          id="btn-view-transfer-{trf.id}"
+                          onclick={() => handleSelectTransfer(trf.id)}
+                          style="font-size: 0.8rem; padding: 3px 10px;"
+                        >
+                          {trf.status === 'draft' ? '編輯' : '檢視'}
+                        </button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+      {/if}
     {/if}
   </div>
 </div>
@@ -3301,6 +4073,287 @@
           disabled={stocktakeModalLoading}
         >
           {stocktakeModalLoading ? '更新中...' : '確認重新取得系統量'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ============================================================== -->
+<!-- MODAL: 新建調撥單彈窗 (Issue #185)                             -->
+<!-- ============================================================== -->
+{#if isCreateTransferModalOpen}
+  <div class="modal-backdrop" onclick={handleCloseCreateTransferModal} onkeydown={(e) => e.key === 'Escape' && handleCloseCreateTransferModal()} role="presentation">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="glass-modal" style="max-width: 680px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="modal-create-trf-title" tabindex="-1">
+      <div class="modal-header">
+        <h3 id="modal-create-trf-title" class="modal-title">新建倉庫調撥單</h3>
+        <button class="btn-close-modal" onclick={handleCloseCreateTransferModal} aria-label="關閉彈窗">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">
+          指定來源倉與目的倉，建立多倉調撥草稿。過帳時兩邊的庫存將在同一個交易內同時異動。
+        </p>
+
+        {#if createTransferError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.82rem;">
+            {createTransferError}
+          </div>
+        {/if}
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px;">
+          <div class="form-group">
+            <label for="create-trf-from-wh">來源倉別 *</label>
+            <select
+              id="create-trf-from-wh"
+              bind:value={createTransferFromWhId}
+              class="form-select"
+              onchange={() => {
+                if (newTransferLineUnitId && createTransferFromWhId) {
+                  fetchUnitStock(createTransferFromWhId, newTransferLineUnitId);
+                }
+              }}
+            >
+              <option value="">-- 請選擇來源倉 --</option>
+              {#each activeWarehouses as wh}
+                <option value={wh.id}>{wh.name} ({wh.code})</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="create-trf-to-wh">目的倉別 (≠ 來源倉) *</label>
+            <select
+              id="create-trf-to-wh"
+              bind:value={createTransferToWhId}
+              class="form-select"
+            >
+              <option value="">-- 請選擇目的倉 --</option>
+              {#each activeWarehouses as wh}
+                <option value={wh.id} disabled={wh.id === createTransferFromWhId}>
+                  {wh.name} ({wh.code}) {wh.id === createTransferFromWhId ? '（不可與來源倉相同）' : ''}
+                </option>
+              {/each}
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 16px;">
+          <label for="create-trf-note">備註說明 (選填)</label>
+          <input
+            id="create-trf-note"
+            type="text"
+            bind:value={createTransferNote}
+            class="form-input"
+            placeholder="調撥原因、專案或物流備註"
+          />
+        </div>
+
+        <!-- Initial Lines section -->
+        <div style="border-top: 1px solid var(--border-color); padding-top: 14px; margin-bottom: 12px;">
+          <div style="font-size: 0.88rem; font-weight: 600; margin-bottom: 8px;">
+            調撥品項明細 (可在草稿建立後再新增)
+          </div>
+
+          <div style="display: flex; gap: 10px; align-items: flex-end; margin-bottom: 10px; background: rgba(255,255,255,0.02); padding: 10px; border-radius: 6px; border: 1px solid var(--border-color);">
+            <div style="flex: 2; min-width: 180px;">
+              <label for="create-trf-unit-select" style="font-size: 0.75rem; color: var(--color-text-muted); display: block; margin-bottom: 2px;">商品單位</label>
+              <select
+                id="create-trf-unit-select"
+                class="form-select form-select-sm"
+                bind:value={newTransferLineUnitId}
+                onchange={(e) => {
+                  if (e.currentTarget.value && createTransferFromWhId) {
+                    fetchUnitStock(createTransferFromWhId, e.currentTarget.value);
+                  }
+                }}
+              >
+                <option value="">-- 選擇商品單位 --</option>
+                {#each availableUnits.filter(u => !createTransferLines.some(l => l.unit_id === u.unit_id)) as unit}
+                  <option value={unit.unit_id}>{unit.label}</option>
+                {/each}
+              </select>
+            </div>
+
+            {#if newTransferLineUnitId && createTransferFromWhId}
+              <div style="flex: 1; min-width: 100px;">
+                <span style="font-size: 0.75rem; color: var(--color-text-muted); display: block; margin-bottom: 2px;">來源倉現有</span>
+                <span style="font-weight: 600; font-size: 0.9rem; color: {getCachedStock(createTransferFromWhId, newTransferLineUnitId) > 0 ? '#10b981' : '#ef4444'};">
+                  {getCachedStock(createTransferFromWhId, newTransferLineUnitId)}
+                </span>
+              </div>
+            {/if}
+
+            <div style="flex: 1; min-width: 90px;">
+              <label for="create-trf-qty-input" style="font-size: 0.75rem; color: var(--color-text-muted); display: block; margin-bottom: 2px;">調撥數量</label>
+              <input
+                id="create-trf-qty-input"
+                type="number"
+                step="any"
+                min="0.000001"
+                class="form-input form-input-sm"
+                bind:value={newTransferLineQty}
+                placeholder="> 0"
+              />
+            </div>
+
+            <button
+              type="button"
+              class="secondary-btn"
+              id="btn-add-create-transfer-line"
+              onclick={handleAddCreateTransferLine}
+              disabled={!newTransferLineUnitId}
+              style="padding: 5px 12px; font-size: 0.8rem; white-space: nowrap;"
+            >
+              加入
+            </button>
+          </div>
+
+          {#if createTransferLines.length > 0}
+            <div class="table-responsive" style="max-height: 180px; overflow-y: auto; margin-bottom: 12px;">
+              <table class="inventory-table create-lines-table">
+                <thead>
+                  <tr>
+                    <th>商品單位</th>
+                    <th class="text-right">來源倉現有</th>
+                    <th class="text-right">調撥數量</th>
+                    <th style="width: 50px; text-align: center;">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each createTransferLines as line, idx}
+                    {@const curStk = createTransferFromWhId ? getCachedStock(createTransferFromWhId, line.unit_id) : 0}
+                    <tr>
+                      <td style="font-size: 0.82rem;">{getUnitLabel(line.unit_id)}</td>
+                      <td class="text-right" style="font-family: monospace; font-size: 0.82rem;">{curStk}</td>
+                      <td class="text-right" style="font-family: monospace; font-weight: 600; font-size: 0.85rem; color: {line.quantity > curStk ? '#ef4444' : 'inherit'};">
+                        {line.quantity}
+                        {#if line.quantity > curStk}
+                          <span style="font-size: 0.7rem; color: #ef4444; margin-left: 4px;">(超量)</span>
+                        {/if}
+                      </td>
+                      <td style="text-align: center;">
+                        <button
+                          type="button"
+                          class="action-btn-sm btn-delete"
+                          onclick={() => handleRemoveCreateTransferLine(idx)}
+                          style="background: transparent; border: none; color: var(--color-error); cursor: pointer; padding: 2px;"
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button type="button" class="secondary-btn" onclick={handleCloseCreateTransferModal} disabled={isCreatingTransfer}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="primary-btn"
+          id="btn-submit-create-transfer"
+          onclick={handleSubmitCreateTransfer}
+          disabled={isCreatingTransfer || !createTransferFromWhId || !createTransferToWhId || createTransferFromWhId === createTransferToWhId}
+        >
+          {isCreatingTransfer ? '建立中...' : '建立調撥單'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ============================================================== -->
+<!-- MODAL: 調撥單過帳確認彈窗 (Issue #185)                         -->
+<!-- ============================================================== -->
+{#if isPostTransferConfirmModalOpen && currentTransfer}
+  <div class="modal-backdrop" onclick={handleClosePostTransferConfirm} onkeydown={(e) => e.key === 'Escape' && handleClosePostTransferConfirm()} role="presentation">
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div class="glass-modal" style="max-width: 600px;" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="modal-post-trf-confirm-title" tabindex="-1">
+      <div class="modal-header">
+        <h3 id="modal-post-trf-confirm-title" class="modal-title">調撥單過帳確認</h3>
+        <button class="btn-close-modal" onclick={handleClosePostTransferConfirm} aria-label="關閉彈窗">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">
+          過帳後將在同一個資料庫交易中完成來源倉扣減與目的倉增加，此動作<strong>無法復原或刪除</strong>。請核對以下調撥明細：
+        </p>
+
+        {#if postTransferError}
+          <div class="alert alert-danger" style="margin-bottom: 12px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; font-size: 0.85rem;">
+            <div class="font-bold mb-1">過帳被系統拒絕 (T-05)：</div>
+            <div style="font-family: monospace; white-space: pre-wrap; font-size: 0.82rem;">{postTransferError}</div>
+          </div>
+        {/if}
+
+        <div class="summary-grid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; background: rgba(255, 255, 255, 0.03); padding: 12px; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+          <div><span class="text-muted">調撥單號：</span><strong>#{currentTransfer.transfer_number}</strong></div>
+          <div><span class="text-muted">品項總數：</span><strong>{currentTransferLines.length} 項</strong></div>
+          <div><span class="text-muted">來源倉庫：</span><strong style="color: #f59e0b;">{getWarehouseName(currentTransfer.from_warehouse_id)}</strong></div>
+          <div><span class="text-muted">目的倉庫：</span><strong style="color: #10b981;">{getWarehouseName(currentTransfer.to_warehouse_id)}</strong></div>
+        </div>
+
+        <div style="font-size: 0.85rem; font-weight: 600; margin-bottom: 8px;">來源倉庫存扣減預覽：</div>
+
+        <div class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+          <table class="inventory-table">
+            <thead>
+              <tr>
+                <th style="width: 36px;">#</th>
+                <th>品項單位</th>
+                <th class="text-right">來源現有</th>
+                <th class="text-right">調撥量</th>
+                <th class="text-right">調後餘額</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each currentTransferLines as line}
+                {@const curStock = getCachedStock(currentTransfer.from_warehouse_id, line.unit_id)}
+                {@const remainStock = curStock - line.quantity}
+                {@const isDeficit = remainStock < -1e-9}
+                <tr class={isDeficit ? 'row-warning' : ''}>
+                  <td>{line.line_no}</td>
+                  <td class="font-medium">{line.product_name_snapshot} ({line.unit_name_snapshot})</td>
+                  <td class="text-right font-mono">{curStock}</td>
+                  <td class="text-right font-mono font-bold text-amber">-{line.quantity}</td>
+                  <td class="text-right font-mono {isDeficit ? 'text-red font-bold' : 'text-emerald font-semibold'}">
+                    {remainStock}
+                    {#if isDeficit}
+                      <span class="badge badge-red ml-1" style="font-size: 0.7rem;">⚠️ 不足</span>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+
+        {#if currentTransferLines.some(l => (getCachedStock(currentTransfer.from_warehouse_id, l.unit_id) + 1e-9) < l.quantity)}
+          <div class="alert alert-warning" style="margin-top: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); color: #f59e0b; font-size: 0.8rem;">
+            ⚠️ 警告：包含來源倉庫存不足的明細項目，送出後後端將拒絕過帳並整張回滾 (T-05)。
+          </div>
+        {/if}
+      </div>
+
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px;">
+        <button type="button" class="secondary-btn" onclick={handleClosePostTransferConfirm} disabled={postTransferLoading}>
+          取消
+        </button>
+        <button
+          type="button"
+          class="primary-btn"
+          id="btn-confirm-post-transfer"
+          onclick={handleConfirmPostTransfer}
+          disabled={postTransferLoading}
+          style="background: #10b981; color: white;"
+        >
+          {postTransferLoading ? '過帳處理中...' : '確認過帳'}
         </button>
       </div>
     </div>
