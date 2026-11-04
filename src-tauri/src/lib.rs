@@ -18,6 +18,7 @@ pub mod stock_transfers;
 pub mod stocktakes;
 pub mod tasks;
 pub mod tps2_types;
+pub mod vendor_bills;
 pub mod warehouses;
 
 #[cfg(test)]
@@ -54,6 +55,7 @@ where
         "purchase_orders",
         "stock_transfers",
         "accounts_payable",
+        "vendor_bills",
     ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
@@ -236,6 +238,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     accounts_payable::create_accounts_payable_tables(&conn)
         .map_err(|e| format!("Failed to create accounts payable tables: {}", e))?;
+
+    vendor_bills::create_vendor_bills_tables(&conn)
+        .map_err(|e| format!("Failed to create vendor bills tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -552,6 +557,18 @@ pub fn run() {
             stock_transfers::list_stock_transfers,
             accounts_payable::get_account_payable,
             accounts_payable::list_accounts_payable,
+            vendor_bills::create_vendor_bill,
+            vendor_bills::update_vendor_bill_header,
+            vendor_bills::add_vendor_bill_order,
+            vendor_bills::remove_vendor_bill_order,
+            vendor_bills::post_vendor_bill,
+            vendor_bills::accept_vendor_bill_difference,
+            vendor_bills::return_vendor_bill_to_draft,
+            vendor_bills::cancel_vendor_bill,
+            vendor_bills::void_vendor_bill,
+            vendor_bills::get_vendor_bill,
+            vendor_bills::list_vendor_bills,
+            vendor_bills::list_unbilled_received_orders,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
