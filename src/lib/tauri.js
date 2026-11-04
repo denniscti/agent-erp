@@ -485,6 +485,93 @@ if (!mockStockTransferLines || !Array.isArray(mockStockTransferLines)) {
   saveStorage('agent_erp_mock_stock_transfer_lines', mockStockTransferLines);
 }
 
+let mockAccountsPayable = loadStorage('agent_erp_mock_accounts_payable', []);
+if (!mockAccountsPayable || !Array.isArray(mockAccountsPayable)) {
+  mockAccountsPayable = [];
+  saveStorage('agent_erp_mock_accounts_payable', mockAccountsPayable);
+}
+
+let mockPayments = loadStorage('agent_erp_mock_payments', []);
+if (!mockPayments || !Array.isArray(mockPayments)) {
+  mockPayments = [];
+  saveStorage('agent_erp_mock_payments', mockPayments);
+}
+
+let mockPaymentAllocations = loadStorage('agent_erp_mock_payment_allocations', []);
+if (!mockPaymentAllocations || !Array.isArray(mockPaymentAllocations)) {
+  mockPaymentAllocations = [];
+  saveStorage('agent_erp_mock_payment_allocations', mockPaymentAllocations);
+}
+
+function formatMockAccountPayable(ap) {
+  const targetTenantId = ap.tenant_id || 'tnt_mock_1';
+  const allocations = mockPaymentAllocations
+    .filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId)
+    .map(pa => {
+      const payment = mockPayments.find(p => p.id === pa.payment_id) || {};
+      return {
+        id: pa.id,
+        payment_id: pa.payment_id,
+        payment_number: payment.payment_number || '',
+        amount: Math.round(Number(pa.amount) * 100) / 100,
+        payment_date: payment.payment_date || '',
+        payment_status: payment.status || 'posted',
+        created_at: pa.created_at || ap.created_at
+      };
+    });
+
+  let rawPaid = 0;
+  for (const a of allocations) {
+    if (a.payment_status === 'posted') {
+      rawPaid += a.amount;
+    }
+  }
+
+  const roundedTotal = Math.round(Number(ap.amount) * 100) / 100;
+  const roundedPaid = Math.round(rawPaid * 100) / 100;
+
+  let paid_amount = 0;
+  let outstanding_amount = 0;
+  let settlement_status = 'unpaid';
+
+  if (ap.status === 'voided') {
+    paid_amount = 0;
+    outstanding_amount = 0;
+    settlement_status = 'unpaid';
+  } else {
+    const outstanding = Math.round((roundedTotal - roundedPaid) * 100) / 100;
+    if (outstanding <= 0) {
+      paid_amount = roundedPaid;
+      outstanding_amount = 0;
+      settlement_status = 'paid';
+    } else if (outstanding >= roundedTotal) {
+      paid_amount = 0;
+      outstanding_amount = roundedTotal;
+      settlement_status = 'unpaid';
+    } else {
+      paid_amount = roundedPaid;
+      outstanding_amount = outstanding;
+      settlement_status = 'partially_paid';
+    }
+  }
+
+  return {
+    detail: {
+      ...ap,
+      paid_amount,
+      outstanding_amount,
+      settlement_status,
+      allocations
+    },
+    item: {
+      ...ap,
+      paid_amount,
+      outstanding_amount,
+      settlement_status
+    }
+  };
+}
+
 function nextMockTrfNumber(tenantId) {
   let maxSeq = 0;
   for (const trf of mockStockTransfers) {
@@ -4391,6 +4478,57 @@ export async function invoke(cmd, args = {}) {
           };
         })
         .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+    }
+
+    case 'get_account_payable': {
+      const { id, ap_id, apId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const targetId = id || ap_id || apId;
+      if (!targetId || !String(targetId).trim()) {
+        throw new Error('缺少應付帳款 ID (id 或 ap_id)');
+      }
+      const ap = mockAccountsPayable.find(a => a.id === String(targetId).trim() && (a.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!ap) {
+        throw new Error('找不到指定的應付帳款或不屬於目前租戶');
+      }
+      return formatMockAccountPayable(ap).detail;
+    }
+
+    case 'list_accounts_payable': {
+      const { vendor_partner_id, vendorPartnerId, settlement_status, settlementStatus, status, due_date_from, dueDateFrom, due_date_to, dueDateTo } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      let list = mockAccountsPayable.filter(a => (a.tenant_id || 'tnt_mock_1') === targetTenantId);
+      const vp = vendor_partner_id || vendorPartnerId;
+      if (vp && String(vp).trim()) {
+        list = list.filter(a => a.vendor_partner_id === String(vp).trim());
+      }
+      const st = status;
+      if (st && String(st).trim()) {
+        list = list.filter(a => a.status === String(st).trim());
+      }
+      const from = due_date_from || dueDateFrom;
+      if (from && String(from).trim()) {
+        list = list.filter(a => a.due_date >= String(from).trim());
+      }
+      const to = due_date_to || dueDateTo;
+      if (to && String(to).trim()) {
+        list = list.filter(a => a.due_date <= String(to).trim());
+      }
+
+      const items = list
+        .sort((a, b) => (b.document_date || '').localeCompare(a.document_date || '') || b.created_at - a.created_at)
+        .map(a => formatMockAccountPayable(a).item);
+
+      const ss = settlement_status || settlementStatus;
+      if (ss && String(ss).trim()) {
+        const norm = String(ss).trim().toLowerCase();
+        let targetNorm = norm;
+        if (norm === '未付') targetNorm = 'unpaid';
+        else if (norm === '部分付款' || norm === 'partial') targetNorm = 'partially_paid';
+        else if (norm === '已付清') targetNorm = 'paid';
+        return items.filter(item => item.settlement_status === targetNorm);
+      }
+      return items;
     }
 
     case 'reset_mock_stock_transfers': {

@@ -5,6 +5,7 @@ use tauri::AppHandle;
 #[cfg(not(test))]
 use tauri::Manager;
 
+pub mod accounts_payable;
 pub mod auth;
 pub mod departments;
 pub mod inventory_adjustments;
@@ -52,6 +53,7 @@ where
         "inventory_adjustments",
         "purchase_orders",
         "stock_transfers",
+        "accounts_payable",
     ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
@@ -231,6 +233,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     stock_transfers::create_stock_transfers_tables(&conn)
         .map_err(|e| format!("Failed to create stock transfers tables: {}", e))?;
+
+    accounts_payable::create_accounts_payable_tables(&conn)
+        .map_err(|e| format!("Failed to create accounts payable tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -545,6 +550,8 @@ pub fn run() {
             stock_transfers::cancel_stock_transfer,
             stock_transfers::get_stock_transfer,
             stock_transfers::list_stock_transfers,
+            accounts_payable::get_account_payable,
+            accounts_payable::list_accounts_payable,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
