@@ -1199,32 +1199,50 @@ pub fn list_vendor_payments_impl(
     let mut param_index = 2;
 
     if let Some(f) = filter {
-        if let Some(vnd) = f.vendor_partner_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        if let Some(vnd) = f
+            .vendor_partner_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
             sql.push_str(&format!(" AND p.vendor_partner_id = ?{}", param_index));
             params_vec.push(Box::new(vnd));
             param_index += 1;
         }
 
-        if let Some(st) = f.status.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        if let Some(st) = f
+            .status
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
             sql.push_str(&format!(" AND p.status = ?{}", param_index));
             params_vec.push(Box::new(st));
             param_index += 1;
         }
 
-        if let Some(df) = f.payment_date_from.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        if let Some(df) = f
+            .payment_date_from
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
             sql.push_str(&format!(" AND p.payment_date >= ?{}", param_index));
             params_vec.push(Box::new(df));
             param_index += 1;
         }
 
-        if let Some(dt) = f.payment_date_to.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        if let Some(dt) = f
+            .payment_date_to
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
             sql.push_str(&format!(" AND p.payment_date <= ?{}", param_index));
             params_vec.push(Box::new(dt));
             let _ = param_index;
         }
     }
 
-    sql.push_str(" GROUP BY p.id ORDER BY p.payment_date DESC, p.created_at DESC, p.payment_number DESC");
+    sql.push_str(
+        " GROUP BY p.id ORDER BY p.payment_date DESC, p.created_at DESC, p.payment_number DESC",
+    );
 
     let mut stmt = conn.prepare(&sql)?;
     let slice: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
@@ -1278,7 +1296,8 @@ pub async fn create_vendor_payment<R: tauri::Runtime>(
     let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     let active_uid = crate::purchase_orders::resolve_active_user_id(&conn)?;
-    create_vendor_payment_impl(&mut conn, &active_tid, &active_uid, input).map_err(|e| e.to_string())
+    create_vendor_payment_impl(&mut conn, &active_tid, &active_uid, input)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1295,7 +1314,8 @@ pub async fn update_vendor_payment_header<R: tauri::Runtime>(
         .clone()
         .or_else(|| input.payment_id.clone())
         .unwrap_or_default();
-    update_vendor_payment_header_impl(&mut conn, &active_tid, &pid, input).map_err(|e| e.to_string())
+    update_vendor_payment_header_impl(&mut conn, &active_tid, &pid, input)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1309,8 +1329,14 @@ pub async fn add_vendor_payment_allocation<R: tauri::Runtime>(
     let db_path = crate::get_db_path(&app_handle);
     let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    add_vendor_payment_allocation_impl(&mut conn, &active_tid, &payment_id, &account_payable_id, amount)
-        .map_err(|e| e.to_string())
+    add_vendor_payment_allocation_impl(
+        &mut conn,
+        &active_tid,
+        &payment_id,
+        &account_payable_id,
+        amount,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1324,8 +1350,14 @@ pub async fn update_vendor_payment_allocation<R: tauri::Runtime>(
     let db_path = crate::get_db_path(&app_handle);
     let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    update_vendor_payment_allocation_impl(&mut conn, &active_tid, &payment_id, &allocation_id, amount)
-        .map_err(|e| e.to_string())
+    update_vendor_payment_allocation_impl(
+        &mut conn,
+        &active_tid,
+        &payment_id,
+        &allocation_id,
+        amount,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1422,7 +1454,10 @@ pub async fn list_vendor_payments<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::accounts_payable::{create_accounts_payable_tables, create_account_payable, CreateAccountPayableInput, get_account_payable_impl};
+    use crate::accounts_payable::{
+        create_account_payable, create_accounts_payable_tables, get_account_payable_impl,
+        CreateAccountPayableInput,
+    };
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -1437,7 +1472,8 @@ mod tests {
                 status TEXT NOT NULL DEFAULT 'active'
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         conn.execute(
             "CREATE TABLE users (
@@ -1447,7 +1483,8 @@ mod tests {
                 name TEXT NOT NULL DEFAULT ''
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         conn.execute(
             "CREATE TABLE partners (
@@ -1461,7 +1498,8 @@ mod tests {
                 created_at INTEGER NOT NULL
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         create_accounts_payable_tables(&conn).unwrap();
         create_vendor_payment_tables(&conn).unwrap();
@@ -1502,7 +1540,14 @@ mod tests {
         conn
     }
 
-    fn create_test_ap(conn: &mut Connection, tenant_id: &str, vendor_id: &str, src_no: &str, doc_date: &str, amount: f64) -> String {
+    fn create_test_ap(
+        conn: &mut Connection,
+        tenant_id: &str,
+        vendor_id: &str,
+        src_no: &str,
+        doc_date: &str,
+        amount: f64,
+    ) -> String {
         let input = CreateAccountPayableInput {
             vendor_partner_id: vendor_id.to_string(),
             source_type: "vendor_bill".to_string(),
@@ -1546,27 +1591,34 @@ mod tests {
         assert_eq!(payment.total_amount, 0.0);
 
         // When (TC-PAY-P01-E01): empty tenant_id
-        let err1 = create_vendor_payment_impl(&mut conn, "", "usr_admin", input.clone()).unwrap_err();
+        let err1 =
+            create_vendor_payment_impl(&mut conn, "", "usr_admin", input.clone()).unwrap_err();
         // Then: Fails with EmptyTenantId
         assert_eq!(err1, VendorPaymentError::EmptyTenantId);
 
         // When (TC-PAY-P01-E02): whitespace tenant_id
-        let err2 = create_vendor_payment_impl(&mut conn, "   ", "usr_admin", input.clone()).unwrap_err();
+        let err2 =
+            create_vendor_payment_impl(&mut conn, "   ", "usr_admin", input.clone()).unwrap_err();
         // Then: Fails with EmptyTenantId
         assert_eq!(err2, VendorPaymentError::EmptyTenantId);
 
         // When (TC-PAY-P01-E03): non-existent tenant_id
-        let err3 = create_vendor_payment_impl(&mut conn, "tnt_nonexistent", "usr_admin", input.clone()).unwrap_err();
+        let err3 =
+            create_vendor_payment_impl(&mut conn, "tnt_nonexistent", "usr_admin", input.clone())
+                .unwrap_err();
         // Then: Fails with TenantNotFound
         assert_eq!(err3, VendorPaymentError::TenantNotFound);
 
         // When (TC-PAY-P01-E04): suspended tenant_id
-        let err4 = create_vendor_payment_impl(&mut conn, "tnt_suspended", "usr_admin", input.clone()).unwrap_err();
+        let err4 =
+            create_vendor_payment_impl(&mut conn, "tnt_suspended", "usr_admin", input.clone())
+                .unwrap_err();
         // Then: Fails with TenantNotActive
         assert_eq!(err4, VendorPaymentError::TenantNotActive);
 
         // When (TC-PAY-P01-E05): empty user_id
-        let err5 = create_vendor_payment_impl(&mut conn, "tnt_test", "", input.clone()).unwrap_err();
+        let err5 =
+            create_vendor_payment_impl(&mut conn, "tnt_test", "", input.clone()).unwrap_err();
         // Then: Fails with EmptyUserId
         assert_eq!(err5, VendorPaymentError::EmptyUserId);
     }
@@ -1579,8 +1631,22 @@ mod tests {
     fn test_tc_pay_p02_allocations_and_errors() {
         let mut conn = setup_test_db();
         let today = get_today_local(&conn).unwrap();
-        let ap1 = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-001", "2026-10-01", 1000.0);
-        let ap_diff_vnd = create_test_ap(&mut conn, "tnt_test", "vnd_002", "BILL-002", "2026-10-01", 500.0);
+        let ap1 = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-001",
+            "2026-10-01",
+            1000.0,
+        );
+        let ap_diff_vnd = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_002",
+            "BILL-002",
+            "2026-10-01",
+            500.0,
+        );
 
         let p_input = CreateVendorPaymentInput {
             vendor_partner_id: "vnd_001".to_string(),
@@ -1589,10 +1655,12 @@ mod tests {
             payment_reference: None,
             note: None,
         };
-        let payment = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", p_input).unwrap();
+        let payment =
+            create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", p_input).unwrap();
 
         // When (TC-PAY-P02-N01): Add allocation for same vendor open AP
-        let res1 = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, &ap1, 400.0);
+        let res1 =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, &ap1, 400.0);
         // Then: Success, total_amount becomes 400
         assert!(res1.is_ok());
         let updated = res1.unwrap();
@@ -1600,26 +1668,67 @@ mod tests {
         assert_eq!(updated.allocations.len(), 1);
 
         // When (TC-PAY-P02-E01): Add allocation for different vendor AP
-        let err1 = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, &ap_diff_vnd, 100.0).unwrap_err();
+        let err1 = add_vendor_payment_allocation_impl(
+            &mut conn,
+            "tnt_test",
+            &payment.id,
+            &ap_diff_vnd,
+            100.0,
+        )
+        .unwrap_err();
         // Then: Rejected with InvalidAllocationAccountPayable
         assert_eq!(err1, VendorPaymentError::InvalidAllocationAccountPayable);
 
         // When (TC-PAY-P02-E04): Add duplicate allocation for same AP
-        let err_dup = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, &ap1, 100.0).unwrap_err();
+        let err_dup =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, &ap1, 100.0)
+                .unwrap_err();
         // Then: Rejected with DuplicateAccountPayableAllocation
-        assert_eq!(err_dup, VendorPaymentError::DuplicateAccountPayableAllocation);
+        assert_eq!(
+            err_dup,
+            VendorPaymentError::DuplicateAccountPayableAllocation
+        );
 
         // When (TC-PAY-P02-E02): Add allocation for voided AP
-        let ap_void = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-VOID", "2026-10-01", 300.0);
-        crate::accounts_payable::void_account_payable(&mut conn, "tnt_test", "usr_admin", &ap_void, "test void").unwrap();
-        let err_void = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, &ap_void, 100.0).unwrap_err();
+        let ap_void = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-VOID",
+            "2026-10-01",
+            300.0,
+        );
+        crate::accounts_payable::void_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            &ap_void,
+            "test void",
+        )
+        .unwrap();
+        let err_void =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, &ap_void, 100.0)
+                .unwrap_err();
         // Then: Rejected with InvalidAllocationAccountPayable
-        assert_eq!(err_void, VendorPaymentError::InvalidAllocationAccountPayable);
+        assert_eq!(
+            err_void,
+            VendorPaymentError::InvalidAllocationAccountPayable
+        );
 
         // When (TC-PAY-P02-E03): Add allocation for nonexistent AP
-        let err_notfound = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &payment.id, "ap_nonexistent", 100.0).unwrap_err();
+        let err_notfound = add_vendor_payment_allocation_impl(
+            &mut conn,
+            "tnt_test",
+            &payment.id,
+            "ap_nonexistent",
+            100.0,
+        )
+        .unwrap_err();
         // Then: Rejected with InvalidAllocationAccountPayable
-        assert_eq!(err_notfound, VendorPaymentError::InvalidAllocationAccountPayable);
+        assert_eq!(
+            err_notfound,
+            VendorPaymentError::InvalidAllocationAccountPayable
+        );
     }
 
     // ----------------------------------------------------
@@ -1630,7 +1739,14 @@ mod tests {
     fn test_tc_pay_p03_amount_boundaries_and_exceeding() {
         let mut conn = setup_test_db();
         let today = get_today_local(&conn).unwrap();
-        let ap = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-100", "2026-10-01", 100.0);
+        let ap = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-100",
+            "2026-10-01",
+            100.0,
+        );
 
         let p_input = CreateVendorPaymentInput {
             vendor_partner_id: "vnd_001".to_string(),
@@ -1642,17 +1758,21 @@ mod tests {
         let p = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", p_input).unwrap();
 
         // When (TC-PAY-P03-B03): Amount = 0.0
-        let err_zero = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 0.0).unwrap_err();
+        let err_zero =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 0.0).unwrap_err();
         // Then: Rejected with InvalidAllocationAmount
         assert_eq!(err_zero, VendorPaymentError::InvalidAllocationAmount);
 
         // When (TC-PAY-P03-B04): Amount = -1.0
-        let err_neg = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, -1.0).unwrap_err();
+        let err_neg = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, -1.0)
+            .unwrap_err();
         // Then: Rejected with InvalidAllocationAmount
         assert_eq!(err_neg, VendorPaymentError::InvalidAllocationAmount);
 
         // When (TC-PAY-P03-B02): Amount = 100.01 (+0.01 boundary exceed)
-        let err_exceed = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 100.01).unwrap_err();
+        let err_exceed =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 100.01)
+                .unwrap_err();
         // Then: Rejected with AllocationAmountExceedsOutstanding
         assert_eq!(
             err_exceed,
@@ -1664,13 +1784,15 @@ mod tests {
         );
 
         // When (TC-PAY-P03-B01): Amount = 100.00 (exact full amount)
-        let res_exact = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 100.0);
+        let res_exact =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 100.0);
         // Then: Success!
         assert!(res_exact.is_ok());
 
         // When (TC-PAY-P03-B05): Update allocation with rounding edge case
         let alloc_id = res_exact.unwrap().allocations[0].id.clone();
-        let res_update_exceed = update_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id, 100.006);
+        let res_update_exceed =
+            update_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id, 100.006);
         // 100.006 rounds to 100.01 which exceeds 100.00
         assert_eq!(
             res_update_exceed.unwrap_err(),
@@ -1681,7 +1803,8 @@ mod tests {
             )
         );
 
-        let res_update_ok = update_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id, 50.0);
+        let res_update_ok =
+            update_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id, 50.0);
         assert!(res_update_ok.is_ok());
         assert_eq!(res_update_ok.unwrap().total_amount, 50.0);
     }
@@ -1694,66 +1817,112 @@ mod tests {
     fn test_tc_pay_p04_date_boundaries() {
         let mut conn = setup_test_db();
         let today = get_today_local(&conn).unwrap();
-        let ap = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-D1", "2026-10-15", 500.0);
+        let ap = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-D1",
+            "2026-10-15",
+            500.0,
+        );
 
         // When (TC-PAY-P04-B02): payment_date tomorrow (+1 day in future)
         let tomorrow = "2099-01-01";
-        let err_future = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: tomorrow.to_string(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap_err();
+        let err_future = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: tomorrow.to_string(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap_err();
         // Then: Fails with PaymentDateCannotBeInFuture
         assert_eq!(err_future, VendorPaymentError::PaymentDateCannotBeInFuture);
 
         // When (TC-PAY-P04-B01): payment_date today (normal/boundary)
-        let p = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
+        let p = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
         assert_eq!(p.payment_date, today);
 
         // When: Try adding allocation when payment_date is earlier than AP document_date
-        let p_early = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: "2026-10-14".to_string(), // 1 day earlier than 2026-10-15
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
+        let p_early = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: "2026-10-14".to_string(), // 1 day earlier than 2026-10-15
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
 
         // When (TC-PAY-P04-B04): Add allocation to early payment
-        let err_early = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_early.id, &ap, 100.0).unwrap_err();
+        let err_early =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_early.id, &ap, 100.0)
+                .unwrap_err();
         // Then: Rejected with PaymentDateEarlierThanDocumentDate
-        assert_eq!(err_early, VendorPaymentError::PaymentDateEarlierThanDocumentDate("BILL-D1".to_string()));
+        assert_eq!(
+            err_early,
+            VendorPaymentError::PaymentDateEarlierThanDocumentDate("BILL-D1".to_string())
+        );
 
         // When (TC-PAY-P04-B03): payment_date is exact same day as AP document_date (2026-10-15)
-        let p_exact_date = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: "2026-10-15".to_string(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
-        let res_exact_date = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_exact_date.id, &ap, 100.0);
+        let p_exact_date = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: "2026-10-15".to_string(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        let res_exact_date =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_exact_date.id, &ap, 100.0);
         // Then: Success!
         assert!(res_exact_date.is_ok());
 
         // When (TC-PAY-P04-E01): Update payment header to earlier date while allocation exists
-        let err_update_date = update_vendor_payment_header_impl(&mut conn, "tnt_test", &p_exact_date.id, UpdateVendorPaymentHeaderInput {
-            id: Some(p_exact_date.id.clone()),
-            payment_id: None,
-            payment_date: "2026-10-14".to_string(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap_err();
-        assert_eq!(err_update_date, VendorPaymentError::PaymentDateEarlierThanDocumentDate("BILL-D1".to_string()));
+        let err_update_date = update_vendor_payment_header_impl(
+            &mut conn,
+            "tnt_test",
+            &p_exact_date.id,
+            UpdateVendorPaymentHeaderInput {
+                id: Some(p_exact_date.id.clone()),
+                payment_id: None,
+                payment_date: "2026-10-14".to_string(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_update_date,
+            VendorPaymentError::PaymentDateEarlierThanDocumentDate("BILL-D1".to_string())
+        );
     }
 
     // ----------------------------------------------------
@@ -1764,41 +1933,69 @@ mod tests {
     fn test_tc_pay_p05_post_concurrency_and_atomicity() {
         let mut conn = setup_test_db();
         let today = get_today_local(&conn).unwrap();
-        let ap = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-POST", "2026-10-01", 1000.0);
+        let ap = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-POST",
+            "2026-10-01",
+            1000.0,
+        );
 
         // Given: Payment draft without allocations
-        let p_empty = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "bank_transfer".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
+        let p_empty = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "bank_transfer".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
 
         // When (TC-PAY-P05-B01): Post with 0 allocations
-        let err_no_alloc = post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_empty.id).unwrap_err();
+        let err_no_alloc =
+            post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_empty.id).unwrap_err();
         // Then: Fails with NoAllocationsToPost
         assert_eq!(err_no_alloc, VendorPaymentError::NoAllocationsToPost);
 
         // When (TC-PAY-P05-N02): Concurrent drafts核銷同一應付全額
-        let p_draft1 = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "bank_transfer".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
-        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_draft1.id, &ap, 1000.0).unwrap();
+        let p_draft1 = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "bank_transfer".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_draft1.id, &ap, 1000.0)
+            .unwrap();
 
-        let p_draft2 = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "bank_transfer".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
+        let p_draft2 = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "bank_transfer".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
         // draft 2 can also allocate 1000 because draft 1 hasn't posted yet (TC-PAY-P03-N02)
-        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_draft2.id, &ap, 1000.0).unwrap();
+        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_draft2.id, &ap, 1000.0)
+            .unwrap();
 
         // First draft posts successfully (TC-PAY-P05-N01)
         let posted1 = post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_draft1.id);
@@ -1806,7 +2003,8 @@ mod tests {
         assert_eq!(posted1.unwrap().status, "posted");
 
         // Second draft posting is blocked in transaction check by P-05
-        let err_draft2 = post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_draft2.id).unwrap_err();
+        let err_draft2 =
+            post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_draft2.id).unwrap_err();
         assert_eq!(
             err_draft2,
             VendorPaymentError::InsufficientOutstandingOnPost(
@@ -1820,37 +2018,78 @@ mod tests {
         let ap_detail = get_account_payable_impl(&conn, "tnt_test", &ap).unwrap();
         assert_eq!(ap_detail.paid_amount, 1000.0);
         assert_eq!(ap_detail.outstanding_amount, 0.0);
-        assert_eq!(ap_detail.settlement_status, crate::accounts_payable::SettlementStatus::Paid);
+        assert_eq!(
+            ap_detail.settlement_status,
+            crate::accounts_payable::SettlementStatus::Paid
+        );
 
         // When (TC-PAY-P05-N03): Multi-allocation atomicity
-        let ap_a = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-A", "2026-10-01", 100.0);
-        let ap_b = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-B", "2026-10-01", 200.0);
-        let ap_c = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-C", "2026-10-01", 300.0);
+        let ap_a = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-A",
+            "2026-10-01",
+            100.0,
+        );
+        let ap_b = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-B",
+            "2026-10-01",
+            200.0,
+        );
+        let ap_c = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-C",
+            "2026-10-01",
+            300.0,
+        );
 
-        let p_multi = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
-        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_multi.id, &ap_a, 100.0).unwrap();
-        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_multi.id, &ap_b, 200.0).unwrap();
-        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_multi.id, &ap_c, 300.0).unwrap();
+        let p_multi = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_multi.id, &ap_a, 100.0)
+            .unwrap();
+        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_multi.id, &ap_b, 200.0)
+            .unwrap();
+        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_multi.id, &ap_c, 300.0)
+            .unwrap();
 
         // Someone else pays AP-C in the meantime
-        let p_other = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
-        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_other.id, &ap_c, 100.0).unwrap();
+        let p_other = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p_other.id, &ap_c, 100.0)
+            .unwrap();
         post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_other.id).unwrap();
 
         // Now post p_multi: AP-C only has 200 outstanding, but p_multi allocated 300
-        let err_multi = post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_multi.id).unwrap_err();
+        let err_multi =
+            post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_multi.id).unwrap_err();
         assert_eq!(
             err_multi,
             VendorPaymentError::InsufficientOutstandingOnPost(
@@ -1864,7 +2103,10 @@ mod tests {
         let ap_a_detail = get_account_payable_impl(&conn, "tnt_test", &ap_a).unwrap();
         assert_eq!(ap_a_detail.paid_amount, 0.0);
         assert_eq!(ap_a_detail.outstanding_amount, 100.0);
-        assert_eq!(ap_a_detail.settlement_status, crate::accounts_payable::SettlementStatus::Unpaid);
+        assert_eq!(
+            ap_a_detail.settlement_status,
+            crate::accounts_payable::SettlementStatus::Unpaid
+        );
     }
 
     // ----------------------------------------------------
@@ -1875,44 +2117,88 @@ mod tests {
     fn test_tc_pay_p06_modification_guards() {
         let mut conn = setup_test_db();
         let today = get_today_local(&conn).unwrap();
-        let ap = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-P06", "2026-10-01", 500.0);
+        let ap = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-P06",
+            "2026-10-01",
+            500.0,
+        );
 
-        let p = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
+        let p = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
 
-        let alloc = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 200.0).unwrap();
+        let alloc =
+            add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 200.0).unwrap();
         let alloc_id = alloc.allocations[0].id.clone();
 
         // Post the payment
         post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id).unwrap();
 
         // When (TC-PAY-P06-E01): Update header when posted
-        let err_hdr = update_vendor_payment_header_impl(&mut conn, "tnt_test", &p.id, UpdateVendorPaymentHeaderInput {
-            id: Some(p.id.clone()),
-            payment_id: None,
-            payment_date: today.clone(),
-            payment_method: "bank_transfer".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap_err();
+        let err_hdr = update_vendor_payment_header_impl(
+            &mut conn,
+            "tnt_test",
+            &p.id,
+            UpdateVendorPaymentHeaderInput {
+                id: Some(p.id.clone()),
+                payment_id: None,
+                payment_date: today.clone(),
+                payment_method: "bank_transfer".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap_err();
         // Then: Fails with NotDraftCannotModify
-        assert_eq!(err_hdr, VendorPaymentError::NotDraftCannotModify("posted".to_string()));
+        assert_eq!(
+            err_hdr,
+            VendorPaymentError::NotDraftCannotModify("posted".to_string())
+        );
 
         // When (TC-PAY-P06-E02): Add / Update / Remove allocation when posted
-        let ap2 = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-P06-2", "2026-10-01", 500.0);
-        let err_add = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap2, 100.0).unwrap_err();
-        assert_eq!(err_add, VendorPaymentError::NotDraftCannotModify("posted".to_string()));
+        let ap2 = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-P06-2",
+            "2026-10-01",
+            500.0,
+        );
+        let err_add = add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap2, 100.0)
+            .unwrap_err();
+        assert_eq!(
+            err_add,
+            VendorPaymentError::NotDraftCannotModify("posted".to_string())
+        );
 
-        let err_upd = update_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id, 300.0).unwrap_err();
-        assert_eq!(err_upd, VendorPaymentError::NotDraftCannotModify("posted".to_string()));
+        let err_upd =
+            update_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id, 300.0)
+                .unwrap_err();
+        assert_eq!(
+            err_upd,
+            VendorPaymentError::NotDraftCannotModify("posted".to_string())
+        );
 
-        let err_rem = remove_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id).unwrap_err();
-        assert_eq!(err_rem, VendorPaymentError::NotDraftCannotModify("posted".to_string()));
+        let err_rem =
+            remove_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &alloc_id)
+                .unwrap_err();
+        assert_eq!(
+            err_rem,
+            VendorPaymentError::NotDraftCannotModify("posted".to_string())
+        );
     }
 
     // ----------------------------------------------------
@@ -1923,19 +2209,34 @@ mod tests {
     fn test_tc_pay_p07_and_p08_void_and_state_machine() {
         let mut conn = setup_test_db();
         let today = get_today_local(&conn).unwrap();
-        let ap = create_test_ap(&mut conn, "tnt_test", "vnd_001", "BILL-VOID-TEST", "2026-10-01", 1000.0);
+        let ap = create_test_ap(
+            &mut conn,
+            "tnt_test",
+            "vnd_001",
+            "BILL-VOID-TEST",
+            "2026-10-01",
+            1000.0,
+        );
 
-        let p = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "check".to_string(),
-            payment_reference: Some("CHK001".to_string()),
-            note: None,
-        }).unwrap();
+        let p = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "check".to_string(),
+                payment_reference: Some("CHK001".to_string()),
+                note: None,
+            },
+        )
+        .unwrap();
         add_vendor_payment_allocation_impl(&mut conn, "tnt_test", &p.id, &ap, 600.0).unwrap();
 
         // When (TC-PAY-P08-E01): draft -> voided illegal
-        let err_void_draft = void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "reason").unwrap_err();
+        let err_void_draft =
+            void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "reason")
+                .unwrap_err();
         assert_eq!(
             err_void_draft,
             VendorPaymentError::InvalidStateTransition {
@@ -1945,18 +2246,27 @@ mod tests {
         );
 
         // When (TC-PAY-P08-N02): draft -> cancelled
-        let p_cancel = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: today.clone(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
-        let cancelled = cancel_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_cancel.id).unwrap();
+        let p_cancel = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: today.clone(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
+        let cancelled =
+            cancel_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_cancel.id).unwrap();
         assert_eq!(cancelled.status, "cancelled");
 
         // When (TC-PAY-P08-B03): Duplicate cancel
-        let err_cancel_again = cancel_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_cancel.id).unwrap_err();
+        let err_cancel_again =
+            cancel_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p_cancel.id)
+                .unwrap_err();
         assert_eq!(
             err_cancel_again,
             VendorPaymentError::InvalidStateTransition {
@@ -1969,7 +2279,8 @@ mod tests {
         post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id).unwrap();
 
         // When (TC-PAY-P08-B01): Duplicate post
-        let err_post_again = post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id).unwrap_err();
+        let err_post_again =
+            post_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id).unwrap_err();
         assert_eq!(
             err_post_again,
             VendorPaymentError::InvalidStateTransition {
@@ -1982,27 +2293,47 @@ mod tests {
         let ap_post = get_account_payable_impl(&conn, "tnt_test", &ap).unwrap();
         assert_eq!(ap_post.paid_amount, 600.0);
         assert_eq!(ap_post.outstanding_amount, 400.0);
-        assert_eq!(ap_post.settlement_status, crate::accounts_payable::SettlementStatus::PartiallyPaid);
+        assert_eq!(
+            ap_post.settlement_status,
+            crate::accounts_payable::SettlementStatus::PartiallyPaid
+        );
 
         // When (TC-PAY-P07-B01 & B-02): Void without reason
-        let err_reason_empty = void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "").unwrap_err();
+        let err_reason_empty =
+            void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "").unwrap_err();
         assert_eq!(err_reason_empty, VendorPaymentError::VoidReasonRequired);
-        let err_reason_spaces = void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "   ").unwrap_err();
+        let err_reason_spaces =
+            void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "   ").unwrap_err();
         assert_eq!(err_reason_spaces, VendorPaymentError::VoidReasonRequired);
 
         // When (TC-PAY-P07-N01): Void with valid reason
-        let voided = void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "手民之誤，金額核算錯誤").unwrap();
+        let voided = void_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            &p.id,
+            "手民之誤，金額核算錯誤",
+        )
+        .unwrap();
         assert_eq!(voided.status, "voided");
-        assert_eq!(voided.void_reason.as_deref(), Some("手民之誤，金額核算錯誤"));
+        assert_eq!(
+            voided.void_reason.as_deref(),
+            Some("手民之誤，金額核算錯誤")
+        );
 
         // When (TC-PAY-P07-N02): Verify AP balances are restored
         let ap_restored = get_account_payable_impl(&conn, "tnt_test", &ap).unwrap();
         assert_eq!(ap_restored.paid_amount, 0.0);
         assert_eq!(ap_restored.outstanding_amount, 1000.0);
-        assert_eq!(ap_restored.settlement_status, crate::accounts_payable::SettlementStatus::Unpaid);
+        assert_eq!(
+            ap_restored.settlement_status,
+            crate::accounts_payable::SettlementStatus::Unpaid
+        );
 
         // When (TC-PAY-P08-B02): Duplicate void
-        let err_void_again = void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "again").unwrap_err();
+        let err_void_again =
+            void_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", &p.id, "again")
+                .unwrap_err();
         assert_eq!(
             err_void_again,
             VendorPaymentError::InvalidStateTransition {
@@ -2031,21 +2362,33 @@ mod tests {
             [],
         ).unwrap();
 
-        let p_tnt1 = create_vendor_payment_impl(&mut conn, "tnt_test", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_001".to_string(),
-            payment_date: "2026-10-10".to_string(),
-            payment_method: "bank_transfer".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
+        let p_tnt1 = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                payment_date: "2026-10-10".to_string(),
+                payment_method: "bank_transfer".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
 
-        let p_tnt2 = create_vendor_payment_impl(&mut conn, "tnt_other", "usr_admin", CreateVendorPaymentInput {
-            vendor_partner_id: "vnd_other".to_string(),
-            payment_date: today.clone(),
-            payment_method: "cash".to_string(),
-            payment_reference: None,
-            note: None,
-        }).unwrap();
+        let p_tnt2 = create_vendor_payment_impl(
+            &mut conn,
+            "tnt_other",
+            "usr_admin",
+            CreateVendorPaymentInput {
+                vendor_partner_id: "vnd_other".to_string(),
+                payment_date: today.clone(),
+                payment_method: "cash".to_string(),
+                payment_reference: None,
+                note: None,
+            },
+        )
+        .unwrap();
 
         // When (TC-PAY-P09-N01): Cross-tenant get
         let err_get = get_vendor_payment_impl(&conn, "tnt_test", &p_tnt2.id).unwrap_err();
@@ -2062,12 +2405,17 @@ mod tests {
         assert_eq!(list2[0].id, p_tnt2.id);
 
         // When (TC-PAY-P09-N02): Filter by vendor and status
-        let filter_res = list_vendor_payments_impl(&conn, "tnt_test", Some(ListVendorPaymentsFilter {
-            vendor_partner_id: Some("vnd_001".to_string()),
-            status: Some("draft".to_string()),
-            payment_date_from: Some("2026-10-01".to_string()),
-            payment_date_to: Some("2026-10-31".to_string()),
-        })).unwrap();
+        let filter_res = list_vendor_payments_impl(
+            &conn,
+            "tnt_test",
+            Some(ListVendorPaymentsFilter {
+                vendor_partner_id: Some("vnd_001".to_string()),
+                status: Some("draft".to_string()),
+                payment_date_from: Some("2026-10-01".to_string()),
+                payment_date_to: Some("2026-10-31".to_string()),
+            }),
+        )
+        .unwrap();
         assert_eq!(filter_res.len(), 1);
         assert_eq!(filter_res[0].id, p_tnt1.id);
     }
