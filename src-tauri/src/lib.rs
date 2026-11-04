@@ -11,6 +11,7 @@ pub mod departments;
 pub mod inventory_adjustments;
 pub mod llm;
 pub mod llm_traces;
+pub mod opening_payables;
 pub mod partners;
 pub mod products;
 pub mod purchase_orders;
@@ -56,6 +57,7 @@ where
         "stock_transfers",
         "accounts_payable",
         "vendor_bills",
+        "opening_payables",
     ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
@@ -241,6 +243,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     vendor_bills::create_vendor_bills_tables(&conn)
         .map_err(|e| format!("Failed to create vendor bills tables: {}", e))?;
+
+    opening_payables::create_opening_payables_tables(&conn)
+        .map_err(|e| format!("Failed to create opening payables tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -569,6 +574,9 @@ pub fn run() {
             vendor_bills::get_vendor_bill,
             vendor_bills::list_vendor_bills,
             vendor_bills::list_unbilled_received_orders,
+            opening_payables::create_opening_payable,
+            opening_payables::void_opening_payable,
+            opening_payables::list_opening_payables,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
