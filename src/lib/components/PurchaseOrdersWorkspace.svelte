@@ -23,7 +23,8 @@
     getWarehouseName,
     formatMovementReason,
     formatTime,
-    formatCurrency
+    formatCurrency,
+    fetchPurchaseOrderBillingInfo
   } from '../store.svelte.js';
   import { invoke } from '../tauri.js';
 
@@ -33,6 +34,11 @@
   let selectedOrderId = $state(null);
   let orderDetailLoading = $state(false);
   let orderDetailError = $state('');
+
+  // Billing status & unbilled tracking (Issue #202)
+  let currentBillingInfo = $state(null);
+  let isBillingInfoLoading = $state(false);
+  let unbilledPoIdSet = $state(new Set());
 
   // Auxiliary data for dropdowns
   let availableVendors = $state([]);
@@ -134,13 +140,23 @@
     try {
       await Promise.all([
         fetchPurchaseOrders(),
-        fetchInventoryLevels()
+        fetchInventoryLevels(),
+        reloadUnbilledPoIds()
       ]);
       await loadAuxiliaryData();
     } catch (err) {
       console.error("Failed to load purchase orders workspace data:", err);
     } finally {
       isLoading = false;
+    }
+  }
+
+  async function reloadUnbilledPoIds() {
+    try {
+      const unbilled = await invoke('list_unbilled_received_orders', {});
+      unbilledPoIdSet = new Set((unbilled || []).map(u => u.purchase_order_id));
+    } catch (e) {
+      console.error("Failed to load unbilled received PO ids:", e);
     }
   }
 
@@ -205,6 +221,9 @@
   let filteredOrders = $derived(
     appState.purchaseOrders.filter(order => {
       if (selectedStatusFilter === 'all') return true;
+      if (selectedStatusFilter === 'unbilled_received') {
+        return order.status === 'received' && unbilledPoIdSet.has(order.id);
+      }
       return order.status === selectedStatusFilter;
     })
   );
@@ -215,7 +234,27 @@
     draft: appState.purchaseOrders.filter(o => o.status === 'draft').length,
     ordered: appState.purchaseOrders.filter(o => o.status === 'ordered').length,
     received: appState.purchaseOrders.filter(o => o.status === 'received').length,
+    unbilled_received: appState.purchaseOrders.filter(o => o.status === 'received' && unbilledPoIdSet.has(o.id)).length,
     cancelled: appState.purchaseOrders.filter(o => o.status === 'cancelled').length
+  });
+
+  // Derived detail amounts (Issue #202)
+  let detailLines = $derived(appState.currentPurchaseOrderDetail?.lines || []);
+  let detailReceivedTotal = $derived.by(() => {
+    let sum = 0;
+    for (const line of detailLines) {
+      const qty = line.received_quantity !== undefined && line.received_quantity !== null
+        ? Number(line.received_quantity)
+        : Number(line.quantity);
+      sum += qty * Number(line.purchase_cost);
+    }
+    return Math.round(sum * 100) / 100;
+  });
+
+  let detailAmountDiff = $derived.by(() => {
+    const ordered = appState.currentPurchaseOrderDetail?.order?.total_amount || 0;
+    const received = detailReceivedTotal;
+    return Math.round((received - ordered) * 100) / 100;
   });
 
   async function handleSelectOrder(orderId) {
@@ -225,6 +264,8 @@
     actionError = '';
     isEditingHeader = false;
     editingLineId = null;
+    currentBillingInfo = null;
+    isBillingInfoLoading = true;
     resetNewLineForm();
 
     if (availableUnits.length === 0) {
@@ -240,10 +281,16 @@
         const isActiveWh = activeWarehouses.some(w => w.id === o.warehouse_id);
         editWarehouseId = (isActiveWh ? o.warehouse_id : null) || defaultWarehouse?.id || (activeWarehouses[0]?.id || '');
       }
+      try {
+        currentBillingInfo = await fetchPurchaseOrderBillingInfo(orderId);
+      } catch (be) {
+        console.error("Failed to fetch billing info:", be);
+      }
     } catch (err) {
       orderDetailError = err.message || '無法載入採購單明細';
     } finally {
       orderDetailLoading = false;
+      isBillingInfoLoading = false;
     }
   }
 
@@ -371,10 +418,10 @@
 
     if (matchedCost !== null && matchedCost !== undefined) {
       newLineCost = matchedCost;
-      newLineCostHint = `已自動預填供應商歷史單價：NT$ ${matchedCost}`;
+      newLineCostHint = `已自動預填供應商歷史單價（未稅）：NT$ ${matchedCost}`;
     } else {
       newLineCost = '';
-      newLineCostHint = '查無此供應商之預設供應來源成本，請手動指定單價';
+      newLineCostHint = '查無此供應商之預設供應來源成本，請手動指定單價（未稅）';
     }
   }
 
@@ -927,9 +974,22 @@
                 {/if}
               </div>
 
-              <div class="total-display">
-                <span class="total-label">總金額：</span>
-                <span class="total-amount-highlight">{formatCurrency(order.total_amount)}</span>
+              <div class="total-display-stack">
+                <div class="total-display">
+                  <span class="total-label">下單金額：</span>
+                  <span class="total-amount-highlight">{formatCurrency(order.total_amount)}</span>
+                </div>
+                {#if order.status === 'received'}
+                  <div class="total-display">
+                    <span class="total-label">實到金額（未稅）：</span>
+                    <span class="total-amount-highlight text-emerald">{formatCurrency(detailReceivedTotal)}</span>
+                  </div>
+                  {#if detailAmountDiff !== 0}
+                    <div class="total-diff-pill {detailAmountDiff < 0 ? 'diff-negative' : 'diff-positive'}">
+                      差額：{formatCurrency(detailAmountDiff)}
+                    </div>
+                  {/if}
+                {/if}
               </div>
             </div>
           </div>
@@ -1000,6 +1060,49 @@
               <div class="meta-card">
                 <span class="meta-label">單據備註</span>
                 <span class="meta-value">{order.note || '無備註'}</span>
+              </div>
+              <div class="meta-card">
+                <span class="meta-label">請款狀態</span>
+                <div class="meta-value">
+                  {#if isBillingInfoLoading}
+                    <span class="text-muted">載入中...</span>
+                  {:else if !currentBillingInfo}
+                    <span class="badge badge-muted">未請款</span>
+                  {:else if currentBillingInfo.bill_status === 'draft' || currentBillingInfo.bill_status === 'disputed'}
+                    <span class="badge badge-amber">
+                      請款中 (<a
+                        href="#vendor-bills"
+                        class="link-bill-nav"
+                        onclick={(e) => {
+                          e.preventDefault();
+                          appState.selectedVendorBillId = currentBillingInfo.bill_id;
+                          navigate('/app/vendor-bills');
+                        }}
+                      >{currentBillingInfo.bill_number}</a>)
+                    </span>
+                    {#if currentBillingInfo.bill_order_count > 1}
+                      <span class="meta-sub-hint">此請款單涵蓋 {currentBillingInfo.bill_order_count} 張採購單</span>
+                    {/if}
+                  {:else if currentBillingInfo.bill_status === 'posted'}
+                    <span class="badge badge-emerald">
+                      已請款 (<a
+                        href="#vendor-bills"
+                        class="link-bill-nav"
+                        onclick={(e) => {
+                          e.preventDefault();
+                          appState.selectedVendorBillId = currentBillingInfo.bill_id;
+                          navigate('/app/vendor-bills');
+                        }}
+                      >{currentBillingInfo.bill_number}</a>)
+                    </span>
+                    <span class="meta-sub-amount text-emerald">
+                      含稅 {formatCurrency(currentBillingInfo.bill_total_amount)}
+                    </span>
+                    {#if currentBillingInfo.bill_order_count > 1}
+                      <span class="meta-sub-hint">此請款單涵蓋 {currentBillingInfo.bill_order_count} 張採購單</span>
+                    {/if}
+                  {/if}
+                </div>
               </div>
             </div>
           {/if}
@@ -1080,7 +1183,7 @@
                 </div>
 
                 <div class="form-group flex-1">
-                  <label for="input-new-cost">採購單價 (TWD)</label>
+                  <label for="input-new-cost">單價（未稅） (TWD)</label>
                   <input
                     type="number"
                     id="input-new-cost"
@@ -1134,7 +1237,7 @@
                     <th>單位</th>
                     <th class="text-right">訂購量</th>
                     <th class="text-right">實到量</th>
-                    <th class="text-right">採購單價</th>
+                    <th class="text-right">單價（未稅）</th>
                     <th class="text-right">小計</th>
                     {#if order.status === 'draft'}
                       <th class="text-right">操作</th>
@@ -1300,6 +1403,13 @@
                 id="filter-received"
               >
                 已到貨 ({orderCounts.received})
+              </button>
+              <button
+                class="pill-btn {selectedStatusFilter === 'unbilled_received' ? 'active' : ''}"
+                onclick={() => selectedStatusFilter = 'unbilled_received'}
+                id="filter-unbilled-received"
+              >
+                已到貨未請款 ({orderCounts.unbilled_received})
               </button>
               <button
                 class="pill-btn {selectedStatusFilter === 'cancelled' ? 'active' : ''}"
@@ -2622,6 +2732,52 @@
     font-size: 0.8rem;
     cursor: pointer;
     text-decoration: underline;
+  }
+
+  .total-display-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+  }
+
+  .total-diff-pill {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-weight: 600;
+  }
+
+  .diff-negative {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+  }
+
+  .diff-positive {
+    background: rgba(var(--accent-cyan), 0.15);
+    color: rgb(var(--accent-cyan));
+    border: 1px solid rgba(var(--accent-cyan), 0.3);
+  }
+
+  .link-bill-nav {
+    color: rgb(var(--accent-cyan));
+    text-decoration: underline;
+    font-weight: 600;
+  }
+
+  .meta-sub-hint {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-top: 3px;
+  }
+
+  .meta-sub-amount {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-top: 2px;
   }
 
   .flex-1 { flex: 1; }

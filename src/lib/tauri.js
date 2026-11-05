@@ -587,6 +587,15 @@ function calculateMockPoReceivedTotal(poId) {
   return Math.round(total * 100) / 100;
 }
 
+function calculateMockPoOrderedTotal(poId) {
+  const lines = mockPurchaseOrderLines.filter(l => l.purchase_order_id === poId);
+  let total = 0;
+  for (const l of lines) {
+    total += Number(l.quantity) * Number(l.purchase_cost);
+  }
+  return Math.round(total * 100) / 100;
+}
+
 function formatMockVendorBill(vb) {
   const untaxed = Math.round(Number(vb.untaxed_amount) * 100) / 100;
   const tax = Math.round(Number(vb.tax_amount) * 100) / 100;
@@ -634,14 +643,24 @@ function formatMockVendorBill(vb) {
     purchase_order_id: o.purchase_order_id,
     po_number_snapshot: o.po_number_snapshot,
     created_at: o.created_at,
+    total_amount: calculateMockPoOrderedTotal(o.purchase_order_id),
     received_total_amount: calculateMockPoReceivedTotal(o.purchase_order_id)
   }));
+
+  let payable = null;
+  if (vb.status === 'posted' || vb.status === 'voided') {
+    const ap = mockAccountsPayable.find(a => (a.tenant_id || 'tnt_mock_1') === (vb.tenant_id || 'tnt_mock_1') && a.source_type === 'vendor_bill' && a.source_id === vb.id);
+    if (ap) {
+      payable = formatMockAccountPayable(ap).detail;
+    }
+  }
 
   return {
     item,
     detail: {
       bill,
-      orders: orderInfos
+      orders: orderInfos,
+      payable
     }
   };
 }
@@ -2640,9 +2659,9 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'add_purchase_order_line': {
-      const { order_id, orderId, unit_id, unitId, quantity, purchase_cost, purchaseCost } = args || {};
+      const { order_id, orderId, purchase_order_id, purchaseOrderId, unit_id, unitId, quantity, purchase_cost, purchaseCost } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
-      const targetOrderId = order_id || orderId;
+      const targetOrderId = order_id || orderId || purchase_order_id || purchaseOrderId;
       const order = mockPurchaseOrders.find(o => o.id === targetOrderId && (o.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (!order) {
         throw new Error('找不到採購單或不屬於目前租戶');
@@ -2804,7 +2823,7 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'confirm_purchase_order_received': {
-      const { order_id, orderId, line_received_quantities, lineReceivedQuantities } = args || {};
+      const { order_id, orderId, line_received_quantities, lineReceivedQuantities, received_lines, receivedLines } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
       const targetOrderId = order_id || orderId;
       const order = mockPurchaseOrders.find(o => o.id === targetOrderId && (o.tenant_id || 'tnt_mock_1') === targetTenantId);
@@ -2814,7 +2833,7 @@ export async function invoke(cmd, args = {}) {
       if (order.status !== 'ordered') {
         throw new Error(`無效的狀態轉換：不可從 ${order.status} 轉換至 received`);
       }
-      const rawMap = line_received_quantities || lineReceivedQuantities || [];
+      const rawMap = line_received_quantities || lineReceivedQuantities || received_lines || receivedLines || [];
       const recMap = new Map();
       if (Array.isArray(rawMap)) {
         rawMap.forEach(item => {
@@ -5174,8 +5193,33 @@ export async function invoke(cmd, args = {}) {
           vendor_name_snapshot: po.vendor_name_snapshot,
           ordered_at: po.ordered_at || null,
           received_at: po.received_at || null,
+          total_amount: calculateMockPoOrderedTotal(po.id),
           received_total_amount: calculateMockPoReceivedTotal(po.id)
         }));
+    }
+
+    case 'get_purchase_order_billing_info': {
+      const { purchase_order_id, purchaseOrderId } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const poid = (purchase_order_id || purchaseOrderId || '').trim();
+      if (!poid) return null;
+
+      for (const order of mockVendorBillOrders) {
+        if (order.purchase_order_id === poid) {
+          const bill = mockVendorBills.find(b => b.id === order.bill_id && (b.tenant_id || 'tnt_mock_1') === targetTenantId);
+          if (bill && ['draft', 'disputed', 'posted'].includes(bill.status)) {
+            const formatted = formatMockVendorBill(bill);
+            return {
+              bill_id: bill.id,
+              bill_number: bill.bill_number,
+              bill_status: bill.status,
+              bill_total_amount: formatted.item.total_amount,
+              bill_order_count: formatted.item.order_count,
+            };
+          }
+        }
+      }
+      return null;
     }
 
     case 'reset_mock_vendor_bills': {

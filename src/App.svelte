@@ -59,6 +59,7 @@
   import SettingsEntityCard from './lib/components/SettingsEntityCard.svelte';
   import PurchaseOrdersWorkspace from './lib/components/PurchaseOrdersWorkspace.svelte';
   import AccountsPayableWorkspace from './lib/components/AccountsPayableWorkspace.svelte';
+  import VendorBillsWorkspace from './lib/components/VendorBillsWorkspace.svelte';
   import WarehouseWorkspace from './lib/components/WarehouseWorkspace.svelte';
   import CreateWarehouseModal from './lib/components/CreateWarehouseModal.svelte';
 
@@ -1020,7 +1021,9 @@
     if (ws === 'agent') navigate('/app/agent');
     else if (ws === 'settings') navigate('/app/settings');
     else if (ws === 'purchase-orders') navigate('/app/purchase-orders');
+    else if (ws === 'vendor-bills' || ws === 'bills') navigate('/app/vendor-bills');
     else if (ws === 'warehouses' || ws === 'warehouse') navigate('/app/warehouses');
+    else if (ws === 'accounts-payable') navigate('/app/accounts-payable');
     else if (ws === 'inventory') navigate('/app/inventory');
     else navigate(`/app/${ws}`);
   }
@@ -1074,6 +1077,23 @@
                 <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"></path>
                 <line x1="3" y1="6" x2="21" y2="6"></line>
                 <path d="M16 10a4 4 0 0 1-8 0"></path>
+              </svg>
+            </button>
+
+            <!-- 請款單 (Issue #202) -->
+            <button 
+              class="rail-nav-btn {activeTab === 'vendor-bills' || activeTab === 'bills' ? 'active' : ''}" 
+              onclick={() => selectWorkspace('vendor-bills')}
+              title="請款單"
+              aria-label="請款單"
+              id="rail-nav-vendor-bills"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+                <polyline points="10 9 9 9 8 9"></polyline>
               </svg>
             </button>
 
@@ -2602,7 +2622,7 @@
                                             </select>
                                           </div>
                                           <div style="width: 90px;">
-                                            <label for="edit-supply-cost-{s.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">採購成本</label>
+                                            <label for="edit-supply-cost-{s.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">進貨成本（未稅）</label>
                                             <input id="edit-supply-cost-{s.id}" type="number" min="0" step="any" class="form-input" bind:value={editSupplyCost} style="width: 100%; padding: 4px 6px; font-size: 0.75rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
                                           </div>
                                           <div style="width: 80px;">
@@ -2643,7 +2663,7 @@
                                           </div>
                                           <div style="display: flex; align-items: center; gap: 10px;">
                                             <div style="font-weight: 600; color: #f59e0b;">
-                                              採購成本: ${s.purchase_cost ?? s.cost} {s.currency}
+                                              進貨成本（未稅）: ${s.purchase_cost ?? s.cost} {s.currency}
                                             </div>
                                             <button
                                               type="button"
@@ -2681,7 +2701,7 @@
                                     </select>
                                   </div>
                                   <div style="width: 90px;">
-                                    <label for="new-supply-cost-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">採購成本</label>
+                                    <label for="new-supply-cost-{product.id}" style="display: block; font-size: 0.7rem; color: var(--text-muted);">進貨成本（未稅）</label>
                                     <input id="new-supply-cost-{product.id}" type="number" min="0" step="any" class="form-input" placeholder="0" bind:value={newSupplyCost} style="width: 100%; padding: 5px 8px; font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);" />
                                   </div>
                                   <div style="width: 100px;">
@@ -2929,6 +2949,9 @@
           {:else if activeTab === 'purchase-orders'}
             <!-- Purchase Orders Workspace View (Issue #165) -->
             <PurchaseOrdersWorkspace />
+          {:else if activeTab === 'vendor-bills' || activeTab === 'bills'}
+            <!-- Vendor Bills Workspace View (Issue #202) -->
+            <VendorBillsWorkspace />
           {:else if activeTab === 'accounts-payable'}
             <!-- Accounts Payable Workspace View (Issue #200) -->
             <AccountsPayableWorkspace />

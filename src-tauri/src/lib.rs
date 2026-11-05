@@ -579,6 +579,7 @@ pub fn run() {
             vendor_bills::get_vendor_bill,
             vendor_bills::list_vendor_bills,
             vendor_bills::list_unbilled_received_orders,
+            vendor_bills::get_purchase_order_billing_info,
             opening_payables::create_opening_payable,
             opening_payables::void_opening_payable,
             opening_payables::list_opening_payables,

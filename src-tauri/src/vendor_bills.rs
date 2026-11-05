@@ -253,6 +253,15 @@ pub struct VendorBill {
     pub task_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct PurchaseOrderBillingInfo {
+    pub bill_id: String,
+    pub bill_number: String,
+    pub bill_status: String,
+    pub bill_total_amount: f64,
+    pub bill_order_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct VendorBillOrderInfo {
     pub id: String,
@@ -260,6 +269,7 @@ pub struct VendorBillOrderInfo {
     pub purchase_order_id: String,
     pub po_number_snapshot: String,
     pub created_at: i64,
+    pub total_amount: f64,
     pub received_total_amount: f64,
 }
 
@@ -267,6 +277,7 @@ pub struct VendorBillOrderInfo {
 pub struct VendorBillDetail {
     pub bill: VendorBill,
     pub orders: Vec<VendorBillOrderInfo>,
+    pub payable: Option<crate::accounts_payable::AccountPayableDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
@@ -300,33 +311,47 @@ pub struct UnbilledReceivedOrder {
     pub vendor_name_snapshot: String,
     pub ordered_at: Option<i64>,
     pub received_at: Option<i64>,
+    pub total_amount: f64,
     pub received_total_amount: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateVendorBillInput {
+    #[serde(alias = "vendorPartnerId")]
     pub vendor_partner_id: String,
+    #[serde(alias = "vendorInvoiceNumber")]
     pub vendor_invoice_number: String,
+    #[serde(alias = "billDate")]
     pub bill_date: String,
+    #[serde(alias = "dueDate")]
     pub due_date: Option<String>,
+    #[serde(alias = "untaxedAmount")]
     pub untaxed_amount: f64,
+    #[serde(alias = "taxAmount")]
     pub tax_amount: f64,
     pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateVendorBillHeaderInput {
+    #[serde(alias = "billId")]
     pub bill_id: String,
+    #[serde(alias = "vendorInvoiceNumber")]
     pub vendor_invoice_number: String,
+    #[serde(alias = "billDate")]
     pub bill_date: String,
+    #[serde(alias = "dueDate")]
     pub due_date: String,
+    #[serde(alias = "untaxedAmount")]
     pub untaxed_amount: f64,
+    #[serde(alias = "taxAmount")]
     pub tax_amount: f64,
     pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ListVendorBillsFilter {
+    #[serde(alias = "vendorPartnerId")]
     pub vendor_partner_id: Option<String>,
     pub status: Option<String>,
 }
@@ -523,6 +548,26 @@ fn calculate_order_received_total(
         let (qty, rec_qty, cost) = r?;
         let actual_qty = rec_qty.unwrap_or(qty);
         total += actual_qty * cost;
+    }
+    Ok(round_2(total))
+}
+
+fn calculate_order_ordered_total(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<f64, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT quantity, purchase_cost 
+         FROM purchase_order_lines WHERE purchase_order_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![order_id], |r| {
+        Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?))
+    })?;
+
+    let mut total = 0.0;
+    for r in rows {
+        let (qty, cost) = r?;
+        total += qty * cost;
     }
     Ok(round_2(total))
 }
@@ -1470,17 +1515,45 @@ pub fn get_vendor_bill_impl(
     for r in order_rows {
         let (id, b_id, po_id, po_snapshot, created_at) = r?;
         let rec_total = calculate_order_received_total(conn, &po_id)?;
+        let ord_total = calculate_order_ordered_total(conn, &po_id)?;
         orders.push(VendorBillOrderInfo {
             id,
             bill_id: b_id,
             purchase_order_id: po_id,
             po_number_snapshot: po_snapshot,
             created_at,
+            total_amount: ord_total,
             received_total_amount: rec_total,
         });
     }
 
-    Ok(VendorBillDetail { bill, orders })
+    let payable = if bill.status == "posted" || bill.status == "voided" {
+        let mut ap_stmt = conn.prepare(
+            "SELECT id FROM accounts_payable WHERE source_type = 'vendor_bill' AND source_id = ?1 AND tenant_id = ?2 LIMIT 1"
+        ).map_err(|e| VendorBillError::DatabaseError(e.to_string()))?;
+        let mut ap_rows = ap_stmt
+            .query(params![bill.id, tid])
+            .map_err(|e| VendorBillError::DatabaseError(e.to_string()))?;
+        if let Some(row) = ap_rows
+            .next()
+            .map_err(|e| VendorBillError::DatabaseError(e.to_string()))?
+        {
+            let ap_id: String = row
+                .get(0)
+                .map_err(|e| VendorBillError::DatabaseError(e.to_string()))?;
+            crate::accounts_payable::get_account_payable_impl(conn, tid, &ap_id).ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(VendorBillDetail {
+        bill,
+        orders,
+        payable,
+    })
 }
 
 pub fn list_vendor_bills_impl(
@@ -1625,6 +1698,7 @@ pub fn list_unbilled_received_orders_impl(
     for r in rows {
         let (po_id, po_number, v_id, v_name, ordered_at, received_at) = r?;
         let rec_total = calculate_order_received_total(conn, &po_id)?;
+        let ord_total = calculate_order_ordered_total(conn, &po_id)?;
         list.push(UnbilledReceivedOrder {
             purchase_order_id: po_id,
             po_number,
@@ -1632,11 +1706,55 @@ pub fn list_unbilled_received_orders_impl(
             vendor_name_snapshot: v_name,
             ordered_at,
             received_at,
+            total_amount: ord_total,
             received_total_amount: rec_total,
         });
     }
 
     Ok(list)
+}
+
+pub fn get_purchase_order_billing_info_impl(
+    conn: &Connection,
+    tenant_id: &str,
+    purchase_order_id: &str,
+) -> Result<Option<PurchaseOrderBillingInfo>, VendorBillError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(VendorBillError::EmptyTenantId);
+    }
+    let poid = purchase_order_id.trim();
+    if poid.is_empty() {
+        return Ok(None);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT vb.id, vb.bill_number, vb.status, vb.untaxed_amount + vb.tax_amount,
+                (SELECT COUNT(*) FROM vendor_bill_orders vbo2 WHERE vbo2.bill_id = vb.id)
+         FROM vendor_bill_orders vbo
+         JOIN vendor_bills vb ON vb.id = vbo.bill_id AND vb.tenant_id = ?1
+         WHERE vbo.purchase_order_id = ?2 AND vb.status IN ('draft', 'disputed', 'posted')
+         ORDER BY vb.created_at DESC
+         LIMIT 1",
+    )?;
+
+    let mut rows = stmt.query(params![tid, poid])?;
+    if let Some(row) = rows.next()? {
+        let bill_id: String = row.get(0)?;
+        let bill_number: String = row.get(1)?;
+        let bill_status: String = row.get(2)?;
+        let bill_total_amount: f64 = row.get(3)?;
+        let bill_order_count: i64 = row.get(4)?;
+        Ok(Some(PurchaseOrderBillingInfo {
+            bill_id,
+            bill_number,
+            bill_status,
+            bill_total_amount: round_2(bill_total_amount),
+            bill_order_count,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 // ==========================================
@@ -1816,6 +1934,19 @@ pub async fn list_unbilled_received_orders<R: tauri::Runtime>(
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     list_unbilled_received_orders_impl(&conn, &active_tid, vendor_partner_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_purchase_order_billing_info<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    purchase_order_id: String,
+) -> Result<Option<PurchaseOrderBillingInfo>, String> {
+    let db_path = crate::get_db_path(&app_handle);
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    get_purchase_order_billing_info_impl(&conn, &active_tid, &purchase_order_id)
         .map_err(|e| e.to_string())
 }
 
@@ -3571,5 +3702,175 @@ mod tests {
 
         // Then: It does NOT return not_found_err because of unwhitelisted table; it properly queries status and returns BillNotFound
         assert_eq!(res.unwrap_err(), VendorBillError::BillNotFound);
+    }
+
+    #[test]
+    fn test_layer1_calculate_order_received_total_null_quantity() {
+        // Given: PO with NULL received_quantity (full receipt fallback)
+        let conn = setup_test_db();
+        seed_po(
+            &conn,
+            "tnt_test",
+            "po_layer1_null",
+            "PO-L1-01",
+            "vnd_001",
+            "received",
+            vec![(15.0, None, 120.0)],
+        );
+
+        // When: Calculating received total
+        let rec_total = calculate_order_received_total(&conn, "po_layer1_null").unwrap();
+        let ord_total = calculate_order_ordered_total(&conn, "po_layer1_null").unwrap();
+
+        // Then: Total uses quantity as fallback
+        assert_eq!(rec_total, 1800.0);
+        assert_eq!(ord_total, 1800.0);
+    }
+
+    #[test]
+    fn test_layer1_calculate_order_received_total_short_delivery() {
+        // Given: PO with short delivery (received 7 out of 10)
+        let conn = setup_test_db();
+        seed_po(
+            &conn,
+            "tnt_test",
+            "po_layer1_short",
+            "PO-L1-02",
+            "vnd_001",
+            "received",
+            vec![(10.0, Some(7.0), 250.0)],
+        );
+
+        // When: Calculating received vs ordered total
+        let rec_total = calculate_order_received_total(&conn, "po_layer1_short").unwrap();
+        let ord_total = calculate_order_ordered_total(&conn, "po_layer1_short").unwrap();
+
+        // Then: Received total uses 7 * 250 = 1750, Ordered total uses 10 * 250 = 2500
+        assert_eq!(rec_total, 1750.0);
+        assert_eq!(ord_total, 2500.0);
+    }
+
+    #[test]
+    fn test_layer1_calculate_order_received_total_zero_quantity() {
+        // Given: PO with zero received quantity
+        let conn = setup_test_db();
+        seed_po(
+            &conn,
+            "tnt_test",
+            "po_layer1_zero",
+            "PO-L1-03",
+            "vnd_001",
+            "received",
+            vec![(10.0, Some(0.0), 300.0)],
+        );
+
+        // When: Calculating received total
+        let rec_total = calculate_order_received_total(&conn, "po_layer1_zero").unwrap();
+
+        // Then: Received total is 0.0
+        assert_eq!(rec_total, 0.0);
+    }
+
+    #[test]
+    fn test_layer1_calculate_order_received_total_mixed_lines() {
+        // Given: PO with mixed lines (one NULL, one short, one exact)
+        let conn = setup_test_db();
+        seed_po(
+            &conn,
+            "tnt_test",
+            "po_layer1_mix",
+            "PO-L1-04",
+            "vnd_001",
+            "received",
+            vec![
+                (5.0, None, 100.0),
+                (10.0, Some(8.0), 200.0),
+                (2.0, Some(2.0), 150.0),
+            ],
+        );
+
+        // When: Calculating received and ordered total
+        let rec_total = calculate_order_received_total(&conn, "po_layer1_mix").unwrap();
+        let ord_total = calculate_order_ordered_total(&conn, "po_layer1_mix").unwrap();
+
+        // Then: Received is 500 + 1600 + 300 = 2400; Ordered is 500 + 2000 + 300 = 2800
+        assert_eq!(rec_total, 2400.0);
+        assert_eq!(ord_total, 2800.0);
+    }
+
+    #[test]
+    fn test_layer1_get_purchase_order_billing_info_flow() {
+        // Given: Database with an unbilled received PO
+        let mut conn = setup_test_db();
+        seed_po(
+            &conn,
+            "tnt_test",
+            "po_billing_test",
+            "PO-BILL-01",
+            "vnd_001",
+            "received",
+            vec![(10.0, Some(10.0), 100.0)],
+        );
+
+        // When 1: Querying billing info for unbilled PO
+        let info_none =
+            get_purchase_order_billing_info_impl(&conn, "tnt_test", "po_billing_test").unwrap();
+        // Then 1: Returns None
+        assert!(info_none.is_none());
+
+        // When 2: Creating a bill covering this PO
+        let bill = create_vendor_bill_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateVendorBillInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                vendor_invoice_number: "INV-B-01".to_string(),
+                bill_date: "2026-02-01".to_string(),
+                due_date: None,
+                untaxed_amount: 1000.0,
+                tax_amount: 50.0,
+                note: None,
+            },
+        )
+        .unwrap();
+        add_vendor_bill_order_impl(&mut conn, "tnt_test", &bill.bill.id, "po_billing_test")
+            .unwrap();
+
+        // Then 2: Querying billing info returns draft bill info
+        let info_draft = get_purchase_order_billing_info_impl(&conn, "tnt_test", "po_billing_test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(info_draft.bill_id, bill.bill.id);
+        assert_eq!(info_draft.bill_status, "draft");
+        assert_eq!(info_draft.bill_total_amount, 1050.0);
+        assert_eq!(info_draft.bill_order_count, 1);
+
+        // When 3: Posting the bill
+        let posted =
+            post_vendor_bill_impl(&mut conn, "tnt_test", "usr_admin", &bill.bill.id).unwrap();
+        assert_eq!(posted.bill.status, "posted");
+
+        // Then 3: Querying billing info returns posted status
+        let info_posted =
+            get_purchase_order_billing_info_impl(&conn, "tnt_test", "po_billing_test")
+                .unwrap()
+                .unwrap();
+        assert_eq!(info_posted.bill_status, "posted");
+
+        // When 4: Voiding the bill
+        void_vendor_bill_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            &bill.bill.id,
+            "cancel test",
+        )
+        .unwrap();
+
+        // Then 4: Voided bill is excluded from active billing info (returns None)
+        let info_voided =
+            get_purchase_order_billing_info_impl(&conn, "tnt_test", "po_billing_test").unwrap();
+        assert!(info_voided.is_none());
     }
 }
