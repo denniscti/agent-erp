@@ -2,45 +2,154 @@
   import { onMount } from 'svelte';
   import {
     appState,
+    navigate,
     showToast,
+    formatCurrency,
+    formatTime,
+    fetchPartners,
     loadOpeningPayablesAction,
     createOpeningPayableAction,
     voidOpeningPayableAction,
-    formatCurrency,
-    formatTime
+    loadVendorPaymentsAction,
+    getVendorPaymentAction,
+    createVendorPaymentAction,
+    updateVendorPaymentHeaderAction,
+    addVendorPaymentAllocationAction,
+    updateVendorPaymentAllocationAction,
+    removeVendorPaymentAllocationAction,
+    postVendorPaymentAction,
+    cancelVendorPaymentAction,
+    voidVendorPaymentAction,
+    loadAccountsPayableAction,
+    queryAccountsPayableAction,
+    getAccountPayableAction
   } from '../store.svelte.js';
-  import { invoke } from '../tauri.js';
   import { calculateDueDate } from '../paymentTerms.js';
 
-  // Sub tab: 'opening-payables'
-  let activeSubTab = $state('opening-payables');
+  // Sub tab: 'vendor-payments' | 'accounts-payable' | 'opening-payables'
+  let activeSubTab = $state('vendor-payments');
 
-  // Filter states
-  let filterVendorId = $state('');
-  let filterStatus = $state('all');
+  // Loading state
   let isLoading = $state(false);
 
   // Auxiliary data
   let availableVendors = $state([]);
 
-  // Create Modal states
-  let isCreateModalOpen = $state(false);
-  let createVendorId = $state('');
-  let createOriginalReference = $state('');
-  let createDocumentDate = $state(new Date().toISOString().slice(0, 10));
-  let createDueDate = $state(new Date().toISOString().slice(0, 10));
-  let createAmount = $state('');
-  let createNote = $state('');
-  let createError = $state('');
-  let createSubmitting = $state(false);
-  let paymentTermsHint = $state('');
+  // Helper date function (pure string YYYY-MM-DD)
+  function getTodayDateString() {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
 
-  // Void Modal states
-  let isVoidModalOpen = $state(false);
+  // ==========================================
+  // 1. Vendor Payments Subtab States
+  // ==========================================
+  // View mode: 'list' | 'draft' | 'detail'
+  let paymentViewMode = $state('list');
+  let selectedPayment = $state(null);
+  let isPaymentLoading = $state(false);
+  let paymentActionLoading = $state(false);
+  let paymentErrorMsg = $state('');
+
+  // Payment List Filters
+  let filterPayVendorId = $state('');
+  let filterPayStatus = $state('all');
+  let filterPayDateFrom = $state('');
+  let filterPayDateTo = $state('');
+
+  // Create Payment Modal States
+  let isCreatePayModalOpen = $state(false);
+  let newPayVendorId = $state('');
+  let newPayDate = $state(getTodayDateString());
+  let newPayMethod = $state('bank_transfer');
+  let newPayRef = $state('');
+  let newPayNote = $state('');
+  let newPayError = $state('');
+  let newPaySubmitting = $state(false);
+
+  // Draft Editing State
+  let draftHeaderDate = $state(getTodayDateString());
+  let draftHeaderMethod = $state('bank_transfer');
+  let draftHeaderRef = $state('');
+  let draftHeaderNote = $state('');
+  let draftCandidatePayables = $state([]); // candidate open accounts payable for this vendor
+  let draftAllocations = $state({}); // map: apId -> { selected: boolean, amount: number, rawInput: string, allocationId: string|null, error: string }
+  let isSavingDraftHeader = $state(false);
+
+  // Void Payment Modal States
+  let isVoidPayModalOpen = $state(false);
+  let voidPayTarget = $state(null);
+  let voidPayReason = $state('');
+  let voidPayError = $state('');
+  let voidPaySubmitting = $state(false);
+
+  // ==========================================
+  // 2. Accounts Payable Subtab States
+  // ==========================================
+  let filterApVendorId = $state('');
+  let filterApSettlementStatus = $state('all');
+  let filterApStatus = $state('all');
+  let apDetailModalOpen = $state(false);
+  let currentApDetail = $state(null);
+  let isApDetailLoading = $state(false);
+
+  // ==========================================
+  // 3. Opening Payables Subtab States
+  // ==========================================
+  let filterOapVendorId = $state('');
+  let filterOapStatus = $state('all');
+
+  // Create Opening Payable Modal States
+  let isCreateOapModalOpen = $state(false);
+  let createOapVendorId = $state('');
+  let createOapOriginalReference = $state('');
+  let createOapDocumentDate = $state(getTodayDateString());
+  let createOapDueDate = $state(getTodayDateString());
+  let createOapAmount = $state('');
+  let createOapNote = $state('');
+  let createOapError = $state('');
+  let createOapSubmitting = $state(false);
+  let oapPaymentTermsHint = $state('');
+
+  // Void Opening Payable Modal States
+  let isVoidOapModalOpen = $state(false);
   let voidTargetOap = $state(null);
-  let voidReason = $state('');
-  let voidError = $state('');
-  let voidSubmitting = $state(false);
+  let voidOapReason = $state('');
+  let voidOapError = $state('');
+  let voidOapSubmitting = $state(false);
+
+  // Derived lists
+  let vendorPaymentsList = $derived(appState.vendorPayments || []);
+  let accountsPayableList = $derived(appState.accountsPayable || []);
+  let openingPayablesList = $derived(appState.openingPayables || []);
+
+  // Calculate live draft total amount
+  let draftTotalAmount = $derived.by(() => {
+    let sum = 0;
+    for (const ap of draftCandidatePayables) {
+      const state = draftAllocations[ap.id];
+      if (state && state.selected) {
+        const amt = Number(state.amount);
+        if (!isNaN(amt) && amt > 0) {
+          sum += amt;
+        }
+      }
+    }
+    return Math.round(sum * 100) / 100;
+  });
+
+  // Calculate live draft allocation count
+  let draftAllocCount = $derived.by(() => {
+    let count = 0;
+    for (const ap of draftCandidatePayables) {
+      const state = draftAllocations[ap.id];
+      if (state && state.selected) count++;
+    }
+    return count;
+  });
 
   onMount(async () => {
     await loadInitialData();
@@ -49,12 +158,14 @@
   async function loadInitialData() {
     isLoading = true;
     try {
-      // 1. Load partners to get vendors
-      const partners = await invoke('list_partners', {});
+      const partners = await fetchPartners();
       availableVendors = (partners || []).filter(p => p.is_vendor && p.is_active !== false);
 
-      // 2. Load opening payables
-      await refreshList();
+      await Promise.all([
+        refreshVendorPayments(),
+        refreshAccountsPayable(),
+        refreshOpeningPayables()
+      ]);
     } catch (err) {
       console.error('Failed to load accounts payable initial data:', err);
       showToast('載入資料失敗：' + (err.message || String(err)));
@@ -63,140 +174,699 @@
     }
   }
 
-  async function refreshList() {
-    isLoading = true;
+  // ==========================================
+  // Vendor Payments Logic
+  // ==========================================
+  async function refreshVendorPayments() {
     try {
       const filter = {};
-      if (filterVendorId) filter.vendor_partner_id = filterVendorId;
-      if (filterStatus && filterStatus !== 'all') filter.status = filterStatus;
-      await loadOpeningPayablesAction(filter);
+      if (filterPayVendorId) filter.vendor_partner_id = filterPayVendorId;
+      if (filterPayStatus && filterPayStatus !== 'all') filter.status = filterPayStatus;
+      if (filterPayDateFrom) filter.payment_date_from = filterPayDateFrom;
+      if (filterPayDateTo) filter.payment_date_to = filterPayDateTo;
+      await loadVendorPaymentsAction(filter);
     } catch (err) {
-      console.error('Failed to refresh opening payables:', err);
+      console.error('Failed to refresh vendor payments:', err);
+    }
+  }
+
+  function openCreatePayModal(preselectedVendorId = '') {
+    newPayVendorId = preselectedVendorId || (availableVendors.length > 0 ? availableVendors[0].id : '');
+    newPayDate = getTodayDateString();
+    newPayMethod = 'bank_transfer';
+    newPayRef = '';
+    newPayNote = '';
+    newPayError = '';
+    isCreatePayModalOpen = true;
+  }
+
+  function closeCreatePayModal() {
+    isCreatePayModalOpen = false;
+  }
+
+  async function handleCreatePaySubmit() {
+    newPayError = '';
+    if (!newPayVendorId) {
+      newPayError = '請選擇供應商';
+      return;
+    }
+    if (!newPayDate) {
+      newPayError = '請選擇付款日';
+      return;
+    }
+    if (newPayDate > getTodayDateString()) {
+      newPayError = '付款日不可晚於今天';
+      return;
+    }
+
+    newPaySubmitting = true;
+    try {
+      // Check if there is already an existing draft for this vendor
+      const existingDraft = (vendorPaymentsList || []).find(
+        p => p.status === 'draft' && p.vendor_partner_id === newPayVendorId
+      );
+      if (existingDraft) {
+        if (confirm(`此供應商已有進行中的草稿付款單「${existingDraft.payment_number}」，是否直接開啟該草稿？`)) {
+          isCreatePayModalOpen = false;
+          const detail = await getVendorPaymentAction(existingDraft.id);
+          await openDraftEditView(detail);
+          return;
+        }
+      }
+
+      const detail = await createVendorPaymentAction({
+        vendor_partner_id: newPayVendorId,
+        payment_date: newPayDate,
+        payment_method: newPayMethod,
+        payment_reference: newPayRef.trim() || null,
+        note: newPayNote.trim() || null
+      });
+      isCreatePayModalOpen = false;
+      await openDraftEditView(detail);
+    } catch (err) {
+      newPayError = err.message || String(err);
+    } finally {
+      newPaySubmitting = false;
+    }
+  }
+
+  async function openDraftEditView(paymentDetail, preselectedApId = null) {
+    paymentErrorMsg = '';
+    selectedPayment = paymentDetail;
+    draftHeaderDate = paymentDetail.payment_date || getTodayDateString();
+    draftHeaderMethod = paymentDetail.payment_method || 'bank_transfer';
+    draftHeaderRef = paymentDetail.payment_reference || '';
+    draftHeaderNote = paymentDetail.note || '';
+
+    // Load candidate payables for this vendor
+    isPaymentLoading = true;
+    paymentViewMode = 'draft';
+    try {
+      const apList = await queryAccountsPayableAction({
+        vendorPartnerId: paymentDetail.vendor_partner_id,
+        status: 'open'
+      });
+
+      // Existing allocations in this payment
+      const allocMap = {};
+      for (const a of (paymentDetail.allocations || [])) {
+        allocMap[a.account_payable_id] = a;
+      }
+
+      // Filter and prepare candidate payables (guarantee vendor isolation)
+      const candidates = (apList || []).filter(ap => {
+        if (ap.vendor_partner_id && ap.vendor_partner_id !== paymentDetail.vendor_partner_id) {
+          return false;
+        }
+        const hasAlloc = Boolean(allocMap[ap.id]);
+        return hasAlloc || ap.outstanding_amount > 0;
+      });
+
+      // Prepare state map
+      const stateMap = {};
+      for (const ap of candidates) {
+        const existingAlloc = allocMap[ap.id];
+        if (existingAlloc) {
+          stateMap[ap.id] = {
+            selected: true,
+            amount: existingAlloc.amount,
+            rawInput: String(existingAlloc.amount),
+            allocationId: existingAlloc.id,
+            error: ''
+          };
+        } else if (preselectedApId && ap.id === preselectedApId) {
+          // Will be added below
+          stateMap[ap.id] = {
+            selected: true,
+            amount: ap.outstanding_amount,
+            rawInput: String(ap.outstanding_amount),
+            allocationId: null,
+            error: ''
+          };
+        } else {
+          stateMap[ap.id] = {
+            selected: false,
+            amount: ap.outstanding_amount,
+            rawInput: String(ap.outstanding_amount),
+            allocationId: null,
+            error: ''
+          };
+        }
+      }
+
+      draftCandidatePayables = candidates;
+      draftAllocations = stateMap;
+
+      // If preselectedApId is not yet in allocations, add it now
+      if (preselectedApId && !allocMap[preselectedApId]) {
+        const ap = candidates.find(c => c.id === preselectedApId);
+        if (ap && ap.outstanding_amount > 0) {
+          const updated = await addVendorPaymentAllocationAction(paymentDetail.id, ap.id, ap.outstanding_amount);
+          selectedPayment = updated;
+          const newAlloc = (updated.allocations || []).find(a => a.account_payable_id === ap.id);
+          if (newAlloc) {
+            draftAllocations[ap.id].allocationId = newAlloc.id;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load candidate payables for draft:', err);
+      paymentErrorMsg = '載入待核銷應付失敗：' + (err.message || String(err));
+    } finally {
+      isPaymentLoading = false;
+    }
+  }
+
+  async function handleToggleAllocation(ap) {
+    paymentErrorMsg = '';
+    const allocState = draftAllocations[ap.id];
+    if (!allocState) return;
+
+    if (!allocState.selected) {
+      // User is checking this payable
+      allocState.selected = true;
+      let amt = Number(allocState.amount);
+      if (isNaN(amt) || amt <= 0) {
+        amt = ap.outstanding_amount;
+        allocState.amount = amt;
+        allocState.rawInput = String(amt);
+      }
+      allocState.error = '';
+
+      try {
+        paymentActionLoading = true;
+        const updated = await addVendorPaymentAllocationAction(selectedPayment.id, ap.id, amt);
+        selectedPayment = updated;
+        const added = (updated.allocations || []).find(a => a.account_payable_id === ap.id);
+        if (added) {
+          allocState.allocationId = added.id;
+        }
+      } catch (err) {
+        allocState.selected = false;
+        paymentErrorMsg = err.message || String(err);
+      } finally {
+        paymentActionLoading = false;
+      }
+    } else {
+      // User is unchecking this payable
+      allocState.selected = false;
+      allocState.error = '';
+      if (allocState.allocationId) {
+        try {
+          paymentActionLoading = true;
+          const updated = await removeVendorPaymentAllocationAction(selectedPayment.id, allocState.allocationId);
+          selectedPayment = updated;
+          allocState.allocationId = null;
+        } catch (err) {
+          allocState.selected = true;
+          paymentErrorMsg = err.message || String(err);
+        } finally {
+          paymentActionLoading = false;
+        }
+      }
+    }
+  }
+
+  async function handleAllocationAmountChange(ap, newValue) {
+    const allocState = draftAllocations[ap.id];
+    if (!allocState) return;
+
+    allocState.rawInput = newValue;
+    const num = parseFloat(newValue);
+    allocState.amount = isNaN(num) ? 0 : num;
+
+    // Boundary & error check for red alert styling
+    if (isNaN(num) || num <= 0) {
+      allocState.error = '核銷金額必須大於 0';
+    } else if (num > ap.outstanding_amount) {
+      allocState.error = `超過未付餘額 ${formatCurrency(ap.outstanding_amount)}`;
+    } else {
+      allocState.error = '';
+    }
+
+    // If it is currently allocated in backend, sync if valid
+    if (allocState.selected && allocState.allocationId && !allocState.error) {
+      try {
+        const updated = await updateVendorPaymentAllocationAction(selectedPayment.id, allocState.allocationId, num);
+        selectedPayment = updated;
+      } catch (err) {
+        paymentErrorMsg = err.message || String(err);
+      }
+    }
+  }
+
+  async function handleSaveDraftHeader() {
+    paymentErrorMsg = '';
+    if (!draftHeaderDate) {
+      paymentErrorMsg = '付款日不可為空';
+      return;
+    }
+    if (draftHeaderDate > getTodayDateString()) {
+      paymentErrorMsg = '付款日不可晚於今天';
+      return;
+    }
+
+    isSavingDraftHeader = true;
+    try {
+      const updated = await updateVendorPaymentHeaderAction({
+        id: selectedPayment.id,
+        payment_id: selectedPayment.id,
+        payment_date: draftHeaderDate,
+        payment_method: draftHeaderMethod,
+        payment_reference: draftHeaderRef.trim() || null,
+        note: draftHeaderNote.trim() || null
+      });
+      selectedPayment = updated;
+    } catch (err) {
+      paymentErrorMsg = err.message || String(err);
+    } finally {
+      isSavingDraftHeader = false;
+    }
+  }
+
+  async function handlePostPayment() {
+    paymentErrorMsg = '';
+
+    // First check if any checked allocation has an error or amount > outstanding
+    // If user edited to an exceeded amount, try syncing to let backend throw P-03
+    for (const ap of draftCandidatePayables) {
+      const allocState = draftAllocations[ap.id];
+      if (allocState && allocState.selected) {
+        if (allocState.amount > ap.outstanding_amount) {
+          // Force update to backend so P-03 triggers as required by acceptance criteria
+          try {
+            paymentActionLoading = true;
+            if (allocState.allocationId) {
+              await updateVendorPaymentAllocationAction(selectedPayment.id, allocState.allocationId, allocState.amount);
+            } else {
+              await addVendorPaymentAllocationAction(selectedPayment.id, ap.id, allocState.amount);
+            }
+          } catch (err) {
+            paymentErrorMsg = err.message || String(err);
+            paymentActionLoading = false;
+            return;
+          }
+        }
+      }
+    }
+
+    if (draftAllocCount === 0) {
+      paymentErrorMsg = '付款單至少需有 1 筆核銷方可過帳';
+      return;
+    }
+
+    paymentActionLoading = true;
+    try {
+      const posted = await postVendorPaymentAction(selectedPayment.id);
+      selectedPayment = posted;
+      paymentViewMode = 'detail';
+      await Promise.all([
+        refreshVendorPayments(),
+        refreshAccountsPayable()
+      ]);
+    } catch (err) {
+      paymentErrorMsg = err.message || String(err);
+    } finally {
+      paymentActionLoading = false;
+    }
+  }
+
+  async function handleCancelPayment() {
+    paymentErrorMsg = '';
+    if (!confirm(`確定要取消付款單「${selectedPayment.payment_number}」嗎？`)) {
+      return;
+    }
+
+    paymentActionLoading = true;
+    try {
+      const cancelled = await cancelVendorPaymentAction(selectedPayment.id);
+      selectedPayment = cancelled;
+      paymentViewMode = 'detail';
+      await refreshVendorPayments();
+    } catch (err) {
+      paymentErrorMsg = err.message || String(err);
+    } finally {
+      paymentActionLoading = false;
+    }
+  }
+
+  function openVoidPayModal(payment) {
+    voidPayTarget = payment;
+    voidPayReason = '';
+    voidPayError = '';
+    isVoidPayModalOpen = true;
+  }
+
+  function closeVoidPayModal() {
+    isVoidPayModalOpen = false;
+    voidPayTarget = null;
+  }
+
+  async function handleVoidPaySubmit() {
+    if (!voidPayTarget) return;
+    if (!voidPayReason.trim()) {
+      voidPayError = '作廢需填寫原因';
+      return;
+    }
+
+    voidPaySubmitting = true;
+    voidPayError = '';
+    try {
+      const voided = await voidVendorPaymentAction(voidPayTarget.id, voidPayReason.trim());
+      isVoidPayModalOpen = false;
+      voidPayTarget = null;
+      if (selectedPayment && selectedPayment.id === voided.id) {
+        selectedPayment = voided;
+      }
+      await Promise.all([
+        refreshVendorPayments(),
+        refreshAccountsPayable()
+      ]);
+    } catch (err) {
+      voidPayError = err.message || String(err);
+    } finally {
+      voidPaySubmitting = false;
+    }
+  }
+
+  async function viewPaymentDetail(paymentId) {
+    paymentErrorMsg = '';
+    isPaymentLoading = true;
+    try {
+      const detail = await getVendorPaymentAction(paymentId);
+      selectedPayment = detail;
+      if (detail.status === 'draft') {
+        await openDraftEditView(detail);
+      } else {
+        paymentViewMode = 'detail';
+      }
+    } catch (err) {
+      console.error('Failed to view payment detail:', err);
+      showToast('載入付款單失敗：' + (err.message || String(err)));
+    } finally {
+      isPaymentLoading = false;
+    }
+  }
+
+  function backToPaymentList() {
+    paymentViewMode = 'list';
+    selectedPayment = null;
+    paymentErrorMsg = '';
+    refreshVendorPayments();
+  }
+
+  // ==========================================
+  // Quick Actions (快捷入口)
+  // ==========================================
+  async function initiatePaymentFromVendor(vendorId) {
+    activeSubTab = 'vendor-payments';
+    paymentViewMode = 'list';
+    try {
+      isLoading = true;
+      // Check if an existing draft payment already exists for this vendor
+      const existingDraft = (vendorPaymentsList || []).find(
+        p => p.status === 'draft' && p.vendor_partner_id === vendorId
+      );
+
+      let detail;
+      if (existingDraft) {
+        detail = await getVendorPaymentAction(existingDraft.id);
+        showToast(`已為您開啟供應商既有的草稿付款單「${detail.payment_number}」`);
+      } else {
+        detail = await createVendorPaymentAction({
+          vendor_partner_id: vendorId,
+          payment_date: getTodayDateString(),
+          payment_method: 'bank_transfer'
+        });
+      }
+      await openDraftEditView(detail);
+    } catch (err) {
+      showToast('建立付款單失敗：' + (err.message || String(err)));
     } finally {
       isLoading = false;
     }
   }
 
-  function handleVendorChange() {
-    const vendor = availableVendors.find(v => v.id === createVendorId);
+  async function initiatePaymentFromAp(ap) {
+    activeSubTab = 'vendor-payments';
+    paymentViewMode = 'list';
+    try {
+      isLoading = true;
+      // Check if an existing draft payment already exists for this vendor
+      const existingDraft = (vendorPaymentsList || []).find(
+        p => p.status === 'draft' && p.vendor_partner_id === ap.vendor_partner_id
+      );
+
+      let detail;
+      if (existingDraft) {
+        detail = await getVendorPaymentAction(existingDraft.id);
+        showToast(`已為您開啟供應商既有的草稿付款單「${detail.payment_number}」`);
+      } else {
+        detail = await createVendorPaymentAction({
+          vendor_partner_id: ap.vendor_partner_id,
+          payment_date: getTodayDateString(),
+          payment_method: 'bank_transfer'
+        });
+      }
+      await openDraftEditView(detail, ap.id);
+    } catch (err) {
+      showToast('建立付款單失敗：' + (err.message || String(err)));
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  async function initiatePaymentFromOap(oap) {
+    try {
+      isLoading = true;
+      const apList = await queryAccountsPayableAction({
+        vendorPartnerId: oap.vendor_partner_id,
+        status: 'open'
+      });
+      const targetAp = (apList || []).find(a => a.source_type === 'opening_balance' && a.source_id === oap.id);
+      if (targetAp) {
+        await initiatePaymentFromAp(targetAp);
+      } else {
+        await initiatePaymentFromVendor(oap.vendor_partner_id);
+      }
+    } catch (err) {
+      showToast('發起付款失敗：' + (err.message || String(err)));
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  function jumpToVendorBill(billId) {
+    appState.activeWorkspace = 'vendor-bills';
+    appState.selectedVendorBillId = billId;
+    navigate('/app/vendor-bills');
+  }
+
+  function jumpToOpeningPayable(oapId) {
+    activeSubTab = 'opening-payables';
+    filterOapVendorId = '';
+    filterOapStatus = 'all';
+    refreshOpeningPayables();
+  }
+
+  // ==========================================
+  // Accounts Payable Tab Logic
+  // ==========================================
+  async function refreshAccountsPayable() {
+    try {
+      const filter = {};
+      if (filterApVendorId) {
+        filter.vendorPartnerId = filterApVendorId;
+        filter.vendor_partner_id = filterApVendorId;
+      }
+      if (filterApSettlementStatus && filterApSettlementStatus !== 'all') {
+        filter.settlementStatus = filterApSettlementStatus;
+        filter.settlement_status = filterApSettlementStatus;
+      }
+      if (filterApStatus && filterApStatus !== 'all') {
+        filter.status = filterApStatus;
+      }
+      await loadAccountsPayableAction(filter);
+    } catch (err) {
+      console.error('Failed to refresh accounts payable:', err);
+    }
+  }
+
+  async function openApDetailModal(apId) {
+    isApDetailLoading = true;
+    apDetailModalOpen = true;
+    try {
+      currentApDetail = await getAccountPayableAction(apId);
+    } catch (err) {
+      showToast('載入應付詳情失敗：' + (err.message || String(err)));
+      apDetailModalOpen = false;
+    } finally {
+      isApDetailLoading = false;
+    }
+  }
+
+  function closeApDetailModal() {
+    apDetailModalOpen = false;
+    currentApDetail = null;
+  }
+
+  // ==========================================
+  // Opening Payables Tab Logic
+  // ==========================================
+  async function refreshOpeningPayables() {
+    try {
+      const filter = {};
+      if (filterOapVendorId) filter.vendor_partner_id = filterOapVendorId;
+      if (filterOapStatus && filterOapStatus !== 'all') filter.status = filterOapStatus;
+      await loadOpeningPayablesAction(filter);
+    } catch (err) {
+      console.error('Failed to refresh opening payables:', err);
+    }
+  }
+
+  function handleOapVendorChange() {
+    const vendor = availableVendors.find(v => v.id === createOapVendorId);
     if (!vendor) {
-      paymentTermsHint = '';
+      oapPaymentTermsHint = '';
       return;
     }
 
     if (vendor.payment_terms_type) {
       const typeLabel = vendor.payment_terms_type === 'net' ? '貨到' : '月結';
-      paymentTermsHint = `已依付款條件（${typeLabel} ${vendor.payment_terms_days || 0} 天）自動推算並預填到期日，可手動修改`;
-      createDueDate = calculateDueDate(createDocumentDate, vendor.payment_terms_type, vendor.payment_terms_days);
+      oapPaymentTermsHint = `已依付款條件（${typeLabel} ${vendor.payment_terms_days || 0} 天）自動推算並預填到期日，可手動修改`;
+      createOapDueDate = calculateDueDate(createOapDocumentDate, vendor.payment_terms_type, vendor.payment_terms_days);
     } else {
-      paymentTermsHint = '此供應商未設定付款條件，預設單據日為到期日，可手動修改';
-      createDueDate = createDocumentDate;
+      oapPaymentTermsHint = '此供應商未設定付款條件，預設單據日為到期日，可手動修改';
+      createOapDueDate = createOapDocumentDate;
     }
   }
 
-  function handleDocDateChange() {
-    const vendor = availableVendors.find(v => v.id === createVendorId);
+  function handleOapDocDateChange() {
+    const vendor = availableVendors.find(v => v.id === createOapVendorId);
     if (vendor && vendor.payment_terms_type) {
-      createDueDate = calculateDueDate(createDocumentDate, vendor.payment_terms_type, vendor.payment_terms_days);
+      createOapDueDate = calculateDueDate(createOapDocumentDate, vendor.payment_terms_type, vendor.payment_terms_days);
     }
   }
 
-  function openCreateModal() {
-    createVendorId = availableVendors.length > 0 ? availableVendors[0].id : '';
-    createOriginalReference = '';
-    createDocumentDate = new Date().toISOString().slice(0, 10);
-    createDueDate = new Date().toISOString().slice(0, 10);
-    createAmount = '';
-    createNote = '';
-    createError = '';
-    paymentTermsHint = '';
-    if (createVendorId) {
-      handleVendorChange();
+  function openCreateOapModal() {
+    createOapVendorId = availableVendors.length > 0 ? availableVendors[0].id : '';
+    createOapOriginalReference = '';
+    createOapDocumentDate = getTodayDateString();
+    createOapDueDate = getTodayDateString();
+    createOapAmount = '';
+    createOapNote = '';
+    createOapError = '';
+    oapPaymentTermsHint = '';
+    if (createOapVendorId) {
+      handleOapVendorChange();
     }
-    isCreateModalOpen = true;
+    isCreateOapModalOpen = true;
   }
 
-  function closeCreateModal() {
-    isCreateModalOpen = false;
+  function closeCreateOapModal() {
+    isCreateOapModalOpen = false;
   }
 
-  async function handleCreateSubmit() {
-    createError = '';
-    if (!createVendorId) {
-      createError = '請選擇供應商';
+  async function handleCreateOapSubmit() {
+    createOapError = '';
+    if (!createOapVendorId) {
+      createOapError = '請選擇供應商';
       return;
     }
-    if (!createOriginalReference.trim()) {
-      createError = '原單號或發票號不可為空';
+    if (!createOapOriginalReference.trim()) {
+      createOapError = '原單號或發票號不可為空';
       return;
     }
-    if (!createDocumentDate) {
-      createError = '請選擇原單據日';
+    if (!createOapDocumentDate) {
+      createOapError = '請選擇原單據日';
       return;
     }
-    if (!createDueDate) {
-      createError = '請選擇到期日';
+    if (!createOapDueDate) {
+      createOapError = '請選擇到期日';
       return;
     }
-    const amt = parseFloat(createAmount);
+    const amt = parseFloat(createOapAmount);
     if (isNaN(amt) || amt <= 0) {
-      createError = '未付金額必須大於 0';
+      createOapError = '未付金額必須大於 0';
       return;
     }
 
-    createSubmitting = true;
+    createOapSubmitting = true;
     try {
       await createOpeningPayableAction({
-        vendor_partner_id: createVendorId,
-        original_reference: createOriginalReference.trim(),
-        document_date: createDocumentDate,
-        due_date: createDueDate,
+        vendor_partner_id: createOapVendorId,
+        original_reference: createOapOriginalReference.trim(),
+        document_date: createOapDocumentDate,
+        due_date: createOapDueDate,
         amount: amt,
-        note: createNote.trim() || null
+        note: createOapNote.trim() || null
       });
-      isCreateModalOpen = false;
-      await refreshList();
+      isCreateOapModalOpen = false;
+      await Promise.all([
+        refreshOpeningPayables(),
+        refreshAccountsPayable()
+      ]);
     } catch (err) {
-      createError = err.message || String(err);
+      createOapError = err.message || String(err);
     } finally {
-      createSubmitting = false;
+      createOapSubmitting = false;
     }
   }
 
-  function openVoidModal(oap) {
+  function openVoidOapModal(oap) {
     voidTargetOap = oap;
-    voidReason = '';
-    voidError = '';
-    isVoidModalOpen = true;
+    voidOapReason = '';
+    voidOapError = '';
+    isVoidOapModalOpen = true;
   }
 
-  function closeVoidModal() {
-    isVoidModalOpen = false;
+  function closeVoidOapModal() {
+    isVoidOapModalOpen = false;
     voidTargetOap = null;
   }
 
-  async function handleVoidSubmit() {
+  async function handleVoidOapSubmit() {
     if (!voidTargetOap) return;
-    if (!voidReason.trim()) {
-      voidError = '作廢原因為必填';
+    if (!voidOapReason.trim()) {
+      voidOapError = '作廢原因為必填';
       return;
     }
 
-    voidSubmitting = true;
-    voidError = '';
+    voidOapSubmitting = true;
+    voidOapError = '';
     try {
-      await voidOpeningPayableAction(voidTargetOap.id, voidReason.trim());
-      isVoidModalOpen = false;
+      await voidOpeningPayableAction(voidTargetOap.id, voidOapReason.trim());
+      isVoidOapModalOpen = false;
       voidTargetOap = null;
-      await refreshList();
+      await Promise.all([
+        refreshOpeningPayables(),
+        refreshAccountsPayable()
+      ]);
     } catch (err) {
-      voidError = err.message || String(err);
+      voidOapError = err.message || String(err);
     } finally {
-      voidSubmitting = false;
+      voidOapSubmitting = false;
     }
   }
 
-  let openingPayablesList = $derived(appState.openingPayables || []);
+  function getPaymentMethodLabel(method) {
+    switch (method) {
+      case 'bank_transfer': return '銀行轉帳';
+      case 'cash': return '現金';
+      case 'check': return '支票';
+      case 'other': return '其他';
+      default: return method || '-';
+    }
+  }
+
+  function getSettlementStatusLabel(status) {
+    switch (status) {
+      case 'unpaid': return '未付';
+      case 'partially_paid': return '部分付款';
+      case 'paid': return '已付清';
+      default: return status || '-';
+    }
+  }
 </script>
 
 <div class="ap-workspace">
@@ -211,7 +881,7 @@
       </div>
       <div>
         <h2>應付帳款工作區 (Accounts Payable)</h2>
-        <p class="subtitle">管理期初應付帳款登錄、核銷與對帳明細</p>
+        <p class="subtitle">管理應付帳款、核銷付款單與期初登錄</p>
       </div>
     </div>
   </header>
@@ -219,8 +889,30 @@
   <!-- Sub Tabs Navigation -->
   <div class="subtabs-bar">
     <button 
+      class="subtab-btn {activeSubTab === 'vendor-payments' ? 'active' : ''}" 
+      onclick={() => { activeSubTab = 'vendor-payments'; paymentViewMode = 'list'; refreshVendorPayments(); }}
+      id="tab-vendor-payments"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect>
+        <line x1="1" y1="10" x2="23" y2="10"></line>
+      </svg>
+      付款單 (Vendor Payments)
+    </button>
+    <button 
+      class="subtab-btn {activeSubTab === 'accounts-payable' ? 'active' : ''}" 
+      onclick={() => { activeSubTab = 'accounts-payable'; refreshAccountsPayable(); }}
+      id="tab-accounts-payable"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+      </svg>
+      應付帳款明細 (Accounts Payable)
+    </button>
+    <button 
       class="subtab-btn {activeSubTab === 'opening-payables' ? 'active' : ''}" 
-      onclick={() => (activeSubTab = 'opening-payables')}
+      onclick={() => { activeSubTab = 'opening-payables'; refreshOpeningPayables(); }}
       id="tab-opening-payables"
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -236,12 +928,624 @@
 
   <!-- Main View Area -->
   <div class="view-content">
-    {#if activeSubTab === 'opening-payables'}
+    <!-- ==================================================== -->
+    <!-- SUBTAB 1: 付款單 (Vendor Payments) -->
+    <!-- ==================================================== -->
+    {#if activeSubTab === 'vendor-payments'}
+      {#if paymentViewMode === 'list'}
+        <!-- Payments List View -->
+        <div class="toolbar">
+          <div class="filters">
+            <div class="filter-group">
+              <label for="filter-pay-vendor">供應商：</label>
+              <select id="filter-pay-vendor" bind:value={filterPayVendorId} onchange={refreshVendorPayments}>
+                <option value="">全部供應商</option>
+                {#each availableVendors as v}
+                  <option value={v.id}>{v.name}</option>
+                {/each}
+              </select>
+            </div>
+
+            <div class="filter-group">
+              <label for="filter-pay-status">狀態：</label>
+              <select id="filter-pay-status" bind:value={filterPayStatus} onchange={refreshVendorPayments}>
+                <option value="all">全部狀態</option>
+                <option value="draft">草稿 (draft)</option>
+                <option value="posted">已過帳 (posted)</option>
+                <option value="cancelled">已取消 (cancelled)</option>
+                <option value="voided">已作廢 (voided)</option>
+              </select>
+            </div>
+
+            <div class="filter-group">
+              <label for="filter-pay-from">付款日起：</label>
+              <input type="date" id="filter-pay-from" bind:value={filterPayDateFrom} onchange={refreshVendorPayments} />
+            </div>
+
+            <div class="filter-group">
+              <label for="filter-pay-to">迄：</label>
+              <input type="date" id="filter-pay-to" bind:value={filterPayDateTo} onchange={refreshVendorPayments} />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn btn-primary" onclick={() => openCreatePayModal()} id="btn-create-vendor-payment">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              新增付款單
+            </button>
+          </div>
+        </div>
+
+        <div class="table-container">
+          {#if isPaymentLoading}
+            <div class="empty-state">資料載入中...</div>
+          {:else if vendorPaymentsList.length === 0}
+            <div class="empty-state">
+              <p>目前尚無付款單紀錄</p>
+              <button class="btn btn-secondary" onclick={() => openCreatePayModal()}>立即建立付款單</button>
+            </div>
+          {:else}
+            <table class="data-table" id="table-vendor-payments">
+              <thead>
+                <tr>
+                  <th>付款單號</th>
+                  <th>供應商</th>
+                  <th>付款日</th>
+                  <th>付款方式</th>
+                  <th>參考資訊</th>
+                  <th class="text-right">付款總額</th>
+                  <th class="text-center">核銷筆數</th>
+                  <th>狀態</th>
+                  <th class="text-center">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each vendorPaymentsList as p}
+                  <tr class={p.status === 'voided' ? 'row-voided' : ''}>
+                    <td class="font-mono font-medium">
+                      <button class="link-btn font-mono" onclick={() => viewPaymentDetail(p.id)}>{p.payment_number}</button>
+                    </td>
+                    <td>{p.vendor_name_snapshot}</td>
+                    <td>{p.payment_date}</td>
+                    <td>{getPaymentMethodLabel(p.payment_method)}</td>
+                    <td class="text-muted text-sm">{p.payment_reference || '-'}</td>
+                    <td class="text-right font-medium">{formatCurrency(p.total_amount)}</td>
+                    <td class="text-center">{p.allocation_count !== undefined ? p.allocation_count : (p.allocations ? p.allocations.length : 0)}</td>
+                    <td>
+                      {#if p.status === 'draft'}
+                        <span class="badge badge-draft">草稿 (draft)</span>
+                      {:else if p.status === 'posted'}
+                        <span class="badge badge-posted">已過帳 (posted)</span>
+                      {:else if p.status === 'cancelled'}
+                        <span class="badge badge-cancelled">已取消 (cancelled)</span>
+                      {:else if p.status === 'voided'}
+                        <span class="badge badge-voided">已作廢 (voided)</span>
+                      {:else}
+                        <span class="badge">{p.status}</span>
+                      {/if}
+                    </td>
+                    <td class="text-center">
+                      {#if p.status === 'draft'}
+                        <button class="btn-action text-primary" onclick={() => viewPaymentDetail(p.id)}>編輯/核銷</button>
+                      {:else if p.status === 'posted'}
+                        <button class="btn-action text-primary" onclick={() => viewPaymentDetail(p.id)}>檢視</button>
+                        <button class="btn-action text-danger" onclick={() => openVoidPayModal(p)}>作廢</button>
+                      {:else}
+                        <button class="btn-action text-muted" onclick={() => viewPaymentDetail(p.id)}>檢視</button>
+                      {/if}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
+
+      {:else if paymentViewMode === 'draft' && selectedPayment}
+        <!-- Payment Draft Editing View -->
+        <div class="editor-header">
+          <div class="editor-title-wrap">
+            <button class="btn btn-secondary btn-sm" onclick={backToPaymentList}>
+              &larr; 返回清單
+            </button>
+            <h3>
+              編輯付款單草稿 <span class="font-mono text-muted">({selectedPayment.payment_number})</span>
+            </h3>
+            <span class="badge badge-draft">草稿</span>
+          </div>
+
+          <div class="editor-actions">
+            <button 
+              class="btn btn-danger btn-outline btn-sm" 
+              onclick={handleCancelPayment}
+              disabled={paymentActionLoading}
+              id="btn-cancel-payment"
+            >
+              取消付款單
+            </button>
+            <button 
+              class="btn btn-primary" 
+              onclick={handlePostPayment}
+              disabled={paymentActionLoading || draftAllocCount === 0}
+              id="btn-post-payment"
+            >
+              {paymentActionLoading ? '處理中...' : '確認過帳 (Post)'}
+            </button>
+          </div>
+        </div>
+
+        {#if paymentErrorMsg}
+          <div class="alert alert-danger mb-3" id="payment-error-banner">{paymentErrorMsg}</div>
+        {/if}
+
+        <!-- Header Card -->
+        <div class="card mb-4">
+          <div class="card-header">
+            <h4>付款單表頭資訊</h4>
+            <button 
+              class="btn btn-secondary btn-sm" 
+              onclick={handleSaveDraftHeader}
+              disabled={isSavingDraftHeader}
+              id="btn-save-draft-header"
+            >
+              {isSavingDraftHeader ? '儲存中...' : '儲存表頭變更'}
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="form-row-3">
+              <div class="form-group">
+                <label for="draft-vendor-name">供應商</label>
+                <input id="draft-vendor-name" type="text" value={selectedPayment.vendor_name_snapshot} disabled class="bg-readonly" />
+              </div>
+
+              <div class="form-group">
+                <label for="draft-payment-date">付款日 <span class="required">*</span></label>
+                <input 
+                  type="date" 
+                  id="draft-payment-date" 
+                  bind:value={draftHeaderDate}
+                  max={getTodayDateString()}
+                  onchange={handleSaveDraftHeader}
+                  required 
+                />
+                <span class="help-text">純日期格式，不可晚於今天</span>
+              </div>
+
+              <div class="form-group">
+                <label for="draft-payment-method">付款方式 <span class="required">*</span></label>
+                <select id="draft-payment-method" bind:value={draftHeaderMethod} onchange={handleSaveDraftHeader}>
+                  <option value="bank_transfer">銀行轉帳 (bank_transfer)</option>
+                  <option value="cash">現金 (cash)</option>
+                  <option value="check">支票 (check)</option>
+                  <option value="other">其他 (other)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row mt-3">
+              <div class="form-group">
+                <label for="draft-payment-ref">參考資訊</label>
+                <input 
+                  type="text" 
+                  id="draft-payment-ref" 
+                  bind:value={draftHeaderRef} 
+                  placeholder="匯款末五碼、支票號碼或交易序號"
+                  onblur={handleSaveDraftHeader}
+                />
+              </div>
+
+              <div class="form-group">
+                <label for="draft-payment-note">備註</label>
+                <input 
+                  type="text" 
+                  id="draft-payment-note" 
+                  bind:value={draftHeaderNote} 
+                  placeholder="內部備註說明（選填）"
+                  onblur={handleSaveDraftHeader}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Allocation Table Card -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h4>未付應付帳款勾選與核銷</h4>
+              <p class="subtitle text-sm">列出該供應商未付餘額大於 0 的有效應付，勾選並填寫本次核銷金額</p>
+            </div>
+            <div class="alloc-stats">
+              已勾選核銷：<strong>{draftAllocCount}</strong> 筆
+            </div>
+          </div>
+
+          <div class="card-body p-0">
+            {#if draftCandidatePayables.length === 0}
+              <div class="empty-state">
+                此供應商目前沒有待核銷的未付應付帳款
+              </div>
+            {:else}
+              <table class="data-table" id="table-draft-allocations">
+                <thead>
+                  <tr>
+                    <th class="text-center" style="width: 50px;">勾選</th>
+                    <th>來源單號</th>
+                    <th>外部單號</th>
+                    <th>單據日</th>
+                    <th>到期日</th>
+                    <th class="text-right">應付總額</th>
+                    <th class="text-right">未付餘額</th>
+                    <th style="width: 200px;">本次核銷金額</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each draftCandidatePayables as ap}
+                    {@const state = draftAllocations[ap.id] || { selected: false, amount: ap.outstanding_amount, rawInput: String(ap.outstanding_amount), error: '' }}
+                    <tr class={state.selected ? 'row-selected' : ''}>
+                      <td class="text-center">
+                        <input 
+                          type="checkbox" 
+                          id={`chk-ap-${ap.id}`}
+                          checked={state.selected} 
+                          onchange={() => handleToggleAllocation(ap)}
+                          disabled={paymentActionLoading}
+                        />
+                      </td>
+                      <td class="font-mono">
+                        {#if ap.source_type === 'vendor_bill'}
+                          <button class="link-btn font-mono" onclick={() => jumpToVendorBill(ap.source_id)} title="點擊檢視請款單">
+                            {ap.source_number}
+                          </button>
+                        {:else if ap.source_type === 'opening_balance'}
+                          <button class="link-btn font-mono" onclick={() => jumpToOpeningPayable(ap.source_id)} title="點擊檢視期初應付">
+                            {ap.source_number}
+                          </button>
+                        {:else}
+                          {ap.source_number}
+                        {/if}
+                      </td>
+                      <td class="font-mono text-muted">{ap.external_reference || '-'}</td>
+                      <td>{ap.document_date}</td>
+                      <td>{ap.due_date}</td>
+                      <td class="text-right">{formatCurrency(ap.amount)}</td>
+                      <td class="text-right font-medium">{formatCurrency(ap.outstanding_amount)}</td>
+                      <td>
+                        <div class="alloc-input-wrap">
+                          <input 
+                            type="number" 
+                            step="0.01"
+                            min="0.01"
+                            id={`input-alloc-${ap.id}`}
+                            value={state.rawInput}
+                            disabled={!state.selected || paymentActionLoading}
+                            class={state.error ? 'input-error' : ''}
+                            oninput={(e) => handleAllocationAmountChange(ap, e.currentTarget.value)}
+                          />
+                          {#if state.error}
+                            <span class="error-hint" id={`error-hint-${ap.id}`}>{state.error}</span>
+                          {/if}
+                        </div>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </div>
+
+          <div class="card-footer summary-footer">
+            <div class="summary-left">
+              <span>核銷筆數：<strong>{draftAllocCount}</strong> 筆</span>
+            </div>
+            <div class="summary-right">
+              <span class="total-label">付款總額（核銷合計）：</span>
+              <span class="total-amount font-mono" id="draft-total-amount">
+                {formatCurrency(draftTotalAmount)}
+              </span>
+            </div>
+          </div>
+        </div>
+
+      {:else if paymentViewMode === 'detail' && selectedPayment}
+        <!-- Payment Read-only View (Posted / Cancelled / Voided) -->
+        <div class="editor-header">
+          <div class="editor-title-wrap">
+            <button class="btn btn-secondary btn-sm" onclick={backToPaymentList}>
+              &larr; 返回清單
+            </button>
+            <h3>
+              付款單明細 <span class="font-mono text-muted">({selectedPayment.payment_number})</span>
+            </h3>
+            {#if selectedPayment.status === 'posted'}
+              <span class="badge badge-posted">已過帳 (posted)</span>
+            {:else if selectedPayment.status === 'voided'}
+              <span class="badge badge-voided">已作廢 (voided)</span>
+            {:else if selectedPayment.status === 'cancelled'}
+              <span class="badge badge-cancelled">已取消 (cancelled)</span>
+            {:else}
+              <span class="badge">{selectedPayment.status}</span>
+            {/if}
+          </div>
+
+          <div class="editor-actions">
+            {#if selectedPayment.status === 'posted'}
+              <button 
+                class="btn btn-danger" 
+                onclick={() => openVoidPayModal(selectedPayment)}
+                id="btn-void-payment"
+              >
+                作廢此付款單
+              </button>
+            {/if}
+          </div>
+        </div>
+
+        {#if selectedPayment.status === 'voided'}
+          <div class="alert alert-danger mb-3" id="void-reason-alert">
+            <strong>已作廢</strong>：{selectedPayment.void_reason || '無說明'}
+            {#if selectedPayment.voided_at}
+              <span class="text-xs text-muted ml-2">（作廢時間：{formatTime(selectedPayment.voided_at)}）</span>
+            {/if}
+          </div>
+        {:else if selectedPayment.status === 'cancelled'}
+          <div class="alert alert-info mb-3">
+            <strong>此草稿付款單已取消</strong>
+            {#if selectedPayment.cancelled_at}
+              <span class="text-xs text-muted ml-2">（取消時間：{formatTime(selectedPayment.cancelled_at)}）</span>
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Read-only Header Card -->
+        <div class="card mb-4">
+          <div class="card-header">
+            <h4>表頭資訊</h4>
+          </div>
+          <div class="card-body">
+            <div class="info-grid">
+              <div class="info-item">
+                <span class="info-label">供應商</span>
+                <span class="info-value font-medium">{selectedPayment.vendor_name_snapshot}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">付款日</span>
+                <span class="info-value">{selectedPayment.payment_date}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">付款方式</span>
+                <span class="info-value">{getPaymentMethodLabel(selectedPayment.payment_method)}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">參考資訊</span>
+                <span class="info-value">{selectedPayment.payment_reference || '-'}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">備註</span>
+                <span class="info-value">{selectedPayment.note || '-'}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">過帳時間</span>
+                <span class="info-value">{selectedPayment.posted_at ? formatTime(selectedPayment.posted_at) : '-'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Read-only Allocations Table -->
+        <div class="card">
+          <div class="card-header">
+            <h4>核銷明細</h4>
+          </div>
+          <div class="card-body p-0">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>來源單號</th>
+                  <th>外部單號</th>
+                  <th>單據日</th>
+                  <th>到期日</th>
+                  <th class="text-right">應付總額</th>
+                  <th class="text-right">核銷金額</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#if !selectedPayment.allocations || selectedPayment.allocations.length === 0}
+                  <tr>
+                    <td colspan="6" class="text-center text-muted py-4">無核銷項目</td>
+                  </tr>
+                {:else}
+                  {#each selectedPayment.allocations as a}
+                    <tr>
+                      <td class="font-mono">
+                        {#if a.source_type === 'vendor_bill'}
+                          <button class="link-btn font-mono" onclick={() => jumpToVendorBill(a.source_id)}>
+                            {a.source_number}
+                          </button>
+                        {:else if a.source_type === 'opening_balance'}
+                          <button class="link-btn font-mono" onclick={() => jumpToOpeningPayable(a.source_id)}>
+                            {a.source_number}
+                          </button>
+                        {:else}
+                          {a.source_number}
+                        {/if}
+                      </td>
+                      <td class="font-mono text-muted">{a.external_reference || '-'}</td>
+                      <td>{a.document_date || '-'}</td>
+                      <td>{a.due_date || '-'}</td>
+                      <td class="text-right">{a.ap_amount ? formatCurrency(a.ap_amount) : '-'}</td>
+                      <td class="text-right font-medium">{formatCurrency(a.amount)}</td>
+                    </tr>
+                  {/each}
+                {/if}
+              </tbody>
+            </table>
+          </div>
+
+          <div class="card-footer summary-footer">
+            <div class="summary-left">
+              <span>核銷筆數：<strong>{selectedPayment.allocations ? selectedPayment.allocations.length : 0}</strong> 筆</span>
+            </div>
+            <div class="summary-right">
+              <span class="total-label">付款總額：</span>
+              <span class="total-amount font-mono">
+                {formatCurrency(selectedPayment.total_amount)}
+              </span>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+    <!-- ==================================================== -->
+    <!-- SUBTAB 2: 應付帳款明細 (Accounts Payable) -->
+    <!-- ==================================================== -->
+    {:else if activeSubTab === 'accounts-payable'}
       <div class="toolbar">
         <div class="filters">
           <div class="filter-group">
-            <label for="filter-vendor">供應商：</label>
-            <select id="filter-vendor" bind:value={filterVendorId} onchange={refreshList}>
+            <label for="filter-ap-vendor">供應商：</label>
+            <select id="filter-ap-vendor" bind:value={filterApVendorId} onchange={refreshAccountsPayable}>
+              <option value="">全部供應商</option>
+              {#each availableVendors as v}
+                <option value={v.id}>{v.name}</option>
+              {/each}
+            </select>
+          </div>
+
+          {#if filterApVendorId}
+            <button 
+              class="btn btn-secondary btn-sm" 
+              onclick={() => initiatePaymentFromVendor(filterApVendorId)}
+              id="btn-vendor-quick-pay"
+            >
+              為此供應商付款
+            </button>
+          {/if}
+
+          <div class="filter-group">
+            <label for="filter-ap-settlement">結算狀態：</label>
+            <select id="filter-ap-settlement" bind:value={filterApSettlementStatus} onchange={refreshAccountsPayable}>
+              <option value="all">全部結算狀態</option>
+              <option value="unpaid">未付 (unpaid)</option>
+              <option value="partially_paid">部分付款 (partially_paid)</option>
+              <option value="paid">已付清 (paid)</option>
+            </select>
+          </div>
+
+          <div class="filter-group">
+            <label for="filter-ap-status">狀態：</label>
+            <select id="filter-ap-status" bind:value={filterApStatus} onchange={refreshAccountsPayable}>
+              <option value="all">全部狀態</option>
+              <option value="open">有效 (open)</option>
+              <option value="voided">已作廢 (voided)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-container">
+        {#if isLoading}
+          <div class="empty-state">資料載入中...</div>
+        {:else if accountsPayableList.length === 0}
+          <div class="empty-state">
+            <p>目前尚無應付帳款紀錄</p>
+          </div>
+        {:else}
+          <table class="data-table" id="table-accounts-payable">
+            <thead>
+              <tr>
+                <th>來源單號</th>
+                <th>來源類型</th>
+                <th>供應商</th>
+                <th>外部單號</th>
+                <th>單據日</th>
+                <th>到期日</th>
+                <th class="text-right">應付總額</th>
+                <th class="text-right">已付金額</th>
+                <th class="text-right">未付餘額</th>
+                <th>結算狀態</th>
+                <th>單據狀態</th>
+                <th class="text-center">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each accountsPayableList as ap}
+                <tr class={ap.status === 'voided' ? 'row-voided' : ''}>
+                  <td class="font-mono font-medium">
+                    {#if ap.source_type === 'vendor_bill'}
+                      <button class="link-btn font-mono" onclick={() => jumpToVendorBill(ap.source_id)}>{ap.source_number}</button>
+                    {:else if ap.source_type === 'opening_balance'}
+                      <button class="link-btn font-mono" onclick={() => jumpToOpeningPayable(ap.source_id)}>{ap.source_number}</button>
+                    {:else}
+                      {ap.source_number}
+                    {/if}
+                  </td>
+                  <td>
+                    {ap.source_type === 'vendor_bill' ? '請款單' : (ap.source_type === 'opening_balance' ? '期初應付' : ap.source_type)}
+                  </td>
+                  <td>{ap.vendor_name_snapshot}</td>
+                  <td class="font-mono text-muted">{ap.external_reference || '-'}</td>
+                  <td>{ap.document_date}</td>
+                  <td>{ap.due_date}</td>
+                  <td class="text-right">{formatCurrency(ap.amount)}</td>
+                  <td class="text-right">{formatCurrency(ap.paid_amount || 0)}</td>
+                  <td class="text-right font-medium">{formatCurrency(ap.outstanding_amount)}</td>
+                  <td>
+                    {#if ap.settlement_status === 'unpaid'}
+                      <span class="badge badge-unpaid">未付</span>
+                    {:else if ap.settlement_status === 'partially_paid'}
+                      <span class="badge badge-partial">部分付款</span>
+                    {:else if ap.settlement_status === 'paid'}
+                      <span class="badge badge-paid">已付清</span>
+                    {:else}
+                      <span class="badge">{ap.settlement_status}</span>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if ap.status === 'open'}
+                      <span class="badge badge-success">有效</span>
+                    {:else}
+                      <span class="badge badge-danger">已作廢</span>
+                    {/if}
+                  </td>
+                  <td class="text-center">
+                    <div class="btn-group-sm">
+                      {#if ap.status === 'open' && ap.outstanding_amount > 0}
+                        <button 
+                          class="btn-action text-primary font-medium" 
+                          onclick={() => initiatePaymentFromAp(ap)}
+                          id={`btn-pay-ap-${ap.id}`}
+                        >
+                          付款
+                        </button>
+                      {/if}
+                      <button 
+                        class="btn-action text-muted" 
+                        onclick={() => openApDetailModal(ap.id)}
+                      >
+                        核銷歷程
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+
+    <!-- ==================================================== -->
+    <!-- SUBTAB 3: 期初應付 (Opening Payables) -->
+    <!-- ==================================================== -->
+    {:else if activeSubTab === 'opening-payables'}
+      <div class="toolbar">
+        <div class="filters">
+          <div class="filter-group">
+            <label for="filter-oap-vendor">供應商：</label>
+            <select id="filter-oap-vendor" bind:value={filterOapVendorId} onchange={refreshOpeningPayables}>
               <option value="">全部供應商</option>
               {#each availableVendors as v}
                 <option value={v.id}>{v.name}</option>
@@ -250,8 +1554,8 @@
           </div>
 
           <div class="filter-group">
-            <label for="filter-status">狀態：</label>
-            <select id="filter-status" bind:value={filterStatus} onchange={refreshList}>
+            <label for="filter-oap-status">狀態：</label>
+            <select id="filter-oap-status" bind:value={filterOapStatus} onchange={refreshOpeningPayables}>
               <option value="all">全部狀態</option>
               <option value="open">有效 (open)</option>
               <option value="voided">已作廢 (voided)</option>
@@ -260,7 +1564,7 @@
         </div>
 
         <div class="actions">
-          <button class="btn btn-primary" onclick={openCreateModal} id="btn-create-opening-payable">
+          <button class="btn btn-primary" onclick={openCreateOapModal} id="btn-create-opening-payable">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
@@ -270,14 +1574,13 @@
         </div>
       </div>
 
-      <!-- Table -->
       <div class="table-container">
         {#if isLoading}
           <div class="empty-state">資料載入中...</div>
         {:else if openingPayablesList.length === 0}
           <div class="empty-state">
             <p>目前尚無期初應付帳款紀錄</p>
-            <button class="btn btn-secondary" onclick={openCreateModal}>立即新增期初欠款</button>
+            <button class="btn btn-secondary" onclick={openCreateOapModal}>立即新增期初欠款</button>
           </div>
         {:else}
           <table class="data-table">
@@ -315,13 +1618,22 @@
                   <td class="text-muted text-sm">{oap.note || '-'}</td>
                   <td class="text-center">
                     {#if oap.status === 'open'}
-                      <button 
-                        class="btn-action text-danger" 
-                        onclick={() => openVoidModal(oap)}
-                        title="作廢此期初應付"
-                      >
-                        作廢
-                      </button>
+                      <div class="btn-group-sm">
+                        <button 
+                          class="btn-action text-primary font-medium" 
+                          onclick={() => initiatePaymentFromOap(oap)}
+                          title="為此期初應付付款"
+                        >
+                          付款
+                        </button>
+                        <button 
+                          class="btn-action text-danger" 
+                          onclick={() => openVoidOapModal(oap)}
+                          title="作廢此期初應付"
+                        >
+                          作廢
+                        </button>
+                      </div>
                     {:else}
                       <span class="text-xs text-muted" title={oap.void_reason || ''}>
                         {oap.void_reason ? `原因: ${oap.void_reason}` : '已作廢'}
@@ -337,26 +1649,252 @@
     {/if}
   </div>
 
-  <!-- Create Modal -->
-  {#if isCreateModalOpen}
-    <div class="modal-backdrop" onclick={closeCreateModal} onkeydown={(e) => e.key === 'Escape' && closeCreateModal()} role="presentation">
+  <!-- ==================================================== -->
+  <!-- MODAL: 新增付款單 (Create Payment Modal) -->
+  <!-- ==================================================== -->
+  {#if isCreatePayModalOpen}
+    <div class="modal-backdrop" onclick={closeCreatePayModal} onkeydown={(e) => e.key === 'Escape' && closeCreatePayModal()} role="presentation">
       <div class="modal-box" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
         <div class="modal-header">
-          <h3>新增期初應付帳款</h3>
-          <button class="btn-close" onclick={closeCreateModal}>&times;</button>
+          <h3>新增付款單</h3>
+          <button class="btn-close" onclick={closeCreatePayModal}>&times;</button>
         </div>
 
         <div class="modal-body">
-          {#if createError}
-            <div class="alert alert-danger" id="create-error-msg">{createError}</div>
+          {#if newPayError}
+            <div class="alert alert-danger" id="new-pay-error-msg">{newPayError}</div>
           {/if}
 
           <div class="form-group">
-            <label for="create-vendor">供應商 <span class="required">*</span></label>
+            <label for="new-pay-vendor">供應商 <span class="required">*</span></label>
+            <select id="new-pay-vendor" bind:value={newPayVendorId} required>
+              <option value="" disabled>請選擇供應商</option>
+              {#each availableVendors as v}
+                <option value={v.id}>{v.name}</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="new-pay-date">付款日 <span class="required">*</span></label>
+              <input 
+                type="date" 
+                id="new-pay-date" 
+                bind:value={newPayDate} 
+                max={getTodayDateString()} 
+                required 
+              />
+              <span class="help-text">不可晚於今天</span>
+            </div>
+
+            <div class="form-group">
+              <label for="new-pay-method">付款方式 <span class="required">*</span></label>
+              <select id="new-pay-method" bind:value={newPayMethod}>
+                <option value="bank_transfer">銀行轉帳</option>
+                <option value="cash">現金</option>
+                <option value="check">支票</option>
+                <option value="other">其他</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="new-pay-ref">參考資訊</label>
+            <input 
+              type="text" 
+              id="new-pay-ref" 
+              bind:value={newPayRef} 
+              placeholder="匯款末五碼、支票號碼或交易序號" 
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="new-pay-note">備註</label>
+            <input 
+              type="text" 
+              id="new-pay-note" 
+              bind:value={newPayNote} 
+              placeholder="付款單備註說明（選填）" 
+            />
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick={closeCreatePayModal} disabled={newPaySubmitting}>取消</button>
+          <button class="btn btn-primary" onclick={handleCreatePaySubmit} disabled={newPaySubmitting} id="btn-submit-create-payment">
+            {newPaySubmitting ? '建立中...' : '建立草稿並進行核銷'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ==================================================== -->
+  <!-- MODAL: 作廢付款單 (Void Payment Modal) -->
+  <!-- ==================================================== -->
+  {#if isVoidPayModalOpen}
+    <div class="modal-backdrop" onclick={closeVoidPayModal} onkeydown={(e) => e.key === 'Escape' && closeVoidPayModal()} role="presentation">
+      <div class="modal-box modal-box-sm" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+        <div class="modal-header">
+          <h3>作廢付款單</h3>
+          <button class="btn-close" onclick={closeVoidPayModal}>&times;</button>
+        </div>
+
+        <div class="modal-body">
+          {#if voidPayError}
+            <div class="alert alert-danger" id="void-pay-error-msg">{voidPayError}</div>
+          {/if}
+
+          <p class="text-sm">
+            確定要作廢付款單 <strong class="font-mono">{voidPayTarget?.payment_number}</strong> 嗎？
+          </p>
+
+          <div class="alert alert-warning text-xs">
+            ⚠️ 作廢後將自動解除所有應付核銷，並將應付帳款未付餘額完全恢復。
+          </div>
+
+          <div class="form-group">
+            <label for="void-pay-reason">作廢原因 <span class="required">*</span></label>
+            <textarea 
+              id="void-pay-reason" 
+              bind:value={voidPayReason} 
+              placeholder="請填寫作廢原因（必填）" 
+              rows="3"
+              required
+            ></textarea>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick={closeVoidPayModal} disabled={voidPaySubmitting}>取消</button>
+          <button class="btn btn-danger" onclick={handleVoidPaySubmit} disabled={voidPaySubmitting} id="btn-submit-void-payment">
+            {voidPaySubmitting ? '作廢中...' : '確認作廢'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ==================================================== -->
+  <!-- MODAL: 應付帳款詳情與核銷歷程 (AP Detail Modal) -->
+  <!-- ==================================================== -->
+  {#if apDetailModalOpen}
+    <div class="modal-backdrop" onclick={closeApDetailModal} onkeydown={(e) => e.key === 'Escape' && closeApDetailModal()} role="presentation">
+      <div class="modal-box modal-box-lg" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+        <div class="modal-header">
+          <h3>應付帳款詳情與核銷歷程</h3>
+          <button class="btn-close" onclick={closeApDetailModal}>&times;</button>
+        </div>
+
+        <div class="modal-body">
+          {#if isApDetailLoading || !currentApDetail}
+            <div class="empty-state">載入中...</div>
+          {:else}
+            <div class="info-grid mb-3">
+              <div class="info-item">
+                <span class="info-label">來源單號</span>
+                <span class="info-value font-mono font-medium">{currentApDetail.source_number}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">供應商</span>
+                <span class="info-value">{currentApDetail.vendor_name_snapshot}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">應付總額</span>
+                <span class="info-value font-medium">{formatCurrency(currentApDetail.amount)}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">已付金額</span>
+                <span class="info-value font-medium text-success">{formatCurrency(currentApDetail.paid_amount || 0)}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">未付餘額</span>
+                <span class="info-value font-medium text-danger">{formatCurrency(currentApDetail.outstanding_amount)}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">結算狀態</span>
+                <span class="info-value">
+                  <span class="badge badge-{currentApDetail.settlement_status}">
+                    {getSettlementStatusLabel(currentApDetail.settlement_status)}
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <h4 class="mt-4 mb-2">核銷此筆應付之付款單紀錄</h4>
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>付款單號</th>
+                    <th>付款日期</th>
+                    <th class="text-right">核銷金額</th>
+                    <th>付款單狀態</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#if !currentApDetail.allocations || currentApDetail.allocations.length === 0}
+                    <tr>
+                      <td colspan="4" class="text-center text-muted py-4">尚無付款單核銷紀錄</td>
+                    </tr>
+                  {:else}
+                    {#each currentApDetail.allocations as pa}
+                      <tr>
+                        <td class="font-mono">
+                          <button class="link-btn font-mono" onclick={() => { closeApDetailModal(); activeSubTab = 'vendor-payments'; viewPaymentDetail(pa.payment_id); }}>
+                            {pa.payment_number}
+                          </button>
+                        </td>
+                        <td>{pa.payment_date || '-'}</td>
+                        <td class="text-right font-medium">{formatCurrency(pa.amount)}</td>
+                        <td>
+                          {#if pa.payment_status === 'posted'}
+                            <span class="badge badge-posted">已過帳</span>
+                          {:else if pa.payment_status === 'voided'}
+                            <span class="badge badge-voided">已作廢</span>
+                          {:else}
+                            <span class="badge">{pa.payment_status}</span>
+                          {/if}
+                        </td>
+                      </tr>
+                    {/each}
+                  {/if}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick={closeApDetailModal}>關閉</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- ==================================================== -->
+  <!-- MODAL: 新增期初應付 (Create Opening Payable Modal) -->
+  <!-- ==================================================== -->
+  {#if isCreateOapModalOpen}
+    <div class="modal-backdrop" onclick={closeCreateOapModal} onkeydown={(e) => e.key === 'Escape' && closeCreateOapModal()} role="presentation">
+      <div class="modal-box" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
+        <div class="modal-header">
+          <h3>新增期初應付帳款</h3>
+          <button class="btn-close" onclick={closeCreateOapModal}>&times;</button>
+        </div>
+
+        <div class="modal-body">
+          {#if createOapError}
+            <div class="alert alert-danger" id="create-oap-error-msg">{createOapError}</div>
+          {/if}
+
+          <div class="form-group">
+            <label for="create-oap-vendor">供應商 <span class="required">*</span></label>
             <select 
-              id="create-vendor" 
-              bind:value={createVendorId} 
-              onchange={handleVendorChange}
+              id="create-oap-vendor" 
+              bind:value={createOapVendorId} 
+              onchange={handleOapVendorChange}
               required
             >
               <option value="" disabled>請選擇供應商</option>
@@ -369,11 +1907,11 @@
           </div>
 
           <div class="form-group">
-            <label for="create-orig-ref">原單號 / 發票號 <span class="required">*</span></label>
+            <label for="create-oap-orig-ref">原單號 / 發票號 <span class="required">*</span></label>
             <input 
               type="text" 
-              id="create-orig-ref" 
-              bind:value={createOriginalReference} 
+              id="create-oap-orig-ref" 
+              bind:value={createOapOriginalReference} 
               placeholder="舊系統單號或發票號碼"
               required 
             />
@@ -381,46 +1919,46 @@
 
           <div class="form-row">
             <div class="form-group">
-              <label for="create-doc-date">原單據日 <span class="required">*</span></label>
+              <label for="create-oap-doc-date">原單據日 <span class="required">*</span></label>
               <input 
                 type="date" 
-                id="create-doc-date" 
-                bind:value={createDocumentDate} 
-                onchange={handleDocDateChange}
+                id="create-oap-doc-date" 
+                bind:value={createOapDocumentDate} 
+                onchange={handleOapDocDateChange}
                 required 
               />
               <span class="help-text">不可晚於今天；有採購單時須早於首張採購單</span>
             </div>
 
             <div class="form-group">
-              <label for="create-due-date">到期日 <span class="required">*</span></label>
+              <label for="create-oap-due-date">到期日 <span class="required">*</span></label>
               <input 
                 type="date" 
-                id="create-due-date" 
-                bind:value={createDueDate} 
+                id="create-oap-due-date" 
+                bind:value={createOapDueDate} 
                 required 
               />
               <span class="help-text">不可早於單據日</span>
             </div>
           </div>
 
-          {#if paymentTermsHint}
+          {#if oapPaymentTermsHint}
             <div class="terms-hint">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="10"></circle>
                 <line x1="12" y1="16" x2="12" y2="12"></line>
                 <line x1="12" y1="8" x2="12.01" y2="8"></line>
               </svg>
-              {paymentTermsHint}
+              {oapPaymentTermsHint}
             </div>
           {/if}
 
           <div class="form-group">
-            <label for="create-amount">未付金額 (含稅) <span class="required">*</span></label>
+            <label for="create-oap-amount">未付金額 (含稅) <span class="required">*</span></label>
             <input 
               type="number" 
-              id="create-amount" 
-              bind:value={createAmount} 
+              id="create-oap-amount" 
+              bind:value={createOapAmount} 
               placeholder="0.00" 
               step="0.01" 
               min="0.01"
@@ -429,64 +1967,62 @@
           </div>
 
           <div class="form-group">
-            <label for="create-note">備註</label>
+            <label for="create-oap-note">備註</label>
             <input 
               type="text" 
-              id="create-note" 
-              bind:value={createNote} 
+              id="create-oap-note" 
+              bind:value={createOapNote} 
               placeholder="期初未結備註說明（選填）" 
             />
           </div>
         </div>
 
         <div class="modal-footer">
-          <button class="btn btn-secondary" onclick={closeCreateModal} disabled={createSubmitting}>取消</button>
-          <button class="btn btn-primary" onclick={handleCreateSubmit} disabled={createSubmitting} id="btn-submit-create">
-            {createSubmitting ? '建立中...' : '確定建立'}
+          <button class="btn btn-secondary" onclick={closeCreateOapModal} disabled={createOapSubmitting}>取消</button>
+          <button class="btn btn-primary" onclick={handleCreateOapSubmit} disabled={createOapSubmitting} id="btn-submit-create-oap">
+            {createOapSubmitting ? '建立中...' : '確定建立'}
           </button>
         </div>
       </div>
     </div>
   {/if}
 
-  <!-- Void Modal -->
-  {#if isVoidModalOpen && voidTargetOap}
-    <div class="modal-backdrop" onclick={closeVoidModal} onkeydown={(e) => e.key === 'Escape' && closeVoidModal()} role="presentation">
+  <!-- ==================================================== -->
+  <!-- MODAL: 作廢期初應付 (Void Opening Payable Modal) -->
+  <!-- ==================================================== -->
+  {#if isVoidOapModalOpen}
+    <div class="modal-backdrop" onclick={closeVoidOapModal} onkeydown={(e) => e.key === 'Escape' && closeVoidOapModal()} role="presentation">
       <div class="modal-box modal-box-sm" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
         <div class="modal-header">
           <h3>作廢期初應付帳款</h3>
-          <button class="btn-close" onclick={closeVoidModal}>&times;</button>
+          <button class="btn-close" onclick={closeVoidOapModal}>&times;</button>
         </div>
 
         <div class="modal-body">
-          <p class="text-sm mb-3">
-            確定要作廢期初應付單 <strong class="font-mono">{voidTargetOap.opening_number}</strong>
-            （供應商：{voidTargetOap.vendor_name_snapshot}，金額：{formatCurrency(voidTargetOap.amount)}）？
-          </p>
-          <p class="text-xs text-muted mb-3">
-            作廢後將同步作廢關聯之應付帳款。若此單據已有付款核銷，必須先作廢付款單才可作廢此單。
-          </p>
-
-          {#if voidError}
-            <div class="alert alert-danger" id="void-error-msg">{voidError}</div>
+          {#if voidOapError}
+            <div class="alert alert-danger" id="void-oap-error-msg">{voidOapError}</div>
           {/if}
 
+          <p class="text-sm">
+            確定要作廢期初單號 <strong class="font-mono">{voidTargetOap?.opening_number}</strong>（{voidTargetOap?.vendor_name_snapshot}，金額: {formatCurrency(voidTargetOap?.amount || 0)}）嗎？
+          </p>
+
           <div class="form-group">
-            <label for="void-reason">作廢原因 <span class="required">*</span></label>
+            <label for="void-oap-reason">作廢原因 <span class="required">*</span></label>
             <textarea 
-              id="void-reason" 
-              bind:value={voidReason} 
-              rows="3" 
+              id="void-oap-reason" 
+              bind:value={voidOapReason} 
               placeholder="請填寫作廢原因（必填）" 
+              rows="3"
               required
             ></textarea>
           </div>
         </div>
 
         <div class="modal-footer">
-          <button class="btn btn-secondary" onclick={closeVoidModal} disabled={voidSubmitting}>取消</button>
-          <button class="btn btn-danger" onclick={handleVoidSubmit} disabled={voidSubmitting} id="btn-submit-void">
-            {voidSubmitting ? '作廢中...' : '確定作廢'}
+          <button class="btn btn-secondary" onclick={closeVoidOapModal} disabled={voidOapSubmitting}>取消</button>
+          <button class="btn btn-danger" onclick={handleVoidOapSubmit} disabled={voidOapSubmitting} id="btn-submit-void-oap">
+            {voidOapSubmitting ? '作廢中...' : '確認作廢'}
           </button>
         </div>
       </div>
@@ -592,6 +2128,7 @@
     display: flex;
     gap: 1rem;
     align-items: center;
+    flex-wrap: wrap;
   }
 
   .filter-group {
@@ -601,7 +2138,7 @@
     font-size: 0.875rem;
   }
 
-  .filter-group select {
+  .filter-group select, .filter-group input {
     padding: 0.375rem 0.75rem;
     border: 1px solid var(--color-border, #cbd5e1);
     border-radius: 6px;
@@ -612,7 +2149,7 @@
   .table-container {
     border: 1px solid var(--color-border, #e2e8f0);
     border-radius: 8px;
-    overflow: hidden;
+    overflow-x: auto;
     background: #ffffff;
   }
 
@@ -629,6 +2166,7 @@
     font-weight: 600;
     color: #475569;
     border-bottom: 1px solid #e2e8f0;
+    white-space: nowrap;
   }
 
   .data-table td {
@@ -643,6 +2181,10 @@
   .row-voided {
     opacity: 0.65;
     background-color: #fdf2f2;
+  }
+
+  .row-selected {
+    background-color: #f0fdf4;
   }
 
   .font-mono {
@@ -677,6 +2219,10 @@
     color: #dc2626;
   }
 
+  .text-success {
+    color: #15803d;
+  }
+
   .badge {
     display: inline-block;
     padding: 0.25rem 0.5rem;
@@ -685,14 +2231,35 @@
     font-weight: 500;
   }
 
-  .badge-success {
+  .badge-success, .badge-paid, .badge-posted {
     background-color: #dcfce7;
     color: #15803d;
   }
 
-  .badge-danger {
+  .badge-danger, .badge-voided {
     background-color: #fee2e2;
     color: #b91c1c;
+  }
+
+  .badge-draft {
+    background-color: #f1f5f9;
+    color: #475569;
+  }
+
+  .badge-cancelled {
+    background-color: #f3f4f6;
+    color: #6b7280;
+    text-decoration: line-through;
+  }
+
+  .badge-unpaid {
+    background-color: #fef3c7;
+    color: #92400e;
+  }
+
+  .badge-partial {
+    background-color: #e0f2fe;
+    color: #0369a1;
   }
 
   .btn {
@@ -706,6 +2273,11 @@
     border: none;
     cursor: pointer;
     transition: background 0.15s ease;
+  }
+
+  .btn-sm {
+    padding: 0.25rem 0.625rem;
+    font-size: 0.8125rem;
   }
 
   .btn-primary {
@@ -736,6 +2308,15 @@
     background-color: #b91c1c;
   }
 
+  .btn-outline {
+    background: transparent;
+    border: 1px solid currentColor;
+  }
+
+  .btn-outline:hover:not(:disabled) {
+    background-color: #fee2e2;
+  }
+
   .btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
@@ -752,7 +2333,26 @@
   }
 
   .btn-action:hover {
-    background-color: #fee2e2;
+    background-color: #f1f5f9;
+  }
+
+  .btn-group-sm {
+    display: inline-flex;
+    gap: 0.25rem;
+  }
+
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #0284c7;
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: inherit;
+  }
+
+  .link-btn:hover {
+    color: #0369a1;
   }
 
   .empty-state {
@@ -765,7 +2365,142 @@
     margin-bottom: 1rem;
   }
 
-  /* Modal */
+  /* Card */
+  .card {
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05);
+    overflow: hidden;
+  }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--color-border, #e2e8f0);
+    background-color: #f8fafc;
+  }
+
+  .card-header h4 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .card-body {
+    padding: 1.25rem;
+  }
+
+  .card-body.p-0 {
+    padding: 0;
+  }
+
+  .card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.25rem;
+    border-top: 1px solid var(--color-border, #e2e8f0);
+    background-color: #f8fafc;
+  }
+
+  .summary-footer {
+    font-size: 0.9375rem;
+  }
+
+  .total-label {
+    font-weight: 500;
+    color: #475569;
+  }
+
+  .total-amount {
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: #0284c7;
+  }
+
+  .editor-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.25rem;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .editor-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .editor-title-wrap h3 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+  }
+
+  .editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .alloc-input-wrap {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .alloc-input-wrap input {
+    width: 100%;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.875rem;
+    text-align: right;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+  }
+
+  .alloc-input-wrap input.input-error {
+    border-color: #dc2626 !important;
+    background-color: #fef2f2 !important;
+    color: #dc2626 !important;
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.2);
+  }
+
+  .error-hint {
+    color: #dc2626;
+    font-size: 0.75rem;
+    margin-top: 0.25rem;
+    font-weight: 500;
+  }
+
+  .info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+
+  .info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .info-label {
+    font-size: 0.75rem;
+    color: #64748b;
+  }
+
+  .info-value {
+    font-size: 0.9375rem;
+    color: #1e293b;
+  }
+
+  /* Modals */
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -787,6 +2522,10 @@
 
   .modal-box-sm {
     max-width: 440px;
+  }
+
+  .modal-box-lg {
+    max-width: 720px;
   }
 
   .modal-header {
@@ -844,6 +2583,12 @@
     gap: 1rem;
   }
 
+  .form-row-3 {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1rem;
+  }
+
   label {
     font-size: 0.8125rem;
     font-weight: 500;
@@ -866,6 +2611,12 @@
     outline: none;
     border-color: #0284c7;
     box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
+  }
+
+  .bg-readonly {
+    background-color: #f8fafc;
+    color: #64748b;
+    cursor: not-allowed;
   }
 
   .help-text {
@@ -897,7 +2648,23 @@
     border: 1px solid #fecaca;
   }
 
-  .mb-3 {
-    margin-bottom: 0.75rem;
+  .alert-warning {
+    background-color: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fde68a;
   }
+
+  .alert-info {
+    background-color: #e0f2fe;
+    color: #0369a1;
+    border: 1px solid #bae6fd;
+  }
+
+  .mb-2 { margin-bottom: 0.5rem; }
+  .mb-3 { margin-bottom: 0.75rem; }
+  .mb-4 { margin-bottom: 1rem; }
+  .mt-3 { margin-top: 0.75rem; }
+  .mt-4 { margin-top: 1rem; }
+  .ml-2 { margin-left: 0.5rem; }
+  .py-4 { padding-top: 1rem; padding-bottom: 1rem; }
 </style>

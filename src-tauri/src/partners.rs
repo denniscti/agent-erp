@@ -34,6 +34,7 @@ pub fn create_partners_table(conn: &rusqlite::Connection) -> Result<(), rusqlite
             name TEXT NOT NULL,
             is_customer INTEGER NOT NULL DEFAULT 1,
             is_vendor INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
             tax_id TEXT,
             payment_terms_type TEXT,
             payment_terms_days INTEGER,
@@ -44,6 +45,11 @@ pub fn create_partners_table(conn: &rusqlite::Connection) -> Result<(), rusqlite
 
     let _ = conn.execute(
         "ALTER TABLE partners ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
         [],
     );
 

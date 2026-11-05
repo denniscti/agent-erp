@@ -213,6 +213,15 @@ pub struct ListOpeningPayablesFilter {
 // ==========================================
 
 pub fn create_opening_payables_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let _ = conn.execute(
+        "ALTER TABLE tenants ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS opening_payables (
             id TEXT PRIMARY KEY,
@@ -256,14 +265,39 @@ pub fn create_opening_payables_tables(conn: &Connection) -> Result<(), rusqlite:
 // ==========================================
 
 fn validate_tenant_active(conn: &Connection, tenant_id: &str) -> Result<(), OpeningPayableError> {
-    let mut stmt = conn
-        .prepare("SELECT status FROM tenants WHERE id = ?1")
-        .map_err(|e| OpeningPayableError::DatabaseError(e.to_string()))?;
-    let status: Result<String, _> = stmt.query_row(params![tenant_id], |r| r.get(0));
-    match status {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(OpeningPayableError::EmptyTenantId);
+    }
+    let status_res: Result<String, rusqlite::Error> = conn.query_row(
+        "SELECT status FROM tenants WHERE id = ?1",
+        params![tid],
+        |r| r.get(0),
+    );
+    match status_res {
         Ok(s) if s == "active" => Ok(()),
         Ok(_) => Err(OpeningPayableError::TenantNotActive),
         Err(rusqlite::Error::QueryReturnedNoRows) => Err(OpeningPayableError::TenantNotFound),
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+            if msg.contains("no such column: status") =>
+        {
+            let _ = conn.execute(
+                "ALTER TABLE tenants ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+                [],
+            );
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM tenants WHERE id = ?1",
+                    params![tid],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if count == 0 {
+                Err(OpeningPayableError::TenantNotFound)
+            } else {
+                Ok(())
+            }
+        }
         Err(e) => Err(OpeningPayableError::DatabaseError(e.to_string())),
     }
 }
@@ -282,13 +316,30 @@ fn resolve_vendor_snapshot(
     tenant_id: &str,
     vendor_partner_id: &str,
 ) -> Result<String, OpeningPayableError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT name, is_vendor, is_active 
-             FROM partners 
-             WHERE id = ?1 AND tenant_id = ?2",
-        )
-        .map_err(|e| OpeningPayableError::DatabaseError(e.to_string()))?;
+    let prep_res = conn.prepare(
+        "SELECT name, is_vendor, is_active 
+         FROM partners 
+         WHERE id = ?1 AND tenant_id = ?2",
+    );
+
+    let mut stmt = match prep_res {
+        Ok(s) => s,
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg)))
+            if msg.contains("no such column: is_active") =>
+        {
+            let _ = conn.execute(
+                "ALTER TABLE partners ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1",
+                [],
+            );
+            conn.prepare(
+                "SELECT name, is_vendor, is_active 
+                 FROM partners 
+                 WHERE id = ?1 AND tenant_id = ?2",
+            )
+            .map_err(|e| OpeningPayableError::DatabaseError(e.to_string()))?
+        }
+        Err(e) => return Err(OpeningPayableError::DatabaseError(e.to_string())),
+    };
 
     let res = stmt.query_row(params![vendor_partner_id, tenant_id], |row| {
         Ok((

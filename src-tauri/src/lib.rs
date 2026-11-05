@@ -168,7 +168,8 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
             code TEXT NOT NULL UNIQUE,
             name TEXT NOT NULL,
             company_name TEXT NOT NULL,
-            tax_id TEXT
+            tax_id TEXT,
+            status TEXT NOT NULL DEFAULT 'active'
         )",
         [],
     )
@@ -176,6 +177,11 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     // Migration to add tax_id column to tenants if it does not exist
     let _ = conn.execute("ALTER TABLE tenants ADD COLUMN tax_id TEXT", []);
+    // Migration to add status column to tenants if it does not exist
+    let _ = conn.execute(
+        "ALTER TABLE tenants ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+        [],
+    );
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS user_tenants (

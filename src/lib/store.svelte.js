@@ -209,6 +209,18 @@ export const appState = $state({
   /** @type {any[]} */
   unbilledReceivedOrders: [],
 
+  // Vendor Payments & Accounts Payable cache (Issue #203)
+  /** @type {any[]} */
+  vendorPayments: [],
+  /** @type {any | null} */
+  currentVendorPaymentDetail: null,
+  /** @type {string | null} */
+  selectedVendorPaymentId: null,
+  /** @type {any[]} */
+  accountsPayable: [],
+  /** @type {any | null} */
+  currentAccountPayableDetail: null,
+
   // Lightweight task confirmation state
   /** @type {import('./workflow/types.js').PendingConfirmation | null} */
   pendingTaskConfirmation: null
@@ -4263,5 +4275,323 @@ export async function voidVendorBillAction(billId, voidReason) {
     throw err;
   }
 }
+
+// ==========================================
+// Vendor Payments & Accounts Payable Actions (Issue #203)
+// ==========================================
+
+/**
+ * Load vendor payments list with filter
+ * @param {any} [filter]
+ * @returns {Promise<any[]>}
+ */
+export async function loadVendorPaymentsAction(filter = {}) {
+  try {
+    const list = await invoke('list_vendor_payments', {
+      filter,
+      ...filter
+    });
+    appState.vendorPayments = list || [];
+    return appState.vendorPayments;
+  } catch (err) {
+    console.error("Failed to load vendor payments:", err);
+    throw err;
+  }
+}
+
+/**
+ * Get vendor payment detail by ID
+ * @param {string} paymentId
+ * @returns {Promise<any>}
+ */
+export async function getVendorPaymentAction(paymentId) {
+  try {
+    const detail = await invoke('get_vendor_payment', {
+      payment_id: paymentId,
+      paymentId,
+      id: paymentId
+    });
+    appState.currentVendorPaymentDetail = detail;
+    appState.selectedVendorPaymentId = detail.id;
+    return detail;
+  } catch (err) {
+    console.error("Failed to get vendor payment detail:", err);
+    throw err;
+  }
+}
+
+/**
+ * Create vendor payment draft
+ * @param {any} input
+ * @returns {Promise<any>}
+ */
+export async function createVendorPaymentAction(input) {
+  try {
+    const detail = await invoke('create_vendor_payment', { input });
+    showToast(`建立付款單「${detail.payment_number}」成功！`);
+    appState.currentVendorPaymentDetail = detail;
+    appState.selectedVendorPaymentId = detail.id;
+    await loadVendorPaymentsAction();
+    return detail;
+  } catch (err) {
+    console.error("Failed to create vendor payment:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update vendor payment header
+ * @param {any} input
+ * @returns {Promise<any>}
+ */
+export async function updateVendorPaymentHeaderAction(input) {
+  try {
+    const detail = await invoke('update_vendor_payment_header', { input });
+    showToast(`付款單表頭更新成功！`);
+    appState.currentVendorPaymentDetail = detail;
+    await loadVendorPaymentsAction();
+    return detail;
+  } catch (err) {
+    console.error("Failed to update vendor payment header:", err);
+    throw err;
+  }
+}
+
+/**
+ * Add allocation to draft vendor payment
+ * @param {string} paymentId
+ * @param {string} accountPayableId
+ * @param {number} amount
+ * @returns {Promise<any>}
+ */
+export async function addVendorPaymentAllocationAction(paymentId, accountPayableId, amount) {
+  try {
+    const detail = await invoke('add_vendor_payment_allocation', {
+      payment_id: paymentId,
+      paymentId,
+      account_payable_id: accountPayableId,
+      accountPayableId,
+      amount,
+      input: {
+        payment_id: paymentId,
+        paymentId,
+        account_payable_id: accountPayableId,
+        accountPayableId,
+        amount
+      }
+    });
+    appState.currentVendorPaymentDetail = detail;
+    return detail;
+  } catch (err) {
+    console.error("Failed to add vendor payment allocation:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update allocation amount on draft vendor payment
+ * @param {string} paymentId
+ * @param {string} allocationId
+ * @param {number} amount
+ * @returns {Promise<any>}
+ */
+export async function updateVendorPaymentAllocationAction(paymentId, allocationId, amount) {
+  try {
+    const detail = await invoke('update_vendor_payment_allocation', {
+      payment_id: paymentId,
+      paymentId,
+      allocation_id: allocationId,
+      allocationId,
+      amount,
+      input: {
+        payment_id: paymentId,
+        paymentId,
+        allocation_id: allocationId,
+        allocationId,
+        amount
+      }
+    });
+    appState.currentVendorPaymentDetail = detail;
+    return detail;
+  } catch (err) {
+    console.error("Failed to update vendor payment allocation:", err);
+    throw err;
+  }
+}
+
+/**
+ * Remove allocation from draft vendor payment
+ * @param {string} paymentId
+ * @param {string} allocationId
+ * @returns {Promise<any>}
+ */
+export async function removeVendorPaymentAllocationAction(paymentId, allocationId) {
+  try {
+    const detail = await invoke('remove_vendor_payment_allocation', {
+      payment_id: paymentId,
+      paymentId,
+      allocation_id: allocationId,
+      allocationId,
+      input: {
+        payment_id: paymentId,
+        paymentId,
+        allocation_id: allocationId,
+        allocationId
+      }
+    });
+    appState.currentVendorPaymentDetail = detail;
+    return detail;
+  } catch (err) {
+    console.error("Failed to remove vendor payment allocation:", err);
+    throw err;
+  }
+}
+
+/**
+ * Post vendor payment (draft -> posted)
+ * @param {string} paymentId
+ * @returns {Promise<any>}
+ */
+export async function postVendorPaymentAction(paymentId) {
+  try {
+    const detail = await invoke('post_vendor_payment', {
+      payment_id: paymentId,
+      paymentId,
+      id: paymentId
+    });
+    showToast(`付款單「${detail.payment_number}」已成功過帳！`);
+    appState.currentVendorPaymentDetail = detail;
+    await loadVendorPaymentsAction();
+    return detail;
+  } catch (err) {
+    console.error("Failed to post vendor payment:", err);
+    throw err;
+  }
+}
+
+/**
+ * Cancel draft vendor payment (draft -> cancelled)
+ * @param {string} paymentId
+ * @returns {Promise<any>}
+ */
+export async function cancelVendorPaymentAction(paymentId) {
+  try {
+    const detail = await invoke('cancel_vendor_payment', {
+      payment_id: paymentId,
+      paymentId,
+      id: paymentId
+    });
+    showToast(`付款單「${detail.payment_number}」已取消！`);
+    appState.currentVendorPaymentDetail = detail;
+    await loadVendorPaymentsAction();
+    return detail;
+  } catch (err) {
+    console.error("Failed to cancel vendor payment:", err);
+    throw err;
+  }
+}
+
+/**
+ * Void posted vendor payment (posted -> voided)
+ * @param {string} paymentId
+ * @param {string} voidReason
+ * @returns {Promise<any>}
+ */
+export async function voidVendorPaymentAction(paymentId, voidReason) {
+  try {
+    const detail = await invoke('void_vendor_payment', {
+      payment_id: paymentId,
+      paymentId,
+      id: paymentId,
+      void_reason: voidReason,
+      voidReason
+    });
+    showToast(`付款單「${detail.payment_number}」已作廢！`);
+    appState.currentVendorPaymentDetail = detail;
+    await loadVendorPaymentsAction();
+    return detail;
+  } catch (err) {
+    console.error("Failed to void vendor payment:", err);
+    throw err;
+  }
+}
+
+/**
+ * Query accounts payable list with filter without mutating appState.accountsPayable
+ * Suitable for candidate lookup, vendor filtering, or background checks
+ * @param {any} [filter]
+ * @returns {Promise<any[]>}
+ */
+export async function queryAccountsPayableAction(filter = {}) {
+  try {
+    const args = { ...(filter || {}) };
+    if (args.vendor_partner_id && !args.vendorPartnerId) {
+      args.vendorPartnerId = args.vendor_partner_id;
+    }
+    if (args.vendorPartnerId && !args.vendor_partner_id) {
+      args.vendor_partner_id = args.vendorPartnerId;
+    }
+    if (args.settlement_status && !args.settlementStatus) {
+      args.settlementStatus = args.settlement_status;
+    }
+    if (args.settlementStatus && !args.settlement_status) {
+      args.settlement_status = args.settlementStatus;
+    }
+    if (args.due_date_from && !args.dueDateFrom) {
+      args.dueDateFrom = args.due_date_from;
+    }
+    if (args.dueDateFrom && !args.due_date_from) {
+      args.due_date_from = args.dueDateFrom;
+    }
+    if (args.due_date_to && !args.dueDateTo) {
+      args.dueDateTo = args.due_date_to;
+    }
+    if (args.dueDateTo && !args.due_date_to) {
+      args.due_date_to = args.dueDateTo;
+    }
+    const list = await invoke('list_accounts_payable', args);
+    return list || [];
+  } catch (err) {
+    console.error("Failed to query accounts payable:", err);
+    throw err;
+  }
+}
+
+/**
+ * Load accounts payable list with filter into appState.accountsPayable
+ * @param {any} [filter]
+ * @returns {Promise<any[]>}
+ */
+export async function loadAccountsPayableAction(filter = {}) {
+  try {
+    const list = await queryAccountsPayableAction(filter);
+    appState.accountsPayable = list || [];
+    return appState.accountsPayable;
+  } catch (err) {
+    console.error("Failed to load accounts payable:", err);
+    throw err;
+  }
+}
+
+/**
+ * Get account payable detail by ID
+ * @param {string} id
+ * @returns {Promise<any>}
+ */
+export async function getAccountPayableAction(id) {
+  try {
+    const detail = await invoke('get_account_payable', {
+      id,
+      ap_id: id,
+      apId: id
+    });
+    appState.currentAccountPayableDetail = detail;
+    return detail;
+  } catch (err) {
+    console.error("Failed to get account payable detail:", err);
+    throw err;
+  }
+}
+
 
 
