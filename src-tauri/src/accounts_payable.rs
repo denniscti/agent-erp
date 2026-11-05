@@ -337,6 +337,45 @@ pub fn create_accounts_payable_tables(conn: &rusqlite::Connection) -> Result<(),
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS vendor_payments (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            payment_number TEXT NOT NULL,
+            vendor_partner_id TEXT NOT NULL,
+            vendor_name_snapshot TEXT NOT NULL,
+            payment_date TEXT NOT NULL,
+            payment_method TEXT NOT NULL,
+            payment_reference TEXT,
+            note TEXT,
+            currency TEXT NOT NULL DEFAULT 'TWD',
+            status TEXT NOT NULL,
+            created_by TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            posted_by TEXT,
+            posted_at INTEGER,
+            cancelled_by TEXT,
+            cancelled_at INTEGER,
+            voided_by TEXT,
+            voided_at INTEGER,
+            void_reason TEXT,
+            task_id TEXT
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS vendor_payment_allocations (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            payment_id TEXT NOT NULL,
+            account_payable_id TEXT NOT NULL,
+            amount REAL NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -556,8 +595,16 @@ pub fn void_account_payable_in_tx(
     // AP-04: Cannot void if there are any allocations from posted payments
     let posted_payment_res: Result<String, _> = conn.query_row(
         "SELECT p.payment_number
-         FROM payment_allocations pa
-         JOIN payments p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+         FROM (
+             SELECT id, tenant_id, payment_id, account_payable_id, created_at FROM vendor_payment_allocations
+             UNION ALL
+             SELECT id, tenant_id, payment_id, account_payable_id, created_at FROM payment_allocations
+         ) pa
+         JOIN (
+             SELECT id, tenant_id, payment_number, status FROM vendor_payments
+             UNION ALL
+             SELECT id, tenant_id, payment_number, status FROM payments
+         ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
          WHERE pa.account_payable_id = ?1 AND pa.tenant_id = ?2 AND p.status = 'posted'
          ORDER BY pa.created_at ASC LIMIT 1",
         params![ap_id_trimmed, tid],
@@ -680,8 +727,16 @@ pub fn get_account_payable_impl(
     // Query allocations
     let mut alloc_stmt = conn.prepare(
         "SELECT pa.id, pa.payment_id, p.payment_number, pa.amount, p.payment_date, p.status, pa.created_at
-         FROM payment_allocations pa
-         JOIN payments p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+         FROM (
+             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM vendor_payment_allocations
+             UNION ALL
+             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM payment_allocations
+         ) pa
+         JOIN (
+             SELECT id, tenant_id, payment_number, payment_date, status FROM vendor_payments
+             UNION ALL
+             SELECT id, tenant_id, payment_number, payment_date, status FROM payments
+         ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
          WHERE pa.account_payable_id = ?1 AND pa.tenant_id = ?2
          ORDER BY pa.created_at ASC",
     )?;
@@ -755,8 +810,16 @@ pub fn list_accounts_payable_impl(
             ap.created_by, ap.created_at, ap.voided_by, ap.voided_at, ap.void_reason,
             COALESCE(
                 (SELECT SUM(pa.amount)
-                 FROM payment_allocations pa
-                 JOIN payments p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+                 FROM (
+                     SELECT tenant_id, payment_id, account_payable_id, amount FROM vendor_payment_allocations
+                     UNION ALL
+                     SELECT tenant_id, payment_id, account_payable_id, amount FROM payment_allocations
+                 ) pa
+                 JOIN (
+                     SELECT id, tenant_id, status FROM vendor_payments
+                     UNION ALL
+                     SELECT id, tenant_id, status FROM payments
+                 ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
                  WHERE pa.account_payable_id = ap.id
                    AND pa.tenant_id = ap.tenant_id
                    AND p.status = 'posted'),

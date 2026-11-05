@@ -20,6 +20,7 @@ pub mod stocktakes;
 pub mod tasks;
 pub mod tps2_types;
 pub mod vendor_bills;
+pub mod vendor_payments;
 pub mod warehouses;
 
 #[cfg(test)]
@@ -58,6 +59,7 @@ where
         "accounts_payable",
         "vendor_bills",
         "opening_payables",
+        "vendor_payments",
     ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
@@ -246,6 +248,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     opening_payables::create_opening_payables_tables(&conn)
         .map_err(|e| format!("Failed to create opening payables tables: {}", e))?;
+
+    vendor_payments::create_vendor_payment_tables(&conn)
+        .map_err(|e| format!("Failed to create vendor payment tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -577,6 +582,16 @@ pub fn run() {
             opening_payables::create_opening_payable,
             opening_payables::void_opening_payable,
             opening_payables::list_opening_payables,
+            vendor_payments::create_vendor_payment,
+            vendor_payments::update_vendor_payment_header,
+            vendor_payments::add_vendor_payment_allocation,
+            vendor_payments::update_vendor_payment_allocation,
+            vendor_payments::remove_vendor_payment_allocation,
+            vendor_payments::post_vendor_payment,
+            vendor_payments::cancel_vendor_payment,
+            vendor_payments::void_vendor_payment,
+            vendor_payments::get_vendor_payment,
+            vendor_payments::list_vendor_payments,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
