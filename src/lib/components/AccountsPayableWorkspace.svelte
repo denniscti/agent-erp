@@ -23,7 +23,8 @@
     loadAccountsPayableAction,
     queryAccountsPayableAction,
     getAccountPayableAction,
-    loadPayablesAgingAction
+    loadPayablesAgingAction,
+    loadVendorStatementAction
   } from '../store.svelte.js';
   import { calculateDueDate } from '../paymentTerms.js';
 
@@ -147,6 +148,75 @@
   let voidOapReason = $state('');
   let voidOapError = $state('');
   let voidOapSubmitting = $state(false);
+
+  // ==========================================
+  // 4. Vendor Statement Subtab States (Issue #205)
+  // ==========================================
+  function getFirstDayOfMonthString() {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    return `${year}-${month}-01`;
+  }
+
+  let stmtVendorId = $state('');
+  let stmtStartDate = $state(getFirstDayOfMonthString());
+  let stmtEndDate = $state(getTodayDateString());
+  let vendorStatement = $state(null);
+  let isStatementLoading = $state(false);
+
+  async function refreshStatement() {
+    if (!stmtVendorId) {
+      vendorStatement = null;
+      return;
+    }
+    if (!stmtStartDate || !stmtEndDate) {
+      showToast('請選擇起訖日', 'error');
+      return;
+    }
+    if (stmtStartDate > stmtEndDate) {
+      showToast('起日不可晚於迄日', 'error');
+      return;
+    }
+    isStatementLoading = true;
+    try {
+      vendorStatement = await loadVendorStatementAction(stmtVendorId, stmtStartDate, stmtEndDate);
+    } catch (err) {
+      console.error('Failed to load vendor statement:', err);
+      showToast('載入對帳明細失敗：' + (err.message || String(err)), 'error');
+    } finally {
+      isStatementLoading = false;
+    }
+  }
+
+  function setStatementCurrentMonth() {
+    stmtStartDate = getFirstDayOfMonthString();
+    stmtEndDate = getTodayDateString();
+    refreshStatement();
+  }
+
+  function setStatementLastMonth() {
+    const d = new Date();
+    const prevMonthEnd = new Date(d.getFullYear(), d.getMonth(), 0);
+    const prevMonthStart = new Date(prevMonthEnd.getFullYear(), prevMonthEnd.getMonth(), 1);
+    const formatYmd = dt => {
+      const y = dt.getFullYear();
+      const m = String(dt.getMonth() + 1).padStart(2, '0');
+      const day = String(dt.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+    stmtStartDate = formatYmd(prevMonthStart);
+    stmtEndDate = formatYmd(prevMonthEnd);
+    refreshStatement();
+  }
+
+  function openStatementForVendor(vendorId) {
+    stmtVendorId = vendorId;
+    stmtStartDate = getFirstDayOfMonthString();
+    stmtEndDate = getTodayDateString();
+    activeSubTab = 'statement';
+    refreshStatement();
+  }
 
   // Derived lists
   let vendorPaymentsList = $derived(appState.vendorPayments || []);
@@ -931,6 +1001,20 @@
       帳齡總表 (Payables Aging)
     </button>
     <button 
+      class="subtab-btn {activeSubTab === 'statement' ? 'active' : ''}" 
+      onclick={() => { activeSubTab = 'statement'; if (stmtVendorId) refreshStatement(); }}
+      id="tab-vendor-statement"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="16" y1="13" x2="8" y2="13"></line>
+        <line x1="16" y1="17" x2="8" y2="17"></line>
+        <line x1="10" y1="9" x2="8" y2="9"></line>
+      </svg>
+      對帳明細 (Vendor Statement)
+    </button>
+    <button 
       class="subtab-btn {activeSubTab === 'opening-payables' ? 'active' : ''}" 
       onclick={() => { activeSubTab = 'opening-payables'; refreshOpeningPayables(); }}
       id="tab-opening-payables"
@@ -1202,6 +1286,259 @@
               </tbody>
             </table>
           {/if}
+        </div>
+      {/if}
+
+    <!-- ==================================================== -->
+    <!-- SUBTAB: 對帳明細 (Vendor Statement) -->
+    <!-- ==================================================== -->
+    {:else if activeSubTab === 'statement'}
+      <!-- Toolbar & Filters -->
+      <div class="toolbar">
+        <div class="filters">
+          <div class="filter-group">
+            <label for="stmt-vendor-select">供應商：</label>
+            <select id="stmt-vendor-select" bind:value={stmtVendorId} onchange={refreshStatement}>
+              <option value="">請選擇供應商</option>
+              {#each availableVendors as v}
+                <option value={v.id}>{v.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="filter-group">
+            <label for="stmt-start-date">起日：</label>
+            <input type="date" id="stmt-start-date" bind:value={stmtStartDate} onchange={refreshStatement} />
+          </div>
+          <div class="filter-group">
+            <label for="stmt-end-date">迄日：</label>
+            <input type="date" id="stmt-end-date" bind:value={stmtEndDate} onchange={refreshStatement} />
+          </div>
+          <button class="btn btn-secondary btn-sm" onclick={setStatementCurrentMonth} id="btn-stmt-current-month">本月</button>
+          <button class="btn btn-secondary btn-sm" onclick={setStatementLastMonth} id="btn-stmt-last-month">上月</button>
+          <button class="btn btn-primary btn-sm" onclick={refreshStatement} disabled={isStatementLoading || !stmtVendorId} id="btn-stmt-refresh">
+            {isStatementLoading ? '查詢中...' : '查詢'}
+          </button>
+        </div>
+      </div>
+
+      <!-- Warning notice on retroactive void impact -->
+      <div class="statement-notice-banner" id="statement-void-notice">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="12" y1="8" x2="12" y2="12"></line>
+          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+        <span>
+          <strong>作廢的回溯影響：</strong>
+          作廢的單據會從所有期間消失，因此作廢操作會改變過去期間的對帳結果。
+        </span>
+      </div>
+
+      {#if !stmtVendorId}
+        <div class="empty-state" style="padding: 3rem 1rem; text-align: center;">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="1.5">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+          </svg>
+          <p style="margin-top: 1rem; color: #64748b; font-size: 0.95rem;">請由上方選擇欲對帳的供應商與期間以查詢明細</p>
+        </div>
+      {:else if isStatementLoading}
+        <div class="loading-state" style="padding: 3rem; text-align: center; color: #64748b;">
+          載入對帳明細中...
+        </div>
+      {:else if vendorStatement}
+        <!-- Section 1: 期初未付 (Opening Balance) -->
+        <div class="statement-section-card opening-card" id="section-opening-balance">
+          <div class="card-inner">
+            <div class="card-header-line">
+              <span class="card-badge">第 1 段</span>
+              <span class="card-title">期初未付 (截至 {vendorStatement.start_date} 之前)</span>
+            </div>
+            <div class="amount-line">
+              <span class="amount-val font-mono">{formatCurrency(vendorStatement.opening_balance)}</span>
+              <span class="amount-formula font-mono text-muted">Σ(單據日 &lt; 起日應付) − Σ(付款日 &lt; 起日已過帳付款核銷)</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Section 2: 本期新增應付清單 (Current Payables) -->
+        <div class="statement-table-section" id="section-current-payables">
+          <div class="section-heading">
+            <div class="heading-left">
+              <span class="card-badge">第 2 段</span>
+              <h3>本期新增應付清單</h3>
+              <span class="count-tag font-mono">{vendorStatement.payables.length} 筆</span>
+            </div>
+            <div class="heading-right font-mono">
+              本期應付小計：<span class="font-bold text-danger">{formatCurrency(vendorStatement.current_payables_total)}</span>
+            </div>
+          </div>
+
+          {#if vendorStatement.payables.length === 0}
+            <div class="table-empty-notice">此期間無新增應付帳款</div>
+          {:else}
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>單據日</th>
+                    <th>來源類型</th>
+                    <th>來源單號</th>
+                    <th>外部單號 / 發票號</th>
+                    <th>到期日</th>
+                    <th class="text-right">金額</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each vendorStatement.payables as ap}
+                    <tr>
+                      <td class="font-mono">{ap.document_date}</td>
+                      <td>
+                        {#if ap.source_type === 'vendor_bill'}
+                          <span class="badge badge-partial">請款單</span>
+                        {:else if ap.source_type === 'opening_balance'}
+                          <span class="badge badge-draft">期初應付</span>
+                        {:else}
+                          <span class="badge badge-draft">{ap.source_type}</span>
+                        {/if}
+                      </td>
+                      <td>
+                        <button 
+                          class="link-btn font-mono"
+                          onclick={() => openApDetailModal(ap.account_payable_id)}
+                          title="查看應付帳款詳情"
+                        >
+                          {ap.source_number}
+                        </button>
+                      </td>
+                      <td class="font-mono text-muted">{ap.external_reference || '-'}</td>
+                      <td class="font-mono">{ap.due_date}</td>
+                      <td class="text-right font-mono font-semibold text-danger">
+                        {formatCurrency(ap.amount)}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+                <tfoot>
+                  <tr class="table-total-row">
+                    <td colspan="5" class="text-right font-bold">本期應付合計</td>
+                    <td class="text-right font-mono font-bold text-danger">
+                      {formatCurrency(vendorStatement.current_payables_total)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          {/if}
+        </div>
+
+        <!-- Section 3: 本期付款清單 (Current Payments) -->
+        <div class="statement-table-section" id="section-current-payments">
+          <div class="section-heading">
+            <div class="heading-left">
+              <span class="card-badge">第 3 段</span>
+              <h3>本期付款清單 (已過帳)</h3>
+              <span class="count-tag font-mono">{vendorStatement.payments.length} 筆</span>
+            </div>
+            <div class="heading-right font-mono">
+              本期付款小計：<span class="font-bold text-success">{formatCurrency(vendorStatement.current_payments_total)}</span>
+            </div>
+          </div>
+
+          {#if vendorStatement.payments.length === 0}
+            <div class="table-empty-notice">此期間無付款記錄</div>
+          {:else}
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>付款日</th>
+                    <th>付款單號</th>
+                    <th>付款方式</th>
+                    <th>參考號</th>
+                    <th>核銷對象 (單號 / 金額)</th>
+                    <th class="text-right">付款金額</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each vendorStatement.payments as pay}
+                    <tr>
+                      <td class="font-mono">{pay.payment_date}</td>
+                      <td>
+                        <button 
+                          class="link-btn font-mono font-semibold"
+                          onclick={() => { activeSubTab = 'vendor-payments'; viewPaymentDetail(pay.payment_id); }}
+                          title="查看付款單詳情"
+                        >
+                          {pay.payment_number}
+                        </button>
+                      </td>
+                      <td>{getPaymentMethodLabel(pay.payment_method)}</td>
+                      <td class="font-mono text-muted">{pay.payment_reference || '-'}</td>
+                      <td>
+                        <div class="allocations-pill-list">
+                          {#each pay.allocations as alloc}
+                            <span class="alloc-pill font-mono">
+                              <button 
+                                class="alloc-link"
+                                onclick={() => openApDetailModal(alloc.account_payable_id)}
+                                title="查看對應應付單"
+                              >
+                                {alloc.source_number}
+                              </button>
+                              <span class="alloc-amt">({formatCurrency(alloc.amount)})</span>
+                            </span>
+                          {/each}
+                        </div>
+                      </td>
+                      <td class="text-right font-mono font-semibold text-success">
+                        {formatCurrency(pay.amount)}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+                <tfoot>
+                  <tr class="table-total-row">
+                    <td colspan="5" class="text-right font-bold">本期付款合計</td>
+                    <td class="text-right font-mono font-bold text-success">
+                      {formatCurrency(vendorStatement.current_payments_total)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          {/if}
+        </div>
+
+        <!-- Section 4: 期末未付 (Closing Balance) & 恆等式勾稽 -->
+        <div class="statement-section-card closing-card" id="section-closing-balance">
+          <div class="card-inner">
+            <div class="card-header-line">
+              <span class="card-badge">第 4 段</span>
+              <span class="card-title">期末未付 (截至 {vendorStatement.end_date})</span>
+            </div>
+            <div class="amount-line">
+              <span class="amount-val font-mono font-bold text-danger">{formatCurrency(vendorStatement.closing_balance)}</span>
+            </div>
+            <div class="reconciliation-formula-box">
+              <div class="formula-label">勾稽平衡驗證 (恆等式)：</div>
+              <div class="formula-content font-mono">
+                <span class="term">期初 {formatCurrency(vendorStatement.opening_balance)}</span>
+                <span class="op">+</span>
+                <span class="term text-danger">本期應付 {formatCurrency(vendorStatement.current_payables_total)}</span>
+                <span class="op">−</span>
+                <span class="term text-success">本期付款 {formatCurrency(vendorStatement.current_payments_total)}</span>
+                <span class="op">=</span>
+                <span class="term font-bold text-danger">期末未付 {formatCurrency(vendorStatement.closing_balance)}</span>
+                <span class="check-icon" title="計算已平衡">✓ 平衡</span>
+              </div>
+              <div class="formula-hint text-muted">
+                註：當迄日為今天時，期末未付將與工作區顯示之該供應商未付合計一致。
+              </div>
+            </div>
+          </div>
         </div>
       {/if}
 
@@ -2996,5 +3333,197 @@
   .row-total {
     background-color: #f1f5f9;
     border-top: 2px solid #cbd5e1;
+  }
+
+  /* ==========================================
+     Vendor Statement Styles (Issue #205)
+     ========================================== */
+  .statement-notice-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background-color: #fffbeb;
+    border: 1px solid #fef3c7;
+    border-radius: 8px;
+    color: #92400e;
+    font-size: 0.875rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .statement-section-card {
+    background: #ffffff;
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+
+  .statement-section-card.opening-card {
+    border-left: 4px solid #64748b;
+  }
+
+  .statement-section-card.closing-card {
+    border-left: 4px solid #ef4444;
+    background: #fffafa;
+  }
+
+  .card-header-line {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .card-badge {
+    display: inline-block;
+    padding: 0.125rem 0.375rem;
+    background: #e2e8f0;
+    color: #475569;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .card-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #334155;
+  }
+
+  .amount-line {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .amount-val {
+    font-size: 1.5rem;
+    font-weight: 700;
+  }
+
+  .amount-formula {
+    font-size: 0.8125rem;
+  }
+
+  .statement-table-section {
+    margin-bottom: 1.5rem;
+  }
+
+  .section-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .heading-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .heading-left h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .count-tag {
+    font-size: 0.75rem;
+    background: #f1f5f9;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    color: #64748b;
+  }
+
+  .table-empty-notice {
+    padding: 1.5rem;
+    text-align: center;
+    color: #94a3b8;
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    font-size: 0.875rem;
+  }
+
+  .allocations-pill-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+  }
+
+  .alloc-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: #f1f5f9;
+    padding: 0.125rem 0.375rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    border: 1px solid #e2e8f0;
+  }
+
+  .alloc-link {
+    background: none;
+    border: none;
+    color: #0284c7;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+  }
+
+  .alloc-amt {
+    color: #64748b;
+  }
+
+  .table-total-row {
+    background-color: #f8fafc;
+    border-top: 2px solid #e2e8f0;
+  }
+
+  .reconciliation-formula-box {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+  }
+
+  .formula-label {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: #475569;
+    margin-bottom: 0.375rem;
+  }
+
+  .formula-content {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.95rem;
+  }
+
+  .formula-content .op {
+    color: #94a3b8;
+    font-weight: bold;
+  }
+
+  .formula-content .check-icon {
+    margin-left: 0.5rem;
+    color: #16a34a;
+    font-weight: bold;
+    font-size: 0.8125rem;
+    background: #dcfce7;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+  }
+
+  .formula-hint {
+    font-size: 0.75rem;
+    margin-top: 0.375rem;
   }
 </style>

@@ -4614,5 +4614,30 @@ export async function loadPayablesAgingAction(asOfDate) {
   }
 }
 
+/**
+ * Load vendor statement report
+ * @param {string} vendorPartnerId
+ * @param {string} startDate
+ * @param {string} endDate
+ * @returns {Promise<any>}
+ */
+export async function loadVendorStatementAction(vendorPartnerId, startDate, endDate) {
+  try {
+    const statement = await invoke('get_vendor_statement', {
+      vendor_partner_id: vendorPartnerId,
+      vendorPartnerId: vendorPartnerId,
+      start_date: startDate,
+      startDate: startDate,
+      end_date: endDate,
+      endDate: endDate
+    });
+    return statement;
+  } catch (err) {
+    console.error("Failed to load vendor statement:", err);
+    throw err;
+  }
+}
+
+
 
 

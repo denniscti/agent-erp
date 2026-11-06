@@ -73,6 +73,12 @@ pub enum AccountsPayableError {
     #[error("原因必填")]
     VoidReasonRequired,
 
+    #[error("起日不可晚於迄日")]
+    InvalidDateRange,
+
+    #[error("無效的日期格式，需為 YYYY-MM-DD")]
+    InvalidDateFormat,
+
     #[error("無效的狀態轉換")]
     InvalidStateTransition { from: String, to: String },
 
@@ -335,6 +341,55 @@ pub struct PayablesAgingReport {
     pub totals: AgingBucketTotals,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct StatementPayableItem {
+    pub account_payable_id: String,
+    pub document_date: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub source_number: String,
+    pub external_reference: Option<String>,
+    pub due_date: String,
+    pub amount: f64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct StatementPaymentAllocation {
+    pub account_payable_id: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub source_number: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct StatementPaymentItem {
+    pub payment_id: String,
+    pub payment_number: String,
+    pub payment_date: String,
+    pub payment_method: String,
+    pub payment_reference: Option<String>,
+    pub amount: f64,
+    pub note: Option<String>,
+    pub allocations: Vec<StatementPaymentAllocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct VendorStatement {
+    pub tenant_id: String,
+    pub vendor_partner_id: String,
+    pub vendor_name: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub opening_balance: f64,
+    pub current_payables_total: f64,
+    pub current_payments_total: f64,
+    pub closing_balance: f64,
+    pub payables: Vec<StatementPayableItem>,
+    pub payments: Vec<StatementPaymentItem>,
+}
+
 pub fn parse_ymd(s: &str) -> Option<(i32, i32, i32)> {
     let parts: Vec<&str> = s.trim().split('-').collect();
     if parts.len() != 3 {
@@ -362,6 +417,18 @@ pub fn calendar_day_diff(from_date: &str, to_date: &str) -> Option<i32> {
     let (fy, fm, fd) = parse_ymd(from_date)?;
     let (ty, tm, td) = parse_ymd(to_date)?;
     Some(ymd_to_jdn(ty, tm, td) - ymd_to_jdn(fy, fm, fd))
+}
+
+pub fn is_valid_ymd_string(s: &str) -> bool {
+    let trimmed = s.trim();
+    if trimmed.len() != 10 {
+        return false;
+    }
+    let parts: Vec<&str> = trimmed.split('-').collect();
+    if parts.len() != 3 || parts[0].len() != 4 || parts[1].len() != 2 || parts[2].len() != 2 {
+        return false;
+    }
+    parse_ymd(trimmed).is_some()
 }
 
 // ==========================================
@@ -1265,6 +1332,239 @@ pub async fn get_payables_aging<R: tauri::Runtime>(
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     get_payables_aging_impl(&conn, &active_tid, as_of_date).map_err(|e| e.to_string())
+}
+
+pub fn get_vendor_statement_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    vendor_partner_id: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<VendorStatement, AccountsPayableError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(AccountsPayableError::EmptyTenantId);
+    }
+
+    let vid = vendor_partner_id.trim();
+    if vid.is_empty() {
+        return Err(AccountsPayableError::VendorNotFound);
+    }
+
+    let vendor_name = resolve_vendor_snapshot(conn, tid, vid)?;
+
+    let s_date = start_date.trim();
+    let e_date = end_date.trim();
+    if !is_valid_ymd_string(s_date) || !is_valid_ymd_string(e_date) {
+        return Err(AccountsPayableError::InvalidDateFormat);
+    }
+    if s_date > e_date {
+        return Err(AccountsPayableError::InvalidDateRange);
+    }
+
+    // 1. Calculate opening balance:
+    // Σ(document_date < start_date of non-voided AP) - Σ(payment_date < start_date of posted payment allocations)
+    let opening_ap: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0.0)
+         FROM accounts_payable
+         WHERE tenant_id = ?1
+           AND vendor_partner_id = ?2
+           AND status != 'voided'
+           AND document_date < ?3",
+        params![tid, vid, s_date],
+        |row| row.get(0),
+    )?;
+
+    let opening_paid: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(pa.amount), 0.0)
+         FROM (
+             SELECT id, tenant_id, payment_id, account_payable_id, amount FROM vendor_payment_allocations
+             UNION ALL
+             SELECT id, tenant_id, payment_id, account_payable_id, amount FROM payment_allocations
+             WHERE id NOT IN (SELECT id FROM vendor_payment_allocations WHERE tenant_id = ?1)
+         ) pa
+         JOIN (
+             SELECT id, tenant_id, payment_date, status, vendor_partner_id FROM vendor_payments
+             UNION ALL
+             SELECT id, tenant_id, payment_date, status, vendor_partner_id FROM payments
+             WHERE id NOT IN (SELECT id FROM vendor_payments WHERE tenant_id = ?1)
+         ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+         JOIN accounts_payable ap ON ap.id = pa.account_payable_id AND ap.tenant_id = pa.tenant_id
+         WHERE pa.tenant_id = ?1
+           AND p.vendor_partner_id = ?2
+           AND p.status = 'posted'
+           AND ap.status != 'voided'
+           AND p.payment_date < ?3",
+        params![tid, vid, s_date],
+        |row| row.get(0),
+    )?;
+
+    let opening_balance = round_2(opening_ap - opening_paid);
+
+    // 2. Query current period payables [start_date, end_date]
+    let mut ap_stmt = conn.prepare(
+        "SELECT id, source_type, source_id, source_number, external_reference, document_date, due_date, amount, status
+         FROM accounts_payable
+         WHERE tenant_id = ?1
+           AND vendor_partner_id = ?2
+           AND status != 'voided'
+           AND document_date >= ?3
+           AND document_date <= ?4
+         ORDER BY document_date ASC, created_at ASC, id ASC",
+    )?;
+
+    let payables_rows = ap_stmt.query_map(params![tid, vid, s_date, e_date], |row| {
+        Ok(StatementPayableItem {
+            account_payable_id: row.get(0)?,
+            source_type: row.get(1)?,
+            source_id: row.get(2)?,
+            source_number: row.get(3)?,
+            external_reference: row.get(4)?,
+            document_date: row.get(5)?,
+            due_date: row.get(6)?,
+            amount: round_2(row.get(7)?),
+            status: row.get(8)?,
+        })
+    })?;
+
+    let mut payables = Vec::new();
+    let mut current_payables_total = 0.0;
+    for p in payables_rows {
+        let item = p?;
+        current_payables_total += item.amount;
+        payables.push(item);
+    }
+    current_payables_total = round_2(current_payables_total);
+
+    // 3. Query current period posted payments [start_date, end_date]
+    let mut pay_stmt = conn.prepare(
+        "SELECT id, payment_number, payment_date, payment_method, payment_reference, note
+         FROM (
+             SELECT id, tenant_id, vendor_partner_id, status, payment_number, payment_date, payment_method, payment_reference, note, created_at
+             FROM vendor_payments
+             UNION ALL
+             SELECT id, tenant_id, vendor_partner_id, status, payment_number, payment_date, 'bank_transfer' as payment_method, NULL as payment_reference, NULL as note, created_at
+             FROM payments
+             WHERE id NOT IN (SELECT id FROM vendor_payments WHERE tenant_id = ?1)
+         )
+         WHERE tenant_id = ?1
+           AND vendor_partner_id = ?2
+           AND status = 'posted'
+           AND payment_date >= ?3
+           AND payment_date <= ?4
+         ORDER BY payment_date ASC, created_at ASC, id ASC",
+    )?;
+
+    struct RawPaymentHeader {
+        id: String,
+        payment_number: String,
+        payment_date: String,
+        payment_method: String,
+        payment_reference: Option<String>,
+        note: Option<String>,
+    }
+
+    let payment_headers = pay_stmt.query_map(params![tid, vid, s_date, e_date], |row| {
+        Ok(RawPaymentHeader {
+            id: row.get(0)?,
+            payment_number: row.get(1)?,
+            payment_date: row.get(2)?,
+            payment_method: row.get(3)?,
+            payment_reference: row.get(4)?,
+            note: row.get(5)?,
+        })
+    })?;
+
+    let mut alloc_stmt = conn.prepare(
+        "SELECT pa.account_payable_id, ap.source_type, ap.source_id, ap.source_number, pa.amount
+         FROM (
+             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM vendor_payment_allocations
+             UNION ALL
+             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM payment_allocations
+             WHERE id NOT IN (SELECT id FROM vendor_payment_allocations WHERE tenant_id = ?1)
+         ) pa
+         JOIN accounts_payable ap ON ap.id = pa.account_payable_id AND ap.tenant_id = pa.tenant_id
+         WHERE pa.tenant_id = ?1
+           AND pa.payment_id = ?2
+           AND ap.status != 'voided'
+         ORDER BY pa.created_at ASC, pa.id ASC",
+    )?;
+
+    let mut payments = Vec::new();
+    let mut current_payments_total = 0.0;
+    for ph_res in payment_headers {
+        let ph = ph_res?;
+        let alloc_rows = alloc_stmt.query_map(params![tid, &ph.id], |arow| {
+            Ok(StatementPaymentAllocation {
+                account_payable_id: arow.get(0)?,
+                source_type: arow.get(1)?,
+                source_id: arow.get(2)?,
+                source_number: arow.get(3)?,
+                amount: round_2(arow.get(4)?),
+            })
+        })?;
+
+        let mut allocations = Vec::new();
+        let mut payment_amount = 0.0;
+        for a in alloc_rows {
+            let item = a?;
+            payment_amount += item.amount;
+            allocations.push(item);
+        }
+        payment_amount = round_2(payment_amount);
+        current_payments_total += payment_amount;
+
+        payments.push(StatementPaymentItem {
+            payment_id: ph.id,
+            payment_number: ph.payment_number,
+            payment_date: ph.payment_date,
+            payment_method: ph.payment_method,
+            payment_reference: ph.payment_reference,
+            amount: payment_amount,
+            note: ph.note,
+            allocations,
+        });
+    }
+    current_payments_total = round_2(current_payments_total);
+
+    // 4. Closing balance
+    let closing_balance =
+        round_2(opening_balance + current_payables_total - current_payments_total);
+
+    Ok(VendorStatement {
+        tenant_id: tid.to_string(),
+        vendor_partner_id: vid.to_string(),
+        vendor_name,
+        start_date: s_date.to_string(),
+        end_date: e_date.to_string(),
+        opening_balance,
+        current_payables_total,
+        current_payments_total,
+        closing_balance,
+        payables,
+        payments,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_vendor_statement<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    vendor_partner_id: String,
+    start_date: String,
+    end_date: String,
+) -> Result<VendorStatement, String> {
+    let db_path = crate::get_db_path(&app_handle);
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    get_vendor_statement_impl(
+        &conn,
+        &active_tid,
+        &vendor_partner_id,
+        &start_date,
+        &end_date,
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ==========================================
@@ -2316,6 +2616,378 @@ mod tests {
         assert_eq!(
             get_payables_aging_impl(&conn, "   ", None).unwrap_err(),
             AccountsPayableError::EmptyTenantId
+        );
+    }
+
+    #[test]
+    fn test_vendor_statement_perspective_cases() {
+        let mut conn = setup_test_db();
+
+        // ----------------------------------------------------
+        // TC-STMT-E01 ~ E06: Error and Validation Perspectives
+        // ----------------------------------------------------
+        // Given: Empty or invalid parameters
+        // When & Then (TC-STMT-E01): Empty or whitespace tenant
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "", "vnd_001", "2026-03-01", "2026-03-31")
+                .unwrap_err(),
+            AccountsPayableError::EmptyTenantId
+        );
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "   ", "vnd_001", "2026-03-01", "2026-03-31")
+                .unwrap_err(),
+            AccountsPayableError::EmptyTenantId
+        );
+
+        // When & Then (TC-STMT-E02): Empty or whitespace vendor_partner_id
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "tnt_test", "", "2026-03-01", "2026-03-31")
+                .unwrap_err(),
+            AccountsPayableError::VendorNotFound
+        );
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "tnt_test", "   ", "2026-03-01", "2026-03-31")
+                .unwrap_err(),
+            AccountsPayableError::VendorNotFound
+        );
+
+        // When & Then (TC-STMT-E03): Non-existent vendor partner
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_ghost", "2026-03-01", "2026-03-31")
+                .unwrap_err(),
+            AccountsPayableError::VendorNotFound
+        );
+
+        // When & Then (TC-STMT-E04): Partner exists but is_vendor != 1
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "tnt_test", "cus_001", "2026-03-01", "2026-03-31")
+                .unwrap_err(),
+            AccountsPayableError::PartnerNotVendor
+        );
+
+        // When & Then (TC-STMT-E05): start_date > end_date
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_001", "2026-03-31", "2026-03-01")
+                .unwrap_err(),
+            AccountsPayableError::InvalidDateRange
+        );
+
+        // When & Then (TC-STMT-E06): Invalid date formats
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_001", "2026/03/01", "2026-03-31")
+                .unwrap_err(),
+            AccountsPayableError::InvalidDateFormat
+        );
+        assert_eq!(
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_001", "2026-03-01", "invalid")
+                .unwrap_err(),
+            AccountsPayableError::InvalidDateFormat
+        );
+
+        // ----------------------------------------------------
+        // TC-STMT-N03: Brand new vendor with 0 transactions
+        // ----------------------------------------------------
+        // Given: Seed brand new vendor with no AP or payments
+        conn.execute(
+            "INSERT INTO partners (id, tenant_id, name, is_vendor, is_customer, created_at)
+             VALUES ('vnd_new', 'tnt_test', '全新供應商', 1, 0, 1000)",
+            [],
+        )
+        .unwrap();
+        // When: Querying statement
+        let empty_stmt =
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_new", "2026-03-01", "2026-03-31")
+                .unwrap();
+        // Then: All numbers are zero
+        assert_eq!(empty_stmt.opening_balance, 0.0);
+        assert_eq!(empty_stmt.current_payables_total, 0.0);
+        assert_eq!(empty_stmt.current_payments_total, 0.0);
+        assert_eq!(empty_stmt.closing_balance, 0.0);
+        assert_eq!(empty_stmt.payables.len(), 0);
+        assert_eq!(empty_stmt.payments.len(), 0);
+
+        // ----------------------------------------------------
+        // TC-STMT-N01, B01, B02, B03, B04, B05, B06, B07, B08, B09
+        // ----------------------------------------------------
+        // Given:
+        // Period is [2026-03-01, 2026-03-31]
+        // B02: AP prior to start_date (2026-02-28, doc_date < start_date) -> Opening AP = 1000.0
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "opening_balance".to_string(),
+                source_id: "oap_prior".to_string(),
+                source_number: "OAP-PRIOR".to_string(),
+                external_reference: Some("REF-PRIOR".to_string()),
+                document_date: "2026-02-28".to_string(),
+                due_date: "2026-03-15".to_string(),
+                amount: 1000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B06: Payment prior to start_date (2026-02-28, payment_date < start_date) paying 200.0 of oap_prior -> Opening Paid = 200.0
+        // Net opening_balance = 1000.0 - 200.0 = 800.0
+        conn.execute(
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, payment_reference, note, currency, status, created_by, created_at, posted_by, posted_at)
+             VALUES ('pay_prior', 'tnt_test', 'PAY-PRIOR', 'vnd_001', '測試供應商股份公司', '2026-02-28', 'bank_transfer', 'REF-PAY-0', '期初核銷', 'TWD', 'posted', 'usr_admin', 1000, 'usr_admin', 1000)",
+            [],
+        ).unwrap();
+        let ap_prior = conn
+            .query_row(
+                "SELECT id FROM accounts_payable WHERE source_id = 'oap_prior'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('pa_prior', 'tnt_test', 'pay_prior', ?1, 200.0, 1000)",
+            params![ap_prior],
+        ).unwrap();
+
+        // B01: AP on start_date (2026-03-01) -> Current AP = 300.0
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_sdate".to_string(),
+                source_number: "BILL-SDATE".to_string(),
+                external_reference: Some("EXT-SDATE".to_string()),
+                document_date: "2026-03-01".to_string(),
+                due_date: "2026-03-31".to_string(),
+                amount: 300.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B03 & B09: AP on end_date (2026-03-31) with 0.01 precision -> Current AP = 500.55
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_edate".to_string(),
+                source_number: "BILL-EDATE".to_string(),
+                external_reference: None,
+                document_date: "2026-03-31".to_string(),
+                due_date: "2026-04-30".to_string(),
+                amount: 500.55,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B04: AP after end_date (2026-04-01) -> Excluded from this period
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_future".to_string(),
+                source_number: "BILL-FUTURE".to_string(),
+                external_reference: None,
+                document_date: "2026-04-01".to_string(),
+                due_date: "2026-04-30".to_string(),
+                amount: 999.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B05 & TC-STMT-N06: Payment on start_date (2026-03-01) with multi-allocations (150 to ap_prior, 100 to bill_sdate) -> Total 250.0
+        conn.execute(
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, payment_reference, note, currency, status, created_by, created_at, posted_by, posted_at)
+             VALUES ('pay_sdate', 'tnt_test', 'PAY-SDATE', 'vnd_001', '測試供應商股份公司', '2026-03-01', 'cash', 'REF-CASH', '起日付款', 'TWD', 'posted', 'usr_admin', 2000, 'usr_admin', 2000)",
+            [],
+        ).unwrap();
+        let ap_sdate = conn
+            .query_row(
+                "SELECT id FROM accounts_payable WHERE source_id = 'bill_sdate'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('pa_sd_1', 'tnt_test', 'pay_sdate', ?1, 150.0, 2001)",
+            params![ap_prior],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('pa_sd_2', 'tnt_test', 'pay_sdate', ?1, 100.0, 2002)",
+            params![ap_sdate],
+        ).unwrap();
+
+        // B07: Payment on end_date (2026-03-31) -> 50.55
+        conn.execute(
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, payment_reference, note, currency, status, created_by, created_at, posted_by, posted_at)
+             VALUES ('pay_edate', 'tnt_test', 'PAY-EDATE', 'vnd_001', '測試供應商股份公司', '2026-03-31', 'check', 'CHK-001', '迄日付款', 'TWD', 'posted', 'usr_admin', 3000, 'usr_admin', 3000)",
+            [],
+        ).unwrap();
+        let ap_edate = conn
+            .query_row(
+                "SELECT id FROM accounts_payable WHERE source_id = 'bill_edate'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('pa_ed_1', 'tnt_test', 'pay_edate', ?1, 50.55, 3001)",
+            params![ap_edate],
+        ).unwrap();
+
+        // TC-STMT-E07: Voided AP in period -> must be completely excluded
+        let void_ap = create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_void".to_string(),
+                source_number: "BILL-VOID".to_string(),
+                external_reference: None,
+                document_date: "2026-03-15".to_string(),
+                due_date: "2026-04-15".to_string(),
+                amount: 777.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+        void_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            &void_ap.id,
+            "作廢排除測試",
+        )
+        .unwrap();
+
+        // TC-STMT-E08: Voided payment in period -> excluded
+        conn.execute(
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, status, created_by, created_at, posted_by, posted_at, voided_by, voided_at, void_reason)
+             VALUES ('pay_voided', 'tnt_test', 'PAY-VOID', 'vnd_001', '測試供應商股份公司', '2026-03-15', 'bank_transfer', 'voided', 'usr_admin', 4000, 'usr_admin', 4000, 'usr_admin', 4001, '作廢付款')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('pa_void_1', 'tnt_test', 'pay_voided', ?1, 100.0, 4000)",
+            params![ap_edate],
+        ).unwrap();
+
+        // TC-STMT-E09: Draft & Cancelled payments in period -> excluded
+        conn.execute(
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, status, created_by, created_at)
+             VALUES ('pay_draft', 'tnt_test', 'PAY-DRAFT', 'vnd_001', '測試供應商股份公司', '2026-03-20', 'bank_transfer', 'draft', 'usr_admin', 5000)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, status, created_by, created_at, cancelled_by, cancelled_at)
+             VALUES ('pay_canc', 'tnt_test', 'PAY-CANC', 'vnd_001', '測試供應商股份公司', '2026-03-22', 'bank_transfer', 'cancelled', 'usr_admin', 5000, 'usr_admin', 5001)",
+            [],
+        ).unwrap();
+
+        // TC-STMT-E10: Other tenant records in period -> isolated
+        create_account_payable(
+            &mut conn,
+            "tnt_other",
+            "usr_other",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_other".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_tnt2".to_string(),
+                source_number: "BILL-TNT2".to_string(),
+                external_reference: None,
+                document_date: "2026-03-10".to_string(),
+                due_date: "2026-04-10".to_string(),
+                amount: 8888.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // When: Query statement for [2026-03-01, 2026-03-31]
+        let stmt =
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_001", "2026-03-01", "2026-03-31")
+                .unwrap();
+
+        // Then:
+        // Opening balance: 1000 - 200 = 800.00
+        assert_eq!(stmt.opening_balance, 800.0);
+        // Current payables: 300.0 (bill_sdate) + 500.55 (bill_edate) = 800.55 (bill_void & bill_future excluded)
+        assert_eq!(stmt.current_payables_total, 800.55);
+        assert_eq!(stmt.payables.len(), 2);
+        assert_eq!(stmt.payables[0].source_number, "BILL-SDATE");
+        assert_eq!(stmt.payables[1].source_number, "BILL-EDATE");
+        // Current payments: 250.0 (pay_sdate) + 50.55 (pay_edate) = 300.55 (pay_voided, draft, canc excluded)
+        assert_eq!(stmt.current_payments_total, 300.55);
+        assert_eq!(stmt.payments.len(), 2);
+        assert_eq!(stmt.payments[0].allocations.len(), 2); // multi-allocation checked
+        assert_eq!(stmt.payments[0].amount, 250.0);
+        assert_eq!(stmt.payments[1].amount, 50.55);
+        // Closing balance: 800.00 + 800.55 - 300.55 = 1300.00
+        assert_eq!(stmt.closing_balance, 1300.0);
+        // Identity: Opening + Current AP - Current Pay = Closing
+        assert_eq!(
+            round_2(
+                stmt.opening_balance + stmt.current_payables_total - stmt.current_payments_total
+            ),
+            stmt.closing_balance
+        );
+
+        // ----------------------------------------------------
+        // TC-STMT-N04: Adjacent period transition
+        // Period 1: [2026-02-01, 2026-02-28]
+        // Period 2: [2026-03-01, 2026-03-31]
+        // ----------------------------------------------------
+        // When: Query Period 1 statement
+        let p1_stmt =
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_001", "2026-02-01", "2026-02-28")
+                .unwrap();
+        // Then: Period 1 closing balance must equal Period 2 opening balance (800.0)
+        assert_eq!(p1_stmt.closing_balance, stmt.opening_balance);
+
+        // ----------------------------------------------------
+        // TC-STMT-N02: Period with no changes
+        // Period: [2026-05-01, 2026-05-31]
+        // ----------------------------------------------------
+        let quiet_stmt =
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_001", "2026-05-01", "2026-05-31")
+                .unwrap();
+        assert_eq!(quiet_stmt.current_payables_total, 0.0);
+        assert_eq!(quiet_stmt.current_payments_total, 0.0);
+        assert_eq!(quiet_stmt.opening_balance, quiet_stmt.closing_balance);
+
+        // ----------------------------------------------------
+        // TC-STMT-B08: Single-day range (start_date == end_date)
+        // ----------------------------------------------------
+        let single_stmt =
+            get_vendor_statement_impl(&conn, "tnt_test", "vnd_001", "2026-03-01", "2026-03-01")
+                .unwrap();
+        assert_eq!(single_stmt.payables.len(), 1);
+        assert_eq!(single_stmt.payables[0].source_number, "BILL-SDATE");
+        assert_eq!(single_stmt.payments.len(), 1);
+        assert_eq!(single_stmt.payments[0].payment_number, "PAY-SDATE");
+        assert_eq!(
+            round_2(
+                single_stmt.opening_balance + single_stmt.current_payables_total
+                    - single_stmt.current_payments_total
+            ),
+            single_stmt.closing_balance
         );
     }
 }

@@ -4930,6 +4930,162 @@ export async function invoke(cmd, args = {}) {
       };
     }
 
+    case 'get_vendor_statement': {
+      const { vendor_partner_id, vendorPartnerId, start_date, startDate, end_date, endDate } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !String(targetTenantId).trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+
+      const vid = String(vendor_partner_id || vendorPartnerId || '').trim();
+      if (!vid) {
+        throw new Error('找不到指定的供應商或不屬於目前租戶');
+      }
+
+      const partner = (mockPartners || []).find(p => p.id === vid && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!partner) {
+        throw new Error('找不到指定的供應商或不屬於目前租戶');
+      }
+      if (!partner.is_vendor) {
+        throw new Error('指定的合作夥伴不是供應商 (is_vendor != 1)');
+      }
+
+      const sDate = String(start_date || startDate || '').trim();
+      const eDate = String(end_date || endDate || '').trim();
+
+      function round2(v) {
+        return Math.round((v || 0) * 100) / 100;
+      }
+
+      function isValidYmd(s) {
+        if (!s || typeof s !== 'string' || s.length !== 10) return false;
+        const parts = s.split('-');
+        if (parts.length !== 3 || parts[0].length !== 4 || parts[1].length !== 2 || parts[2].length !== 2) return false;
+        const y = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10);
+        const d = parseInt(parts[2], 10);
+        if (isNaN(y) || isNaN(m) || isNaN(d) || m < 1 || m > 12 || d < 1 || d > 31) return false;
+        return true;
+      }
+
+      if (!isValidYmd(sDate) || !isValidYmd(eDate)) {
+        throw new Error('無效的日期格式，需為 YYYY-MM-DD');
+      }
+      if (sDate > eDate) {
+        throw new Error('起日不可晚於迄日');
+      }
+
+      // Gather APs
+      const allAps = (mockAccountsPayable || []).filter(
+        ap => (ap.tenant_id || 'tnt_mock_1') === targetTenantId && ap.vendor_partner_id === vid && ap.status !== 'voided'
+      );
+
+      // Gather posted payments
+      const allPayments = [
+        ...(mockVendorPayments || []),
+        ...(mockPayments || []).filter(p => !(mockVendorPayments || []).some(vp => vp.id === p.id))
+      ].filter(
+        p => (p.tenant_id || 'tnt_mock_1') === targetTenantId && p.vendor_partner_id === vid && p.status === 'posted'
+      );
+
+      const allAllocations = [
+        ...(mockVendorPaymentAllocations || []),
+        ...(mockPaymentAllocations || []).filter(pa => !(mockVendorPaymentAllocations || []).some(vpa => vpa.id === pa.id))
+      ].filter(
+        pa => (pa.tenant_id || 'tnt_mock_1') === targetTenantId
+      );
+
+      // 1. Opening balance
+      const openingAps = allAps.filter(ap => ap.document_date < sDate);
+      const openingApTotal = openingAps.reduce((sum, ap) => sum + Number(ap.amount || 0), 0);
+
+      // Opening posted payments (payment_date < sDate)
+      const openingPayments = allPayments.filter(p => p.payment_date < sDate);
+      const openingPaymentIds = new Set(openingPayments.map(p => p.id));
+      const apIdSet = new Set(allAps.map(a => a.id));
+
+      const openingPaidTotal = allAllocations
+        .filter(pa => openingPaymentIds.has(pa.payment_id) && apIdSet.has(pa.account_payable_id))
+        .reduce((sum, pa) => sum + Number(pa.amount || 0), 0);
+
+      const opening_balance = round2(openingApTotal - openingPaidTotal);
+
+      // 2. Current period payables
+      const currentAps = allAps
+        .filter(ap => ap.document_date >= sDate && ap.document_date <= eDate)
+        .sort((a, b) => (a.document_date || '').localeCompare(b.document_date || '') || (a.created_at || 0) - (b.created_at || 0) || (a.id || '').localeCompare(b.id || ''));
+
+      const payables = currentAps.map(ap => ({
+        account_payable_id: ap.id,
+        source_type: ap.source_type,
+        source_id: ap.source_id,
+        source_number: ap.source_number,
+        external_reference: ap.external_reference || null,
+        document_date: ap.document_date,
+        due_date: ap.due_date,
+        amount: round2(ap.amount),
+        status: ap.status
+      }));
+
+      const current_payables_total = round2(payables.reduce((sum, p) => sum + p.amount, 0));
+
+      // 3. Current period payments
+      const currentPayments = allPayments
+        .filter(p => p.payment_date >= sDate && p.payment_date <= eDate)
+        .sort((a, b) => (a.payment_date || '').localeCompare(b.payment_date || '') || (a.created_at || 0) - (b.created_at || 0) || (a.id || '').localeCompare(b.id || ''));
+
+      const apMap = new Map(allAps.map(a => [a.id, a]));
+
+      const payments = currentPayments.map(p => {
+        const allocs = allAllocations
+          .filter(pa => pa.payment_id === p.id && apMap.has(pa.account_payable_id))
+          .sort((a, b) => (a.created_at || 0) - (b.created_at || 0) || (a.id || '').localeCompare(b.id || ''));
+
+        const allocDetails = allocs.map(pa => {
+          const matchedAp = apMap.get(pa.account_payable_id);
+          return {
+            account_payable_id: pa.account_payable_id,
+            source_type: matchedAp?.source_type || '',
+            source_id: matchedAp?.source_id || '',
+            source_number: matchedAp?.source_number || '',
+            amount: round2(pa.amount)
+          };
+        });
+
+        const paymentAmount = round2(allocDetails.reduce((sum, a) => sum + a.amount, 0));
+
+        return {
+          payment_id: p.id,
+          payment_number: p.payment_number,
+          payment_date: p.payment_date,
+          payment_method: p.payment_method || 'bank_transfer',
+          payment_reference: p.payment_reference || null,
+          amount: paymentAmount,
+          note: p.note || null,
+          allocations: allocDetails
+        };
+      });
+
+      const current_payments_total = round2(payments.reduce((sum, p) => sum + p.amount, 0));
+
+      // 4. Closing balance
+      const closing_balance = round2(opening_balance + current_payables_total - current_payments_total);
+
+      return {
+        tenant_id: targetTenantId,
+        vendor_partner_id: vid,
+        vendor_name: partner.name,
+        start_date: sDate,
+        end_date: eDate,
+        opening_balance,
+        current_payables_total,
+        current_payments_total,
+        closing_balance,
+        payables,
+        payments
+      };
+    }
+
     case 'create_vendor_bill': {
       const payload = args?.input || args || {};
       const targetTenantId = resolveMockActiveTenantId();
