@@ -22,18 +22,45 @@
     voidVendorPaymentAction,
     loadAccountsPayableAction,
     queryAccountsPayableAction,
-    getAccountPayableAction
+    getAccountPayableAction,
+    loadPayablesAgingAction
   } from '../store.svelte.js';
   import { calculateDueDate } from '../paymentTerms.js';
 
-  // Sub tab: 'vendor-payments' | 'accounts-payable' | 'opening-payables'
-  let activeSubTab = $state('vendor-payments');
+  // Sub tab: 'aging' | 'opening-payables' | 'vendor-payments' | 'accounts-payable'
+  let activeSubTab = $state('aging');
 
   // Loading state
   let isLoading = $state(false);
 
   // Auxiliary data
   let availableVendors = $state([]);
+
+  // ==========================================
+  // Aging States (Issue #204)
+  // ==========================================
+  let payablesAging = $state(null);
+  let isAgingLoading = $state(false);
+  let agingViewMode = $state('summary'); // 'summary' | 'detail' | 'raw_list'
+  let selectedAgingVendorId = $state(null);
+
+  // Computed selected vendor in aging
+  let selectedAgingVendor = $derived.by(() => {
+    if (!payablesAging || !selectedAgingVendorId) return null;
+    return (payablesAging.vendors || []).find(v => v.vendor_partner_id === selectedAgingVendorId) || null;
+  });
+
+  async function refreshAging() {
+    isAgingLoading = true;
+    try {
+      payablesAging = await loadPayablesAgingAction();
+    } catch (err) {
+      console.error('Failed to load payables aging:', err);
+      showToast('載入帳齡分析失敗：' + (err.message || err), 'error');
+    } finally {
+      isAgingLoading = false;
+    }
+  }
 
   // Helper date function (pure string YYYY-MM-DD)
   function getTodayDateString() {
@@ -162,6 +189,7 @@
       availableVendors = (partners || []).filter(p => p.is_vendor && p.is_active !== false);
 
       await Promise.all([
+        refreshAging(),
         refreshVendorPayments(),
         refreshAccountsPayable(),
         refreshOpeningPayables()
@@ -612,9 +640,12 @@
     paymentViewMode = 'list';
     try {
       isLoading = true;
+      const targetApId = ap.id || ap.account_payable_id;
+      const vendorId = ap.vendor_partner_id;
+
       // Check if an existing draft payment already exists for this vendor
       const existingDraft = (vendorPaymentsList || []).find(
-        p => p.status === 'draft' && p.vendor_partner_id === ap.vendor_partner_id
+        p => p.status === 'draft' && p.vendor_partner_id === vendorId
       );
 
       let detail;
@@ -623,12 +654,12 @@
         showToast(`已為您開啟供應商既有的草稿付款單「${detail.payment_number}」`);
       } else {
         detail = await createVendorPaymentAction({
-          vendor_partner_id: ap.vendor_partner_id,
+          vendor_partner_id: vendorId,
           payment_date: getTodayDateString(),
           payment_method: 'bank_transfer'
         });
       }
-      await openDraftEditView(detail, ap.id);
+      await openDraftEditView(detail, targetApId);
     } catch (err) {
       showToast('建立付款單失敗：' + (err.message || String(err)));
     } finally {
@@ -889,26 +920,15 @@
   <!-- Sub Tabs Navigation -->
   <div class="subtabs-bar">
     <button 
-      class="subtab-btn {activeSubTab === 'vendor-payments' ? 'active' : ''}" 
-      onclick={() => { activeSubTab = 'vendor-payments'; paymentViewMode = 'list'; refreshVendorPayments(); }}
-      id="tab-vendor-payments"
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect>
-        <line x1="1" y1="10" x2="23" y2="10"></line>
-      </svg>
-      付款單 (Vendor Payments)
-    </button>
-    <button 
-      class="subtab-btn {activeSubTab === 'accounts-payable' ? 'active' : ''}" 
-      onclick={() => { activeSubTab = 'accounts-payable'; refreshAccountsPayable(); }}
-      id="tab-accounts-payable"
+      class="subtab-btn {activeSubTab === 'aging' ? 'active' : ''}" 
+      onclick={() => { activeSubTab = 'aging'; agingViewMode = 'summary'; refreshAging(); }}
+      id="tab-payables-aging"
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
         <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
       </svg>
-      應付帳款明細 (Accounts Payable)
+      帳齡總表 (Payables Aging)
     </button>
     <button 
       class="subtab-btn {activeSubTab === 'opening-payables' ? 'active' : ''}" 
@@ -924,14 +944,271 @@
       </svg>
       期初應付 (Opening Payables)
     </button>
+    <button 
+      class="subtab-btn {activeSubTab === 'vendor-payments' ? 'active' : ''}" 
+      onclick={() => { activeSubTab = 'vendor-payments'; paymentViewMode = 'list'; refreshVendorPayments(); }}
+      id="tab-vendor-payments"
+    >
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect>
+        <line x1="1" y1="10" x2="23" y2="10"></line>
+      </svg>
+      付款單 (Vendor Payments)
+    </button>
   </div>
 
   <!-- Main View Area -->
   <div class="view-content">
     <!-- ==================================================== -->
+    <!-- SUBTAB 0: 帳齡總表 (Payables Aging) -->
+    <!-- ==================================================== -->
+    {#if activeSubTab === 'aging'}
+      <!-- Aging summary KPIs -->
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <span class="kpi-title">總未付應付帳款</span>
+          <span class="kpi-value text-danger font-mono font-bold">{formatCurrency(payablesAging?.totals?.total_outstanding || 0)}</span>
+          <span class="kpi-sub font-mono">基準日：{payablesAging?.as_of_date || '-'}</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-title">未到期金額 (Current)</span>
+          <span class="kpi-value font-mono">{formatCurrency(payablesAging?.totals?.current || 0)}</span>
+          <span class="kpi-sub">≤ 0 天 (尚未到期)</span>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-title">總逾期金額</span>
+          <span class="kpi-value text-warning font-mono">
+            {formatCurrency(((payablesAging?.totals?.overdue_1_30 || 0) + (payablesAging?.totals?.overdue_31_60 || 0) + (payablesAging?.totals?.overdue_61_90 || 0) + (payablesAging?.totals?.overdue_90_plus || 0)))}
+          </span>
+          <span class="kpi-sub">包含 1-30, 31-60, 61-90, 90+ 天</span>
+        </div>
+        <div class="kpi-card kpi-reference">
+          <span class="kpi-title">已到貨未請款 (未稅參考)</span>
+          <span class="kpi-value text-primary font-mono">{formatCurrency(payablesAging?.totals?.unbilled_received_amount || 0)}</span>
+          <span class="kpi-sub">貨已到未立帳（不計入帳齡與未付）</span>
+        </div>
+      </div>
+
+      {#if agingViewMode === 'summary'}
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <span class="badge badge-info">計算基準日：{payablesAging?.as_of_date || '-'}</span>
+            <span class="text-sm text-muted">帳齡採到期日業界標準分段</span>
+          </div>
+          <div class="toolbar-right">
+            <button class="btn btn-secondary btn-sm" onclick={refreshAging} disabled={isAgingLoading} id="btn-refresh-aging">
+              {isAgingLoading ? '重新計算中...' : '重新整理'}
+            </button>
+            <button class="btn btn-secondary btn-sm" onclick={() => { activeSubTab = 'accounts-payable'; refreshAccountsPayable(); }} id="btn-switch-all-ap">
+              全部應付清單
+            </button>
+          </div>
+        </div>
+
+        <div class="table-container">
+          {#if isAgingLoading}
+            <div class="empty-state">帳齡資料載入中...</div>
+          {:else if !payablesAging || !payablesAging.vendors || payablesAging.vendors.length === 0}
+            <div class="empty-state">
+              <p>目前尚無未付應付帳款或已到貨未請款紀錄</p>
+            </div>
+          {:else}
+            <table class="data-table" id="table-payables-aging">
+              <thead>
+                <tr>
+                  <th>供應商</th>
+                  <th class="text-right">未到期</th>
+                  <th class="text-right">逾期 1-30 天</th>
+                  <th class="text-right">逾期 31-60 天</th>
+                  <th class="text-right">逾期 61-90 天</th>
+                  <th class="text-right">逾期 90+ 天</th>
+                  <th class="text-right font-bold">未付合計</th>
+                  <th class="text-right text-muted">已到貨未請款 (未稅)</th>
+                  <th class="text-center">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each payablesAging.vendors as v}
+                  <tr>
+                    <td class="font-medium">
+                      <button 
+                        class="link-btn font-medium" 
+                        onclick={() => { selectedAgingVendorId = v.vendor_partner_id; agingViewMode = 'detail'; }}
+                        id={`btn-view-vendor-aging-${v.vendor_partner_id}`}
+                      >
+                        {v.vendor_name}
+                      </button>
+                    </td>
+                    <td class="text-right font-mono">{formatCurrency(v.current)}</td>
+                    <td class="text-right font-mono {v.overdue_1_30 > 0 ? 'text-warning font-medium' : ''}">{formatCurrency(v.overdue_1_30)}</td>
+                    <td class="text-right font-mono {v.overdue_31_60 > 0 ? 'text-warning font-medium' : ''}">{formatCurrency(v.overdue_31_60)}</td>
+                    <td class="text-right font-mono {v.overdue_61_90 > 0 ? 'text-danger font-medium' : ''}">{formatCurrency(v.overdue_61_90)}</td>
+                    <td class="text-right font-mono {v.overdue_90_plus > 0 ? 'text-danger font-bold' : ''}">{formatCurrency(v.overdue_90_plus)}</td>
+                    <td class="text-right font-mono font-bold {v.total_outstanding > 0 ? 'text-danger' : ''}">{formatCurrency(v.total_outstanding)}</td>
+                    <td class="text-right font-mono text-muted bg-ref">{formatCurrency(v.unbilled_received_amount)}</td>
+                    <td class="text-center">
+                      <div class="btn-group-sm">
+                        <button 
+                          class="btn-action text-primary" 
+                          onclick={() => { selectedAgingVendorId = v.vendor_partner_id; agingViewMode = 'detail'; }}
+                          id={`btn-detail-vendor-${v.vendor_partner_id}`}
+                        >
+                          明細
+                        </button>
+                        {#if v.total_outstanding > 0}
+                          <button 
+                            class="btn-action text-success font-medium" 
+                            onclick={() => initiatePaymentFromVendor(v.vendor_partner_id)}
+                            id={`btn-pay-vendor-${v.vendor_partner_id}`}
+                          >
+                            付款
+                          </button>
+                        {/if}
+                      </div>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+              <tfoot>
+                <tr class="row-total">
+                  <td class="font-bold">全體合計 (Total)</td>
+                  <td class="text-right font-mono font-bold">{formatCurrency(payablesAging.totals.current)}</td>
+                  <td class="text-right font-mono font-bold">{formatCurrency(payablesAging.totals.overdue_1_30)}</td>
+                  <td class="text-right font-mono font-bold">{formatCurrency(payablesAging.totals.overdue_31_60)}</td>
+                  <td class="text-right font-mono font-bold">{formatCurrency(payablesAging.totals.overdue_61_90)}</td>
+                  <td class="text-right font-mono font-bold">{formatCurrency(payablesAging.totals.overdue_90_plus)}</td>
+                  <td class="text-right font-mono font-bold text-danger">{formatCurrency(payablesAging.totals.total_outstanding)}</td>
+                  <td class="text-right font-mono font-bold text-muted bg-ref">{formatCurrency(payablesAging.totals.unbilled_received_amount)}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+          {/if}
+        </div>
+
+      {:else if agingViewMode === 'detail' && selectedAgingVendor}
+        <!-- Vendor Detail View -->
+        <div class="toolbar">
+          <div class="toolbar-left">
+            <button class="btn btn-secondary btn-sm" onclick={() => { agingViewMode = 'summary'; }} id="btn-back-to-aging-summary">
+              ← 返回帳齡總表
+            </button>
+            <h3 class="m-0 font-bold">{selectedAgingVendor.vendor_name} - 應付帳款明細</h3>
+          </div>
+          <div class="toolbar-right">
+            {#if selectedAgingVendor.total_outstanding > 0}
+              <button 
+                class="btn btn-primary btn-sm" 
+                onclick={() => initiatePaymentFromVendor(selectedAgingVendor.vendor_partner_id)}
+                id="btn-vendor-detail-pay"
+              >
+                為此供應商付款 ({formatCurrency(selectedAgingVendor.total_outstanding)})
+              </button>
+            {/if}
+          </div>
+        </div>
+
+        <div class="table-container">
+          {#if selectedAgingVendor.items.length === 0}
+            <div class="empty-state">
+              <p>此供應商目前無未付應付帳款（或僅有已到貨未請款訂單）</p>
+              {#if selectedAgingVendor.unbilled_received_amount > 0}
+                <p class="text-muted">已到貨未請款金額：{formatCurrency(selectedAgingVendor.unbilled_received_amount)}</p>
+              {/if}
+            </div>
+          {:else}
+            <table class="data-table" id="table-vendor-aging-detail">
+              <thead>
+                <tr>
+                  <th>來源單號</th>
+                  <th>外部單號</th>
+                  <th>單據日</th>
+                  <th>到期日</th>
+                  <th class="text-center">逾期天數</th>
+                  <th class="text-center">所屬分段</th>
+                  <th class="text-right">應付金額</th>
+                  <th class="text-right">已付金額</th>
+                  <th class="text-right">未付餘額</th>
+                  <th class="text-center">付款狀態</th>
+                  <th class="text-center">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each selectedAgingVendor.items as item}
+                  <tr>
+                    <td class="font-mono font-medium">
+                      {#if item.source_type === 'vendor_bill'}
+                        <button class="link-btn font-mono" onclick={() => jumpToVendorBill(item.source_id)}>{item.source_number}</button>
+                      {:else if item.source_type === 'opening_balance'}
+                        <button class="link-btn font-mono" onclick={() => jumpToOpeningPayable(item.source_id)}>{item.source_number}</button>
+                      {:else}
+                        {item.source_number}
+                      {/if}
+                    </td>
+                    <td class="font-mono text-muted">{item.external_reference || '-'}</td>
+                    <td>{item.document_date}</td>
+                    <td>{item.due_date}</td>
+                    <td class="text-center font-mono">
+                      {#if item.overdue_days <= 0}
+                        <span class="text-muted">{item.overdue_days} 天</span>
+                      {:else}
+                        <span class="text-danger font-medium">{item.overdue_days} 天</span>
+                      {/if}
+                    </td>
+                    <td class="text-center">
+                      {#if item.bucket === 'current'}
+                        <span class="badge badge-success">未到期</span>
+                      {:else if item.bucket === '1-30'}
+                        <span class="badge badge-warning">逾期 1-30</span>
+                      {:else if item.bucket === '31-60'}
+                        <span class="badge badge-warning">逾期 31-60</span>
+                      {:else if item.bucket === '61-90'}
+                        <span class="badge badge-danger">逾期 61-90</span>
+                      {:else}
+                        <span class="badge badge-danger font-bold">逾期 90+</span>
+                      {/if}
+                    </td>
+                    <td class="text-right font-mono">{formatCurrency(item.amount)}</td>
+                    <td class="text-right font-mono">{formatCurrency(item.paid_amount)}</td>
+                    <td class="text-right font-mono font-bold text-danger">{formatCurrency(item.outstanding_amount)}</td>
+                    <td class="text-center">
+                      {#if item.settlement_status === 'unpaid'}
+                        <span class="badge badge-unpaid">未付</span>
+                      {:else if item.settlement_status === 'partially_paid'}
+                        <span class="badge badge-partial">部分付款</span>
+                      {:else}
+                        <span class="badge badge-paid">已付清</span>
+                      {/if}
+                    </td>
+                    <td class="text-center">
+                      <div class="btn-group-sm">
+                        <button 
+                          class="btn-action text-primary font-medium" 
+                          onclick={() => initiatePaymentFromAp(item)}
+                          id={`btn-pay-ap-${item.account_payable_id}`}
+                        >
+                          付款
+                        </button>
+                        <button 
+                          class="btn-action text-muted" 
+                          onclick={() => openApDetailModal(item.account_payable_id)}
+                        >
+                          核銷歷程
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+        </div>
+      {/if}
+
+    <!-- ==================================================== -->
     <!-- SUBTAB 1: 付款單 (Vendor Payments) -->
     <!-- ==================================================== -->
-    {#if activeSubTab === 'vendor-payments'}
+    {:else if activeSubTab === 'vendor-payments'}
       {#if paymentViewMode === 'list'}
         <!-- Payments List View -->
         <div class="toolbar">
@@ -2667,4 +2944,57 @@
   .mt-4 { margin-top: 1rem; }
   .ml-2 { margin-left: 0.5rem; }
   .py-4 { padding-top: 1rem; padding-bottom: 1rem; }
+
+  /* Aging KPI Cards */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .kpi-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+
+  .kpi-card.kpi-reference {
+    background: #f8fafc;
+    border-left: 4px solid #0284c7;
+  }
+
+  .kpi-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.025em;
+  }
+
+  .kpi-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1e293b;
+    line-height: 1.2;
+  }
+
+  .kpi-sub {
+    font-size: 0.6875rem;
+    color: #94a3b8;
+  }
+
+  .bg-ref {
+    background-color: #f8fafc;
+  }
+
+  .row-total {
+    background-color: #f1f5f9;
+    border-top: 2px solid #cbd5e1;
+  }
 </style>

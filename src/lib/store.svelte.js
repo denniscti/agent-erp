@@ -220,6 +220,8 @@ export const appState = $state({
   accountsPayable: [],
   /** @type {any | null} */
   currentAccountPayableDetail: null,
+  /** @type {any | null} */
+  payablesAgingReport: null,
 
   // Lightweight task confirmation state
   /** @type {import('./workflow/types.js').PendingConfirmation | null} */
@@ -4589,6 +4591,25 @@ export async function getAccountPayableAction(id) {
     return detail;
   } catch (err) {
     console.error("Failed to get account payable detail:", err);
+    throw err;
+  }
+}
+
+/**
+ * Load accounts payable aging report
+ * @param {string} [asOfDate]
+ * @returns {Promise<any>}
+ */
+export async function loadPayablesAgingAction(asOfDate) {
+  try {
+    const report = await invoke('get_payables_aging', {
+      as_of_date: asOfDate,
+      asOfDate: asOfDate
+    });
+    appState.payablesAgingReport = report;
+    return report;
+  } catch (err) {
+    console.error("Failed to load payables aging report:", err);
     throw err;
   }
 }

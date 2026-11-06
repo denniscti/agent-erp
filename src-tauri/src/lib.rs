@@ -573,6 +573,7 @@ pub fn run() {
             stock_transfers::list_stock_transfers,
             accounts_payable::get_account_payable,
             accounts_payable::list_accounts_payable,
+            accounts_payable::get_payables_aging,
             vendor_bills::create_vendor_bill,
             vendor_bills::update_vendor_bill_header,
             vendor_bills::add_vendor_bill_order,

@@ -4725,6 +4725,211 @@ export async function invoke(cmd, args = {}) {
       return items;
     }
 
+    case 'get_payables_aging': {
+      const { as_of_date, asOfDate } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      if (!targetTenantId || !String(targetTenantId).trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+
+      function parseYmd(s) {
+        if (!s || typeof s !== 'string') return null;
+        const parts = s.trim().split('-');
+        if (parts.length !== 3) return null;
+        const y = parseInt(parts[0], 10);
+        const m = parseInt(parts[1], 10);
+        const d = parseInt(parts[2], 10);
+        if (isNaN(y) || isNaN(m) || isNaN(d) || m < 1 || m > 12 || d < 1 || d > 31) return null;
+        return { y, m, d };
+      }
+
+      function ymdToJdn(y, m, d) {
+        const yPrime = m <= 2 ? y - 1 : y;
+        const mPrime = m <= 2 ? m + 12 : m;
+        const a = Math.floor(yPrime / 100);
+        const b = 2 - a + Math.floor(a / 4);
+        return Math.floor((1461 * (yPrime + 4716)) / 4) + Math.floor((153 * (mPrime + 1)) / 5) + d + b - 1524;
+      }
+
+      function calendarDayDiff(fromDate, toDate) {
+        const f = parseYmd(fromDate);
+        const t = parseYmd(toDate);
+        if (!f || !t) return 0;
+        return ymdToJdn(t.y, t.m, t.d) - ymdToJdn(f.y, f.m, f.d);
+      }
+
+      function round2(v) {
+        return Math.round((v || 0) * 100) / 100;
+      }
+
+      let asOf = as_of_date || asOfDate;
+      if (!asOf || !String(asOf).trim()) {
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        asOf = `${year}-${month}-${day}`;
+      } else {
+        asOf = String(asOf).trim();
+      }
+
+      // Unbilled received orders
+      const activeCoveredPoIds = new Set();
+      for (const order of mockVendorBillOrders) {
+        const bill = mockVendorBills.find(b => b.id === order.bill_id && (b.tenant_id || 'tnt_mock_1') === targetTenantId);
+        if (bill && ['draft', 'disputed', 'posted'].includes(bill.status)) {
+          activeCoveredPoIds.add(order.purchase_order_id);
+        }
+      }
+
+      const unbilledOrders = mockPurchaseOrders
+        .filter(po => (po.tenant_id || 'tnt_mock_1') === targetTenantId && po.status === 'received' && !activeCoveredPoIds.has(po.id));
+
+      const unbilledMap = new Map();
+      for (const po of unbilledOrders) {
+        const lines = mockPurchaseOrderLines.filter(l => l.purchase_order_id === po.id);
+        const recTotal = lines.reduce((sum, l) => sum + (l.received_quantity || 0) * (l.purchase_cost || 0), 0);
+        const current = unbilledMap.get(po.vendor_partner_id) || { vendor_name: po.vendor_name_snapshot, amount: 0 };
+        current.amount += recTotal;
+        unbilledMap.set(po.vendor_partner_id, current);
+      }
+
+      // Open accounts payable with outstanding_amount > 0
+      const openAps = mockAccountsPayable
+        .filter(a => (a.tenant_id || 'tnt_mock_1') === targetTenantId && a.status === 'open')
+        .map(a => formatMockAccountPayable(a).item)
+        .filter(a => a.outstanding_amount > 0);
+
+      const vendorMap = new Map();
+
+      for (const ap of openAps) {
+        let vData = vendorMap.get(ap.vendor_partner_id);
+        if (!vData) {
+          vData = {
+            vendor_partner_id: ap.vendor_partner_id,
+            vendor_name: ap.vendor_name_snapshot,
+            current: 0,
+            overdue_1_30: 0,
+            overdue_31_60: 0,
+            overdue_61_90: 0,
+            overdue_90_plus: 0,
+            total_outstanding: 0,
+            unbilled_received_amount: 0,
+            items: []
+          };
+          vendorMap.set(ap.vendor_partner_id, vData);
+        }
+
+        const overdueDays = calendarDayDiff(ap.due_date, asOf);
+        let bucket = 'current';
+        if (overdueDays <= 0) {
+          bucket = 'current';
+          vData.current += ap.outstanding_amount;
+        } else if (overdueDays <= 30) {
+          bucket = '1-30';
+          vData.overdue_1_30 += ap.outstanding_amount;
+        } else if (overdueDays <= 60) {
+          bucket = '31-60';
+          vData.overdue_31_60 += ap.outstanding_amount;
+        } else if (overdueDays <= 90) {
+          bucket = '61-90';
+          vData.overdue_61_90 += ap.outstanding_amount;
+        } else {
+          bucket = '90+';
+          vData.overdue_90_plus += ap.outstanding_amount;
+        }
+        vData.total_outstanding += ap.outstanding_amount;
+
+        vData.items.push({
+          account_payable_id: ap.id,
+          source_id: ap.source_id,
+          source_type: ap.source_type,
+          source_number: ap.source_number,
+          vendor_partner_id: ap.vendor_partner_id,
+          vendor_name_snapshot: ap.vendor_name_snapshot,
+          external_reference: ap.external_reference || null,
+          document_date: ap.document_date,
+          due_date: ap.due_date,
+          overdue_days: overdueDays,
+          bucket: bucket,
+          amount: round2(ap.amount),
+          paid_amount: round2(ap.paid_amount),
+          outstanding_amount: round2(ap.outstanding_amount),
+          settlement_status: ap.settlement_status
+        });
+      }
+
+      // Merge unbilled
+      for (const [vendorId, uData] of unbilledMap.entries()) {
+        let vData = vendorMap.get(vendorId);
+        if (!vData) {
+          vData = {
+            vendor_partner_id: vendorId,
+            vendor_name: uData.vendor_name,
+            current: 0,
+            overdue_1_30: 0,
+            overdue_31_60: 0,
+            overdue_61_90: 0,
+            overdue_90_plus: 0,
+            total_outstanding: 0,
+            unbilled_received_amount: 0,
+            items: []
+          };
+          vendorMap.set(vendorId, vData);
+        }
+        vData.unbilled_received_amount = round2(uData.amount);
+      }
+
+      // Round all
+      for (const vData of vendorMap.values()) {
+        vData.current = round2(vData.current);
+        vData.overdue_1_30 = round2(vData.overdue_1_30);
+        vData.overdue_31_60 = round2(vData.overdue_31_60);
+        vData.overdue_61_90 = round2(vData.overdue_61_90);
+        vData.overdue_90_plus = round2(vData.overdue_90_plus);
+        vData.total_outstanding = round2(vData.total_outstanding);
+        vData.unbilled_received_amount = round2(vData.unbilled_received_amount);
+      }
+
+      const vendors = Array.from(vendorMap.values())
+        .filter(v => v.total_outstanding > 0 || v.unbilled_received_amount > 0)
+        .sort((a, b) => a.vendor_name.localeCompare(b.vendor_name));
+
+      const totals = {
+        current: 0,
+        overdue_1_30: 0,
+        overdue_31_60: 0,
+        overdue_61_90: 0,
+        overdue_90_plus: 0,
+        total_outstanding: 0,
+        unbilled_received_amount: 0
+      };
+
+      for (const v of vendors) {
+        totals.current += v.current;
+        totals.overdue_1_30 += v.overdue_1_30;
+        totals.overdue_31_60 += v.overdue_31_60;
+        totals.overdue_61_90 += v.overdue_61_90;
+        totals.overdue_90_plus += v.overdue_90_plus;
+        totals.total_outstanding += v.total_outstanding;
+        totals.unbilled_received_amount += v.unbilled_received_amount;
+      }
+
+      totals.current = round2(totals.current);
+      totals.overdue_1_30 = round2(totals.overdue_1_30);
+      totals.overdue_31_60 = round2(totals.overdue_31_60);
+      totals.overdue_61_90 = round2(totals.overdue_61_90);
+      totals.overdue_90_plus = round2(totals.overdue_90_plus);
+      totals.total_outstanding = round2(totals.total_outstanding);
+      totals.unbilled_received_amount = round2(totals.unbilled_received_amount);
+
+      return {
+        as_of_date: asOf,
+        vendors,
+        totals
+      };
+    }
+
     case 'create_vendor_bill': {
       const payload = args?.input || args || {};
       const targetTenantId = resolveMockActiveTenantId();
@@ -5470,6 +5675,18 @@ export async function invoke(cmd, args = {}) {
         mockOpeningPayables = [];
       }
       saveStorage('agent_erp_mock_opening_payables', mockOpeningPayables);
+      return true;
+    }
+
+    case 'reset_mock_accounts_payable': {
+      const { tenant_id, tenantId } = args || {};
+      const targetTid = tenant_id || tenantId;
+      if (targetTid) {
+        mockAccountsPayable = (mockAccountsPayable || []).filter(a => (a.tenant_id || 'tnt_mock_1') !== targetTid);
+      } else {
+        mockAccountsPayable = [];
+      }
+      saveStorage('agent_erp_mock_accounts_payable', mockAccountsPayable);
       return true;
     }
 

@@ -1,5 +1,6 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -241,6 +242,126 @@ pub struct ListAccountsPayableFilter {
     pub status: Option<String>,
     pub due_date_from: Option<String>,
     pub due_date_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub enum AgingBucket {
+    #[serde(rename = "current")]
+    Current,
+    #[serde(rename = "1-30")]
+    Overdue1To30,
+    #[serde(rename = "31-60")]
+    Overdue31To60,
+    #[serde(rename = "61-90")]
+    Overdue61To90,
+    #[serde(rename = "90+")]
+    Overdue90Plus,
+}
+
+impl AgingBucket {
+    pub fn from_overdue_days(days: i32) -> Self {
+        if days <= 0 {
+            AgingBucket::Current
+        } else if days <= 30 {
+            AgingBucket::Overdue1To30
+        } else if days <= 60 {
+            AgingBucket::Overdue31To60
+        } else if days <= 90 {
+            AgingBucket::Overdue61To90
+        } else {
+            AgingBucket::Overdue90Plus
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AgingBucket::Current => "current",
+            AgingBucket::Overdue1To30 => "1-30",
+            AgingBucket::Overdue31To60 => "31-60",
+            AgingBucket::Overdue61To90 => "61-90",
+            AgingBucket::Overdue90Plus => "90+",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct PayableAgingItem {
+    pub account_payable_id: String,
+    pub source_id: String,
+    pub source_type: String,
+    pub source_number: String,
+    pub vendor_partner_id: String,
+    pub vendor_name_snapshot: String,
+    pub external_reference: Option<String>,
+    pub document_date: String,
+    pub due_date: String,
+    pub overdue_days: i32,
+    pub bucket: String,
+    pub amount: f64,
+    pub paid_amount: f64,
+    pub outstanding_amount: f64,
+    pub settlement_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
+pub struct VendorPayablesAging {
+    pub vendor_partner_id: String,
+    pub vendor_name: String,
+    pub current: f64,
+    pub overdue_1_30: f64,
+    pub overdue_31_60: f64,
+    pub overdue_61_90: f64,
+    pub overdue_90_plus: f64,
+    pub total_outstanding: f64,
+    pub unbilled_received_amount: f64,
+    pub items: Vec<PayableAgingItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, Default)]
+pub struct AgingBucketTotals {
+    pub current: f64,
+    pub overdue_1_30: f64,
+    pub overdue_31_60: f64,
+    pub overdue_61_90: f64,
+    pub overdue_90_plus: f64,
+    pub total_outstanding: f64,
+    pub unbilled_received_amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct PayablesAgingReport {
+    pub as_of_date: String,
+    pub vendors: Vec<VendorPayablesAging>,
+    pub totals: AgingBucketTotals,
+}
+
+pub fn parse_ymd(s: &str) -> Option<(i32, i32, i32)> {
+    let parts: Vec<&str> = s.trim().split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let y = parts[0].parse::<i32>().ok()?;
+    let m = parts[1].parse::<i32>().ok()?;
+    let d = parts[2].parse::<i32>().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some((y, m, d))
+}
+
+pub fn ymd_to_jdn(y: i32, m: i32, d: i32) -> i32 {
+    let (y, m) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
+    let a = y / 100;
+    let b = 2 - a + a / 4;
+    (1461 * (y + 4716)) / 4 + (153 * (m + 1)) / 5 + d + b - 1524
+}
+
+/// Calculate day difference: to_date - from_date
+/// Returns positive integer if to_date is after from_date
+pub fn calendar_day_diff(from_date: &str, to_date: &str) -> Option<i32> {
+    let (fy, fm, fd) = parse_ymd(from_date)?;
+    let (ty, tm, td) = parse_ymd(to_date)?;
+    Some(ymd_to_jdn(ty, tm, td) - ymd_to_jdn(fy, fm, fd))
 }
 
 // ==========================================
@@ -968,6 +1089,184 @@ pub async fn list_accounts_payable<R: tauri::Runtime>(
     .map_err(|e| e.to_string())
 }
 
+pub fn get_payables_aging_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    as_of_date: Option<String>,
+) -> Result<PayablesAgingReport, AccountsPayableError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(AccountsPayableError::EmptyTenantId);
+    }
+
+    // Determine as_of_date (strictly calendar date YYYY-MM-DD)
+    let as_of = match as_of_date {
+        Some(ref d) if !d.trim().is_empty() => d.trim().to_string(),
+        _ => conn
+            .query_row("SELECT date('now', 'localtime')", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap_or_else(|_| "2026-11-05".to_string()),
+    };
+
+    // 1. Unbilled received orders (reference column, untaxed total)
+    let unbilled_list =
+        match crate::vendor_bills::list_unbilled_received_orders_impl(conn, tid, None) {
+            Ok(list) => list,
+            Err(crate::vendor_bills::VendorBillError::EmptyTenantId) => {
+                return Err(AccountsPayableError::EmptyTenantId)
+            }
+            Err(_) => Vec::new(),
+        };
+
+    let mut unbilled_map: BTreeMap<String, (String, f64)> = BTreeMap::new();
+    for u in unbilled_list {
+        let entry = unbilled_map
+            .entry(u.vendor_partner_id.clone())
+            .or_insert((u.vendor_name_snapshot.clone(), 0.0));
+        entry.1 += u.received_total_amount;
+    }
+
+    // 2. Open accounts payable with outstanding_amount > 0
+    let open_aps = list_accounts_payable_impl(
+        conn,
+        tid,
+        ListAccountsPayableFilter {
+            status: Some("open".to_string()),
+            ..Default::default()
+        },
+    )?;
+
+    let mut vendor_map: BTreeMap<String, VendorPayablesAging> = BTreeMap::new();
+
+    for ap in open_aps {
+        if ap.outstanding_amount <= 0.0 {
+            continue;
+        }
+
+        // overdue_days = as_of - due_date
+        let overdue_days = calendar_day_diff(&ap.due_date, &as_of).unwrap_or(0);
+        let bucket = AgingBucket::from_overdue_days(overdue_days);
+
+        let vendor_entry = vendor_map
+            .entry(ap.vendor_partner_id.clone())
+            .or_insert_with(|| VendorPayablesAging {
+                vendor_partner_id: ap.vendor_partner_id.clone(),
+                vendor_name: ap.vendor_name_snapshot.clone(),
+                current: 0.0,
+                overdue_1_30: 0.0,
+                overdue_31_60: 0.0,
+                overdue_61_90: 0.0,
+                overdue_90_plus: 0.0,
+                total_outstanding: 0.0,
+                unbilled_received_amount: 0.0,
+                items: Vec::new(),
+            });
+
+        match bucket {
+            AgingBucket::Current => vendor_entry.current += ap.outstanding_amount,
+            AgingBucket::Overdue1To30 => vendor_entry.overdue_1_30 += ap.outstanding_amount,
+            AgingBucket::Overdue31To60 => vendor_entry.overdue_31_60 += ap.outstanding_amount,
+            AgingBucket::Overdue61To90 => vendor_entry.overdue_61_90 += ap.outstanding_amount,
+            AgingBucket::Overdue90Plus => vendor_entry.overdue_90_plus += ap.outstanding_amount,
+        }
+        vendor_entry.total_outstanding += ap.outstanding_amount;
+
+        vendor_entry.items.push(PayableAgingItem {
+            account_payable_id: ap.id,
+            source_id: ap.source_id,
+            source_type: ap.source_type,
+            source_number: ap.source_number,
+            vendor_partner_id: ap.vendor_partner_id,
+            vendor_name_snapshot: ap.vendor_name_snapshot,
+            external_reference: ap.external_reference,
+            document_date: ap.document_date,
+            due_date: ap.due_date,
+            overdue_days,
+            bucket: bucket.as_str().to_string(),
+            amount: ap.amount,
+            paid_amount: ap.paid_amount,
+            outstanding_amount: ap.outstanding_amount,
+            settlement_status: ap.settlement_status.as_str().to_string(),
+        });
+    }
+
+    // Merge unbilled received orders
+    for (v_id, (v_name, unbilled_amt)) in unbilled_map {
+        let vendor_entry = vendor_map
+            .entry(v_id.clone())
+            .or_insert_with(|| VendorPayablesAging {
+                vendor_partner_id: v_id,
+                vendor_name: v_name,
+                current: 0.0,
+                overdue_1_30: 0.0,
+                overdue_31_60: 0.0,
+                overdue_61_90: 0.0,
+                overdue_90_plus: 0.0,
+                total_outstanding: 0.0,
+                unbilled_received_amount: 0.0,
+                items: Vec::new(),
+            });
+        vendor_entry.unbilled_received_amount = round_2(unbilled_amt);
+    }
+
+    // Round vendor sums and filter vendors: only keep total_outstanding > 0 || unbilled_received_amount > 0
+    let mut filtered_vendors: Vec<VendorPayablesAging> = Vec::new();
+    for mut v in vendor_map.into_values() {
+        v.current = round_2(v.current);
+        v.overdue_1_30 = round_2(v.overdue_1_30);
+        v.overdue_31_60 = round_2(v.overdue_31_60);
+        v.overdue_61_90 = round_2(v.overdue_61_90);
+        v.overdue_90_plus = round_2(v.overdue_90_plus);
+        v.total_outstanding = round_2(v.total_outstanding);
+        v.unbilled_received_amount = round_2(v.unbilled_received_amount);
+
+        if v.total_outstanding > 0.0 || v.unbilled_received_amount > 0.0 {
+            filtered_vendors.push(v);
+        }
+    }
+
+    filtered_vendors.sort_by(|a, b| a.vendor_name.cmp(&b.vendor_name));
+
+    // Calculate totals across all qualifying vendors
+    let mut totals = AgingBucketTotals::default();
+    for v in &filtered_vendors {
+        totals.current += v.current;
+        totals.overdue_1_30 += v.overdue_1_30;
+        totals.overdue_31_60 += v.overdue_31_60;
+        totals.overdue_61_90 += v.overdue_61_90;
+        totals.overdue_90_plus += v.overdue_90_plus;
+        totals.total_outstanding += v.total_outstanding;
+        totals.unbilled_received_amount += v.unbilled_received_amount;
+    }
+
+    totals.current = round_2(totals.current);
+    totals.overdue_1_30 = round_2(totals.overdue_1_30);
+    totals.overdue_31_60 = round_2(totals.overdue_31_60);
+    totals.overdue_61_90 = round_2(totals.overdue_61_90);
+    totals.overdue_90_plus = round_2(totals.overdue_90_plus);
+    totals.total_outstanding = round_2(totals.total_outstanding);
+    totals.unbilled_received_amount = round_2(totals.unbilled_received_amount);
+
+    Ok(PayablesAgingReport {
+        as_of_date: as_of,
+        vendors: filtered_vendors,
+        totals,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_payables_aging<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    as_of_date: Option<String>,
+) -> Result<PayablesAgingReport, String> {
+    let db_path = crate::get_db_path(&app_handle);
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    get_payables_aging_impl(&conn, &active_tid, as_of_date).map_err(|e| e.to_string())
+}
+
 // ==========================================
 // Unit and Integration Tests (Layer 1)
 // ==========================================
@@ -1654,5 +1953,369 @@ mod tests {
         )
         .unwrap();
         assert!(!list_paid_filter.iter().any(|item| item.id == ap_open.id));
+    }
+
+    #[test]
+    fn test_tc_ap_aging_b01_to_b11_date_diff_and_boundaries() {
+        // Given: Fixed as_of_date "2026-03-02"
+        let as_of = "2026-03-02";
+
+        // When & Then (TC-AGING-B01): due_date = as_of -> overdue_days = 0, bucket = Current
+        let diff_0 = calendar_day_diff("2026-03-02", as_of).unwrap();
+        assert_eq!(diff_0, 0);
+        assert_eq!(AgingBucket::from_overdue_days(diff_0), AgingBucket::Current);
+        assert_eq!(AgingBucket::from_overdue_days(diff_0).as_str(), "current");
+
+        // When & Then (TC-AGING-B02): due_date = tomorrow ("2026-03-03") -> overdue_days = -1, bucket = Current
+        let diff_neg1 = calendar_day_diff("2026-03-03", as_of).unwrap();
+        assert_eq!(diff_neg1, -1);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_neg1),
+            AgingBucket::Current
+        );
+
+        // When & Then (TC-AGING-B03): due_date = 1 day ago ("2026-03-01") -> overdue_days = 1, bucket = 1-30
+        let diff_1 = calendar_day_diff("2026-03-01", as_of).unwrap();
+        assert_eq!(diff_1, 1);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_1),
+            AgingBucket::Overdue1To30
+        );
+        assert_eq!(AgingBucket::from_overdue_days(diff_1).as_str(), "1-30");
+
+        // When & Then (TC-AGING-B10 & B04): cross-month "2026-01-31" to "2026-03-02" -> exactly 30 days, bucket = 1-30
+        let diff_30 = calendar_day_diff("2026-01-31", as_of).unwrap();
+        assert_eq!(diff_30, 30);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_30),
+            AgingBucket::Overdue1To30
+        );
+
+        // When & Then (TC-AGING-B05): due_date 31 days ago ("2026-01-30") -> 31 days, bucket = 31-60
+        let diff_31 = calendar_day_diff("2026-01-30", as_of).unwrap();
+        assert_eq!(diff_31, 31);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_31),
+            AgingBucket::Overdue31To60
+        );
+        assert_eq!(AgingBucket::from_overdue_days(diff_31).as_str(), "31-60");
+
+        // When & Then (TC-AGING-B06): due_date 60 days ago ("2026-01-01") -> 60 days, bucket = 31-60
+        let diff_60 = calendar_day_diff("2026-01-01", as_of).unwrap();
+        assert_eq!(diff_60, 60);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_60),
+            AgingBucket::Overdue31To60
+        );
+
+        // When & Then (TC-AGING-B07 & B11): cross-year "2025-12-31" to "2026-03-02" -> 61 days, bucket = 61-90
+        let diff_61 = calendar_day_diff("2025-12-31", as_of).unwrap();
+        assert_eq!(diff_61, 61);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_61),
+            AgingBucket::Overdue61To90
+        );
+        assert_eq!(AgingBucket::from_overdue_days(diff_61).as_str(), "61-90");
+
+        // When & Then (TC-AGING-B08): due_date 90 days ago ("2025-12-02") -> 90 days, bucket = 61-90
+        let diff_90 = calendar_day_diff("2025-12-02", as_of).unwrap();
+        assert_eq!(diff_90, 90);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_90),
+            AgingBucket::Overdue61To90
+        );
+
+        // When & Then (TC-AGING-B09): due_date 91 days ago ("2025-12-01") -> 91 days, bucket = 90+
+        let diff_91 = calendar_day_diff("2025-12-01", as_of).unwrap();
+        assert_eq!(diff_91, 91);
+        assert_eq!(
+            AgingBucket::from_overdue_days(diff_91),
+            AgingBucket::Overdue90Plus
+        );
+        assert_eq!(AgingBucket::from_overdue_days(diff_91).as_str(), "90+");
+
+        // When & Then (TC-AGING-B11 cross-year 1 day): "2025-12-31" to "2026-01-01" -> 1 day
+        let diff_cy = calendar_day_diff("2025-12-31", "2026-01-01").unwrap();
+        assert_eq!(diff_cy, 1);
+    }
+
+    #[test]
+    fn test_tc_ap_aging_n01_to_n03_b12_report_buckets_and_totals() {
+        // Given: Seed database with APs across all 5 buckets
+        let mut conn = setup_test_db();
+        let as_of = Some("2026-03-02".to_string());
+
+        // AP 1: Current (due today 2026-03-02), amount 1000
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_001".to_string(),
+                source_number: "BILL-001".to_string(),
+                external_reference: Some("INV-001".to_string()),
+                document_date: "2026-02-01".to_string(),
+                due_date: "2026-03-02".to_string(),
+                amount: 1000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // AP 2: Overdue 1-30 (due 2026-01-31 = 30 days), amount 2000
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_002".to_string(),
+                source_number: "BILL-002".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-31".to_string(),
+                amount: 2000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // AP 3: Overdue 31-60 (due 2026-01-30 = 31 days), amount 3000
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "opening_balance".to_string(),
+                source_id: "oap_001".to_string(),
+                source_number: "OAP-001".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-30".to_string(),
+                amount: 3000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // AP 4: Overdue 61-90 (due 2025-12-31 = 61 days), amount 4000
+        create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "opening_balance".to_string(),
+                source_id: "oap_002".to_string(),
+                source_number: "OAP-002".to_string(),
+                external_reference: None,
+                document_date: "2025-12-01".to_string(),
+                due_date: "2025-12-31".to_string(),
+                amount: 4000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // AP 5: Overdue 90+ (due 2025-12-01 = 91 days), amount 5000, with partial payment 4999.99 (TC-AGING-B12)
+        let ap5 = create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "opening_balance".to_string(),
+                source_id: "oap_003".to_string(),
+                source_number: "OAP-003".to_string(),
+                external_reference: None,
+                document_date: "2025-11-01".to_string(),
+                due_date: "2025-12-01".to_string(),
+                amount: 5000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // Simulate partial payment of 4999.99 on ap5
+        conn.execute(
+            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
+             VALUES ('pay_part', 'tnt_test', 'PAY-PART', 'vnd_001', '2026-02-15', 4999.99, 'TWD', 'posted', 'usr_admin', 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('paya_part', 'tnt_test', 'pay_part', ?1, 4999.99, 1000)",
+            params![ap5.id],
+        )
+        .unwrap();
+
+        // When: Generating aging report as of 2026-03-02
+        let report = get_payables_aging_impl(&conn, "tnt_test", as_of).unwrap();
+
+        // Then (TC-AGING-N01 & N02): Check vnd_001 buckets
+        assert_eq!(report.vendors.len(), 1);
+        let v = &report.vendors[0];
+        assert_eq!(v.vendor_partner_id, "vnd_001");
+        assert_eq!(v.current, 1000.0);
+        assert_eq!(v.overdue_1_30, 2000.0);
+        assert_eq!(v.overdue_31_60, 3000.0);
+        assert_eq!(v.overdue_61_90, 4000.0);
+        assert_eq!(v.overdue_90_plus, 0.01); // 5000.0 - 4999.99 = 0.01
+
+        let expected_total = 1000.0 + 2000.0 + 3000.0 + 4000.0 + 0.01;
+        assert_eq!(v.total_outstanding, round_2(expected_total));
+
+        // Then (TC-AGING-N03): Totals match vendor sum
+        assert_eq!(report.totals.current, v.current);
+        assert_eq!(report.totals.overdue_1_30, v.overdue_1_30);
+        assert_eq!(report.totals.overdue_31_60, v.overdue_31_60);
+        assert_eq!(report.totals.overdue_61_90, v.overdue_61_90);
+        assert_eq!(report.totals.overdue_90_plus, v.overdue_90_plus);
+        assert_eq!(report.totals.total_outstanding, v.total_outstanding);
+
+        // Then (TC-AGING-N08): Items detail list contains all 5 open APs
+        assert_eq!(v.items.len(), 5);
+        let item1 = v
+            .items
+            .iter()
+            .find(|i| i.source_number == "BILL-001")
+            .unwrap();
+        assert_eq!(item1.overdue_days, 0);
+        assert_eq!(item1.bucket, "current");
+        assert_eq!(item1.external_reference, Some("INV-001".to_string()));
+
+        let item5 = v
+            .items
+            .iter()
+            .find(|i| i.source_number == "OAP-003")
+            .unwrap();
+        assert_eq!(item5.overdue_days, 91);
+        assert_eq!(item5.bucket, "90+");
+        assert_eq!(item5.amount, 5000.0);
+        assert_eq!(item5.paid_amount, 4999.99);
+        assert_eq!(item5.outstanding_amount, 0.01);
+        assert_eq!(item5.settlement_status, "partially_paid");
+    }
+
+    #[test]
+    fn test_tc_ap_aging_e01_to_e06_n04_to_n07_exclusions_unbilled_and_isolation() {
+        // Given: Database with multiple tenants, voided APs, fully paid APs, and unbilled purchase orders
+        let mut conn = setup_test_db();
+        crate::purchase_orders::create_purchase_orders_tables(&conn).unwrap();
+        crate::vendor_bills::create_vendor_bills_tables(&conn).unwrap();
+
+        // 1. Fully paid AP (outstanding = 0) -> should be excluded (TC-AGING-E04)
+        let ap_paid = create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_paid".to_string(),
+                source_number: "BILL-PAID".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-31".to_string(),
+                amount: 800.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
+             VALUES ('pay_full', 'tnt_test', 'PAY-FULL', 'vnd_001', '2026-02-01', 800.0, 'TWD', 'posted', 'usr_admin', 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('paya_full', 'tnt_test', 'pay_full', ?1, 800.0, 1000)",
+            params![ap_paid.id],
+        )
+        .unwrap();
+
+        // 2. Voided AP -> should be excluded (TC-AGING-E03)
+        let ap_void = create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_void".to_string(),
+                source_number: "BILL-VOID".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-31".to_string(),
+                amount: 500.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+        void_account_payable(&mut conn, "tnt_test", "usr_admin", &ap_void.id, "作廢測試").unwrap();
+
+        // 3. AP in another tenant (tnt_other) -> should be excluded by tenant isolation (TC-AGING-E06)
+        create_account_payable(
+            &mut conn,
+            "tnt_other",
+            "usr_other",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_other".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_other".to_string(),
+                source_number: "BILL-OTHER".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-31".to_string(),
+                amount: 9999.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // 4. Seed an unbilled received purchase order for vnd_001 (TC-AGING-N04, N06)
+        conn.execute(
+            "INSERT INTO purchase_orders (id, tenant_id, po_number, vendor_partner_id, vendor_name_snapshot, status, ordered_at, received_at, created_by, created_at)
+             VALUES ('po_rec_1', 'tnt_test', 'PO-001', 'vnd_001', '測試供應商股份公司', 'received', 1000, 2000, 'usr_admin', 1000)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO purchase_order_lines (id, purchase_order_id, line_no, unit_id, product_name_snapshot, variant_name_snapshot, unit_name_snapshot, quantity, received_quantity, purchase_cost, created_at)
+             VALUES ('pol_1', 'po_rec_1', 1, 'unit_1', '商品1', '預設', '個', 10.0, 10.0, 150.0, 1000)",
+            [],
+        )
+        .unwrap(); // received_total_amount = 10 * 150 = 1500.0
+
+        // When: Querying aging for tnt_test
+        let report =
+            get_payables_aging_impl(&conn, "tnt_test", Some("2026-03-02".to_string())).unwrap();
+
+        // Then (TC-AGING-N04 & N06):
+        // vnd_001 has 0 open AP (paid & voided were excluded), but unbilled_received_amount = 1500.0!
+        // Therefore, it appears in the list!
+        assert_eq!(report.vendors.len(), 1);
+        let v = &report.vendors[0];
+        assert_eq!(v.vendor_partner_id, "vnd_001");
+        assert_eq!(v.total_outstanding, 0.0);
+        assert_eq!(v.unbilled_received_amount, 1500.0);
+        assert_eq!(report.totals.total_outstanding, 0.0);
+        assert_eq!(report.totals.unbilled_received_amount, 1500.0);
+
+        // When & Then (TC-AGING-E01 & E02): Empty and whitespace tenant_id return EmptyTenantId
+        assert_eq!(
+            get_payables_aging_impl(&conn, "", None).unwrap_err(),
+            AccountsPayableError::EmptyTenantId
+        );
+        assert_eq!(
+            get_payables_aging_impl(&conn, "   ", None).unwrap_err(),
+            AccountsPayableError::EmptyTenantId
+        );
     }
 }
