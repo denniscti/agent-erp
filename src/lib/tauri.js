@@ -528,6 +528,18 @@ if (!mockVendorPayments || !Array.isArray(mockVendorPayments)) {
   saveStorage('agent_erp_mock_vendor_payments', mockVendorPayments);
 }
 
+let mockQuotes = loadStorage('agent_erp_mock_quotes', []);
+if (!mockQuotes || !Array.isArray(mockQuotes)) {
+  mockQuotes = [];
+  saveStorage('agent_erp_mock_quotes', mockQuotes);
+}
+
+let mockQuoteLines = loadStorage('agent_erp_mock_quote_lines', []);
+if (!mockQuoteLines || !Array.isArray(mockQuoteLines)) {
+  mockQuoteLines = [];
+  saveStorage('agent_erp_mock_quote_lines', mockQuoteLines);
+}
+
 let mockVendorPaymentAllocations = loadStorage('agent_erp_mock_vendor_payment_allocations', []);
 if (!mockVendorPaymentAllocations || !Array.isArray(mockVendorPaymentAllocations)) {
   mockVendorPaymentAllocations = [];
@@ -678,6 +690,50 @@ function nextMockBillNumber(tenantId) {
   }
   const nextSeq = maxSeq + 1;
   return `BILL-${String(nextSeq).padStart(5, '0')}`;
+}
+
+function nextMockQuoteNumber(tenantId) {
+  const existing = mockQuotes.filter(q => (q.tenant_id || 'tnt_mock_1') === tenantId);
+  let maxSeq = 0;
+  for (const q of existing) {
+    if (q.quote_number && q.quote_number.startsWith('QUO-')) {
+      const num = parseInt(q.quote_number.substring(4), 10);
+      if (!isNaN(num) && num > maxSeq) {
+        maxSeq = num;
+      }
+    }
+  }
+  const nextSeq = maxSeq + 1;
+  return `QUO-${String(nextSeq).padStart(5, '0')}`;
+}
+
+function expireMockQuotes(tenantId, today) {
+  const t = today || new Date().toISOString().slice(0, 10);
+  const now = Math.floor(Date.now() / 1000);
+  for (const q of mockQuotes) {
+    if ((q.tenant_id || 'tnt_mock_1') === tenantId && ['pending_approval', 'sent'].includes(q.status)) {
+      if (q.valid_until < t) {
+        q.status = 'expired';
+        q.expired_at = now;
+      }
+    }
+  }
+  saveStorage('agent_erp_mock_quotes', mockQuotes);
+}
+
+function formatMockQuote(quote) {
+  const lines = mockQuoteLines
+    .filter(l => l.quote_id === quote.id)
+    .sort((a, b) => a.line_no - b.line_no);
+  const total_amount = Math.round(lines.reduce((sum, l) => sum + (Number(l.line_amount) || 0), 0) * 100) / 100;
+  return {
+    quote: {
+      ...quote,
+      total_amount
+    },
+    lines,
+    total_amount
+  };
 }
 
 function formatMockAccountPayable(ap) {
@@ -1022,6 +1078,9 @@ export class Channel {
 
 // 1. Invoke wrapper
 export async function invoke(cmd, args = {}) {
+  if (typeof window !== 'undefined' && !window.invoke) {
+    window.invoke = invoke;
+  }
   if (isTauri) {
     const { invoke: realInvoke } = await import('@tauri-apps/api/core');
     return await realInvoke(cmd, args);
@@ -6403,6 +6462,430 @@ export async function invoke(cmd, args = {}) {
 
     case 'get_llm_traces': {
       return [...mockLlmTraces];
+    }
+
+    case 'create_quote': {
+      const payload = args?.input || args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const targetUserId = resolveMockActiveUserId();
+      const customerId = (payload.customer_partner_id || payload.customerPartnerId || '').trim();
+      if (!customerId) {
+        throw new Error('找不到此客戶，或該往來對象未設定為客戶');
+      }
+      const customer = mockPartners.find(p => p.id === customerId && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!customer || !customer.is_customer || customer.is_active === false) {
+        throw new Error('找不到此客戶，或該往來對象未設定為客戶');
+      }
+      const validUntil = (payload.valid_until || payload.validUntil || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(validUntil)) {
+        throw new Error('日期格式需為 YYYY-MM-DD');
+      }
+      const today = payload.today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const now = Math.floor(Date.now() / 1000);
+      const quoteNumber = nextMockQuoteNumber(targetTenantId);
+      const quoteId = `quo_${targetTenantId}_${now}_${Math.floor(Math.random() * 9000 + 1000)}`;
+
+      const newQuote = {
+        id: quoteId,
+        tenant_id: targetTenantId,
+        quote_number: quoteNumber,
+        customer_partner_id: customer.id,
+        customer_name_snapshot: customer.name,
+        currency: 'TWD',
+        status: 'draft',
+        valid_until: validUntil,
+        note: payload.note ? String(payload.note).trim() : null,
+        customer_po_number: payload.customer_po_number || payload.customerPoNumber ? String(payload.customer_po_number || payload.customerPoNumber).trim() : null,
+        requires_approval: 0,
+        approval_rejection_reason: null,
+        created_by: targetUserId,
+        created_at: now,
+        submitted_at: null,
+        approved_by: null,
+        approved_at: null,
+        sent_at: null,
+        declined_at: null,
+        decline_reason: null,
+        expired_at: null,
+        cancelled_at: null,
+        converted_at: null,
+        accepted_by: null,
+        converted_sales_order_id: null
+      };
+
+      mockQuotes.push(newQuote);
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      return formatMockQuote(newQuote);
+    }
+
+    case 'update_quote_header': {
+      const payload = args?.input || args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const quoteId = (payload.quote_id || payload.quoteId || '').trim();
+      const today = payload.today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === quoteId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'draft') {
+        throw new Error(`報價單狀態為 ${quote.status}，僅草稿可修改`);
+      }
+
+      if (payload.customer_partner_id || payload.customerPartnerId) {
+        const cid = (payload.customer_partner_id || payload.customerPartnerId).trim();
+        const customer = mockPartners.find(p => p.id === cid && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+        if (!customer || !customer.is_customer || customer.is_active === false) {
+          throw new Error('找不到此客戶，或該往來對象未設定為客戶');
+        }
+        quote.customer_partner_id = customer.id;
+        quote.customer_name_snapshot = customer.name;
+      }
+
+      if (payload.valid_until || payload.validUntil) {
+        const vu = (payload.valid_until || payload.validUntil).trim();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(vu)) {
+          throw new Error('日期格式需為 YYYY-MM-DD');
+        }
+        quote.valid_until = vu;
+      }
+
+      if (payload.note !== undefined) {
+        quote.note = payload.note ? String(payload.note).trim() : null;
+      }
+      if (payload.customer_po_number !== undefined || payload.customerPoNumber !== undefined) {
+        const po = payload.customer_po_number !== undefined ? payload.customer_po_number : payload.customerPoNumber;
+        quote.customer_po_number = po ? String(po).trim() : null;
+      }
+
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      return formatMockQuote(quote);
+    }
+
+    case 'add_quote_line': {
+      const payload = args?.input || args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const quoteId = (payload.quote_id || payload.quoteId || '').trim();
+      const today = payload.today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === quoteId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'draft') {
+        throw new Error(`報價單狀態為 ${quote.status}，僅草稿可修改`);
+      }
+
+      const qty = Number(payload.quantity);
+      const unitPrice = Number(payload.unit_price !== undefined ? payload.unit_price : payload.unitPrice);
+      if (isNaN(qty) || qty <= 0 || isNaN(unitPrice) || unitPrice < 0) {
+        throw new Error('數量必須大於 0，單價不可為負數');
+      }
+
+      const unitId = (payload.unit_id || payload.unitId || '').trim();
+      const existingLines = mockQuoteLines.filter(l => l.quote_id === quote.id);
+      if (existingLines.some(l => l.unit_id === unitId)) {
+        throw new Error('同一報價單內商品單位不可重複');
+      }
+
+      const foundUnit = (mockProductUnits || []).find(u => u.id === unitId);
+      if (!foundUnit) {
+        throw new Error('找不到指定的商品單位');
+      }
+      const foundVariant = (mockProductVariants || []).find(v => v.id === foundUnit.variant_id);
+      const foundProduct = (mockProducts || []).find(p => p.id === foundVariant?.product_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!foundProduct) {
+        throw new Error('找不到指定的商品單位');
+      }
+      if (!foundProduct.is_sellable) {
+        throw new Error('此商品不可銷售');
+      }
+
+      const nextLineNo = existingLines.reduce((max, l) => Math.max(max, l.line_no || 0), 0) + 1;
+      const now = Math.floor(Date.now() / 1000);
+      const lineId = `qline_${targetTenantId}_${now}_${Math.floor(Math.random() * 9000 + 1000)}`;
+      const roundedPrice = Math.round(unitPrice * 100) / 100;
+      const lineAmount = Math.round(qty * roundedPrice * 100) / 100;
+      const stdPrice = Number(foundUnit.selling_price) || 0;
+
+      const newLine = {
+        id: lineId,
+        quote_id: quote.id,
+        line_no: nextLineNo,
+        unit_id: unitId,
+        product_name_snapshot: foundProduct.name,
+        variant_name_snapshot: foundVariant?.name || '標準',
+        unit_name_snapshot: foundUnit.unit_name || '個',
+        sku_snapshot: foundVariant?.sku || null,
+        quantity: qty,
+        unit_price: roundedPrice,
+        standard_price_snapshot: stdPrice,
+        requires_approval: 0,
+        line_amount: lineAmount,
+        note: payload.note ? String(payload.note).trim() : null
+      };
+
+      mockQuoteLines.push(newLine);
+      saveStorage('agent_erp_mock_quote_lines', mockQuoteLines);
+      return formatMockQuote(quote);
+    }
+
+    case 'update_quote_line': {
+      const payload = args?.input || args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const quoteId = (payload.quote_id || payload.quoteId || '').trim();
+      const lineId = (payload.line_id || payload.lineId || '').trim();
+      const today = payload.today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === quoteId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'draft') {
+        throw new Error(`報價單狀態為 ${quote.status}，僅草稿可修改`);
+      }
+
+      const qty = Number(payload.quantity);
+      const unitPrice = Number(payload.unit_price !== undefined ? payload.unit_price : payload.unitPrice);
+      if (isNaN(qty) || qty <= 0 || isNaN(unitPrice) || unitPrice < 0) {
+        throw new Error('數量必須大於 0，單價不可為負數');
+      }
+
+      const line = mockQuoteLines.find(l => l.id === lineId && l.quote_id === quote.id);
+      if (!line) throw new Error('找不到指定的報價明細');
+
+      line.quantity = qty;
+      line.unit_price = Math.round(unitPrice * 100) / 100;
+      line.line_amount = Math.round(qty * line.unit_price * 100) / 100;
+      if (payload.note !== undefined) {
+        line.note = payload.note ? String(payload.note).trim() : null;
+      }
+
+      saveStorage('agent_erp_mock_quote_lines', mockQuoteLines);
+      return formatMockQuote(quote);
+    }
+
+    case 'delete_quote_line': {
+      const { quote_id, quoteId, line_id, lineId, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const qId = (quote_id || quoteId || '').trim();
+      const lId = (line_id || lineId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'draft') {
+        throw new Error(`報價單狀態為 ${quote.status}，僅草稿可修改`);
+      }
+
+      const idx = mockQuoteLines.findIndex(l => l.id === lId && l.quote_id === quote.id);
+      if (idx === -1) throw new Error('找不到指定的報價明細');
+      mockQuoteLines.splice(idx, 1);
+
+      saveStorage('agent_erp_mock_quote_lines', mockQuoteLines);
+      return formatMockQuote(quote);
+    }
+
+    case 'submit_quote': {
+      const { quote_id, quoteId, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const qId = (quote_id || quoteId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'draft') {
+        throw new Error(`報價單狀態為 ${quote.status}，僅草稿可修改`);
+      }
+
+      if (quote.valid_until < today) {
+        throw new Error('報價有效期已過，請先修改有效期');
+      }
+
+      const lines = mockQuoteLines.filter(l => l.quote_id === quote.id);
+      if (lines.length === 0) {
+        throw new Error('報價單沒有任何品項，無法送出');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      let lowPriceCount = 0;
+
+      for (const line of lines) {
+        const foundUnit = (mockProductUnits || []).find(u => u.id === line.unit_id);
+        const currentStdPrice = foundUnit ? (Number(foundUnit.selling_price) || 0) : 0;
+
+        line.standard_price_snapshot = currentStdPrice;
+        const roundedUnit = Math.round(Number(line.unit_price) * 100) / 100;
+        const roundedStd = Math.round(currentStdPrice * 100) / 100;
+        const needsAppr = roundedUnit < roundedStd || roundedStd <= 0;
+        line.requires_approval = needsAppr ? 1 : 0;
+        if (needsAppr) {
+          lowPriceCount++;
+        }
+      }
+      saveStorage('agent_erp_mock_quote_lines', mockQuoteLines);
+
+      let message = '';
+      if (lowPriceCount > 0) {
+        quote.status = 'pending_approval';
+        quote.requires_approval = 1;
+        quote.submitted_at = now;
+        message = `已送交核准（${lowPriceCount} 項低於標準售價）`;
+      } else {
+        quote.status = 'sent';
+        quote.requires_approval = 0;
+        quote.submitted_at = now;
+        quote.sent_at = now;
+        message = '報價已送出';
+      }
+
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      return {
+        quote: formatMockQuote(quote).quote,
+        message
+      };
+    }
+
+    case 'withdraw_quote_approval': {
+      const { quote_id, quoteId, reason, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const qId = (quote_id || quoteId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'pending_approval') {
+        throw new Error('目前狀態不允許此操作');
+      }
+
+      quote.status = 'draft';
+      quote.approval_rejection_reason = reason ? String(reason).trim() : null;
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      return formatMockQuote(quote);
+    }
+
+    case 'decline_quote': {
+      const { quote_id, quoteId, reason, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const qId = (quote_id || quoteId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'sent') {
+        throw new Error('目前狀態不允許此操作');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      quote.status = 'declined';
+      quote.declined_at = now;
+      quote.decline_reason = reason ? String(reason).trim() : null;
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      return formatMockQuote(quote);
+    }
+
+    case 'cancel_quote': {
+      const { quote_id, quoteId, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const qId = (quote_id || quoteId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      quote.status = 'cancelled';
+      quote.cancelled_at = now;
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      return formatMockQuote(quote);
+    }
+
+    case 'get_quote': {
+      const { id, quote_id, quoteId, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const qId = (id || quote_id || quoteId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      return formatMockQuote(quote);
+    }
+
+    case 'list_quotes': {
+      const {
+        filter_status,
+        filterStatus,
+        status,
+        filter_customer_id,
+        filterCustomerId,
+        customer_partner_id,
+        customerPartnerId,
+        today_override
+      } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      let list = mockQuotes.filter(q => (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      const st = filter_status || filterStatus || status;
+      if (st && String(st).trim()) {
+        const normSt = String(st).trim();
+        list = list.filter(q => q.status === normSt);
+      }
+      const cid = filter_customer_id || filterCustomerId || customer_partner_id || customerPartnerId;
+      if (cid && String(cid).trim()) {
+        const normCid = String(cid).trim();
+        list = list.filter(q => q.customer_partner_id === normCid);
+      }
+      list.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+      return list.map(q => formatMockQuote(q).quote);
+    }
+
+    case 'reset_mock_quotes': {
+      const { tenant_id, tenantId } = args || {};
+      const targetTid = tenant_id || tenantId;
+      if (targetTid) {
+        const removedQuoteIds = new Set(
+          mockQuotes.filter(q => (q.tenant_id || 'tnt_mock_1') === targetTid).map(q => q.id)
+        );
+        mockQuotes = mockQuotes.filter(q => (q.tenant_id || 'tnt_mock_1') !== targetTid);
+        mockQuoteLines = mockQuoteLines.filter(l => !removedQuoteIds.has(l.quote_id));
+      } else {
+        mockQuotes = [];
+        mockQuoteLines = [];
+      }
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      saveStorage('agent_erp_mock_quote_lines', mockQuoteLines);
+      return true;
     }
     
     default:

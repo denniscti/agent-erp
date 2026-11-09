@@ -15,6 +15,7 @@ pub mod opening_payables;
 pub mod partners;
 pub mod products;
 pub mod purchase_orders;
+pub mod quotes;
 pub mod stock_transfers;
 pub mod stocktakes;
 pub mod tasks;
@@ -258,6 +259,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
     vendor_payments::create_vendor_payment_tables(&conn)
         .map_err(|e| format!("Failed to create vendor payment tables: {}", e))?;
 
+    quotes::create_quotes_tables(&conn)
+        .map_err(|e| format!("Failed to create quotes tables: {}", e))?;
+
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
 
@@ -268,6 +272,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
     );
     let now = llm_traces::current_timestamp();
     let _ = llm_traces::cleanup_expired_llm_traces(&conn, trace_retention_days, now);
+
+    let today = quotes::get_today_local(&conn).unwrap_or_else(|_| "1970-01-01".to_string());
+    let _ = quotes::expire_quotes(&conn, None, &today, now);
 
     // Seed default mock users and tenants if users table is empty and AGENT_ERP_SEED_DEMO_DATA=1 is explicitly set
     let mut stmt_users = conn
@@ -601,6 +608,17 @@ pub fn run() {
             vendor_payments::void_vendor_payment,
             vendor_payments::get_vendor_payment,
             vendor_payments::list_vendor_payments,
+            quotes::create_quote,
+            quotes::update_quote_header,
+            quotes::add_quote_line,
+            quotes::update_quote_line,
+            quotes::delete_quote_line,
+            quotes::submit_quote,
+            quotes::withdraw_quote_approval,
+            quotes::decline_quote,
+            quotes::cancel_quote,
+            quotes::get_quote,
+            quotes::list_quotes,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
