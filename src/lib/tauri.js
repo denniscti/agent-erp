@@ -736,6 +736,29 @@ function formatMockQuote(quote) {
   };
 }
 
+function getMockBelowStandardLines(lines) {
+  return lines
+    .filter(l => {
+      const unitPrice = Math.round(Number(l.unit_price) * 100) / 100;
+      const stdPrice = Math.round(Number(l.standard_price_snapshot) * 100) / 100;
+      return l.requires_approval === 1 || unitPrice < stdPrice || stdPrice <= 0;
+    })
+    .map(l => {
+      const unitPrice = Math.round(Number(l.unit_price) * 100) / 100;
+      const stdPrice = Math.round(Number(l.standard_price_snapshot) * 100) / 100;
+      const diff = Math.round((stdPrice - unitPrice) * 100) / 100;
+      return {
+        line_id: l.id,
+        unit_id: l.unit_id,
+        product_name: l.product_name_snapshot,
+        quantity: Number(l.quantity),
+        unit_price: unitPrice,
+        standard_price: stdPrice,
+        difference: diff
+      };
+    });
+}
+
 function formatMockAccountPayable(ap) {
   const targetTenantId = ap.tenant_id || 'tnt_mock_1';
   const allAllocations = [
@@ -6868,6 +6891,129 @@ export async function invoke(cmd, args = {}) {
       }
       list.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
       return list.map(q => formatMockQuote(q).quote);
+    }
+
+    case 'approve_quote': {
+      const { quote_id, quoteId, reason, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const activeUid = resolveMockActiveUserId();
+      const qId = (quote_id || quoteId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'pending_approval') {
+        throw new Error('目前狀態不允許此操作');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      quote.status = 'sent';
+      quote.approved_by = activeUid;
+      quote.approved_at = now;
+      quote.sent_at = now;
+      quote.approval_rejection_reason = null;
+
+      const formatted = formatMockQuote(quote);
+      const belowStandardLines = getMockBelowStandardLines(formatted.lines);
+      const trimmedReason = reason && String(reason).trim() ? String(reason).trim() : null;
+
+      const logId = `LOG-${now}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const auditLog = {
+        id: logId,
+        action_type: 'quote_approval',
+        arguments: JSON.stringify({
+          quote_id: quote.id,
+          quote_number: quote.quote_number,
+          total_amount: formatted.total_amount,
+          below_standard_lines: belowStandardLines,
+          reason: trimmedReason
+        }),
+        decision: 'approved',
+        operator: activeUid,
+        timestamp: now
+      };
+      mockAuditLogs.unshift(auditLog);
+      saveStorage('agent_erp_mock_audit_logs', mockAuditLogs);
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+
+      return formatted;
+    }
+
+    case 'reject_quote': {
+      const { quote_id, quoteId, reason, today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const activeUid = resolveMockActiveUserId();
+      const qId = (quote_id || quoteId || '').trim();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const trimmedReason = reason !== undefined && reason !== null ? String(reason).trim() : '';
+      if (!trimmedReason) {
+        throw new Error('駁回理由為必填');
+      }
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'pending_approval') {
+        throw new Error('目前狀態不允許此操作');
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      quote.status = 'draft';
+      quote.approval_rejection_reason = trimmedReason;
+
+      const formatted = formatMockQuote(quote);
+      const belowStandardLines = getMockBelowStandardLines(formatted.lines);
+
+      const logId = `LOG-${now}-${Math.floor(1000 + Math.random() * 9000)}`;
+      const auditLog = {
+        id: logId,
+        action_type: 'quote_approval',
+        arguments: JSON.stringify({
+          quote_id: quote.id,
+          quote_number: quote.quote_number,
+          total_amount: formatted.total_amount,
+          below_standard_lines: belowStandardLines,
+          reason: trimmedReason
+        }),
+        decision: 'rejected',
+        operator: activeUid,
+        timestamp: now
+      };
+      mockAuditLogs.unshift(auditLog);
+      saveStorage('agent_erp_mock_audit_logs', mockAuditLogs);
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+
+      return formatted;
+    }
+
+    case 'list_pending_approval_quotes': {
+      const { today_override } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const pendingQuotes = mockQuotes.filter(
+        q => (q.tenant_id || 'tnt_mock_1') === targetTenantId && q.status === 'pending_approval'
+      );
+      pendingQuotes.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+
+      return pendingQuotes.map(q => {
+        const formatted = formatMockQuote(q);
+        const belowStandardLines = getMockBelowStandardLines(formatted.lines);
+        return {
+          quote: formatted.quote,
+          below_standard_lines: belowStandardLines,
+          total_amount: formatted.total_amount
+        };
+      });
     }
 
     case 'reset_mock_quotes': {

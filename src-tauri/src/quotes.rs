@@ -35,6 +35,9 @@ pub enum QuoteError {
     #[error("此報價單已結案，無法修改")]
     TerminalStateImmutable,
 
+    #[error("駁回理由為必填")]
+    ApprovalReasonRequired,
+
     #[error("找不到報價單或不屬於目前租戶")]
     QuoteNotFound,
 
@@ -235,6 +238,33 @@ pub struct UpdateQuoteLineInput {
     pub quantity: f64,
     pub unit_price: f64,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+pub struct BelowStandardLine {
+    pub line_id: String,
+    pub unit_id: String,
+    pub product_name: String,
+    pub quantity: f64,
+    pub unit_price: f64,
+    pub standard_price: f64,
+    pub difference: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+pub struct QuoteApprovalAuditArgs {
+    pub quote_id: String,
+    pub quote_number: String,
+    pub total_amount: f64,
+    pub below_standard_lines: Vec<BelowStandardLine>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+pub struct PendingApprovalQuoteItem {
+    pub quote: Quote,
+    pub below_standard_lines: Vec<BelowStandardLine>,
+    pub total_amount: f64,
 }
 
 // ==========================================
@@ -1318,6 +1348,260 @@ pub fn list_quotes_impl(
     Ok(quotes)
 }
 
+pub fn get_below_standard_lines_from_lines(lines: &[QuoteLine]) -> Vec<BelowStandardLine> {
+    lines
+        .iter()
+        .filter(|l| {
+            let rounded_unit = round_2(l.unit_price);
+            let rounded_std = round_2(l.standard_price_snapshot);
+            l.requires_approval == 1 || rounded_unit < rounded_std || rounded_std <= 0.0
+        })
+        .map(|l| {
+            let rounded_unit = round_2(l.unit_price);
+            let rounded_std = round_2(l.standard_price_snapshot);
+            let diff = round_2(rounded_std - rounded_unit);
+            BelowStandardLine {
+                line_id: l.id.clone(),
+                unit_id: l.unit_id.clone(),
+                product_name: l.product_name_snapshot.clone(),
+                quantity: l.quantity,
+                unit_price: rounded_unit,
+                standard_price: rounded_std,
+                difference: diff,
+            }
+        })
+        .collect()
+}
+
+static AUDIT_LOG_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1000);
+
+fn record_quote_approval_audit_log(
+    tx: &rusqlite::Transaction,
+    audit_args: QuoteApprovalAuditArgs,
+    decision: &str,
+    operator: &str,
+    now: i64,
+) -> Result<(), QuoteError> {
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS audit_logs (
+            id TEXT PRIMARY KEY,
+            action_type TEXT NOT NULL,
+            arguments TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            timestamp INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    let log_id = format!(
+        "LOG-{}-{}",
+        now,
+        AUDIT_LOG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let arguments_json =
+        serde_json::to_string(&audit_args).map_err(|e| QuoteError::Other(e.to_string()))?;
+
+    tx.execute(
+        "INSERT INTO audit_logs (id, action_type, arguments, decision, operator, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            log_id,
+            "quote_approval",
+            arguments_json,
+            decision,
+            operator,
+            now
+        ],
+    )?;
+
+    Ok(())
+}
+
+pub fn approve_quote_impl(
+    conn: &mut rusqlite::Connection,
+    tenant_id: &str,
+    user_id: &str,
+    quote_id: &str,
+    reason: Option<String>,
+    today_override: Option<&str>,
+) -> Result<QuoteDetail, QuoteError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(QuoteError::EmptyTenantId);
+    }
+    let uid = user_id.trim();
+    if uid.is_empty() {
+        return Err(QuoteError::EmptyUserId);
+    }
+    let now = current_timestamp();
+    let today = match today_override {
+        Some(t) => t.to_string(),
+        None => get_today_local(conn).unwrap_or_else(|_| "1970-01-01".to_string()),
+    };
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| QuoteError::Other(e.to_string()))?;
+    expire_quotes(&tx, Some(tid), &today, now)?;
+
+    let quote = get_quote_row(&tx, tid, quote_id)?;
+    if is_terminal_status(&quote.status) {
+        return Err(QuoteError::TerminalStateImmutable);
+    }
+    if quote.status != "pending_approval" {
+        return Err(QuoteError::InvalidStatusTransition);
+    }
+
+    let lines = get_quote_lines(&tx, quote_id)?;
+    let total_amount = round_2(lines.iter().map(|l| l.line_amount).sum());
+    let below_standard_lines = get_below_standard_lines_from_lines(&lines);
+
+    let trimmed_reason = reason
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    tx.execute(
+        "UPDATE quotes 
+         SET status = 'sent', approved_by = ?1, approved_at = ?2, sent_at = ?3, approval_rejection_reason = NULL
+         WHERE id = ?4 AND tenant_id = ?5",
+        params![uid, now, now, quote_id, tid],
+    )?;
+
+    let audit_args = QuoteApprovalAuditArgs {
+        quote_id: quote.id.clone(),
+        quote_number: quote.quote_number.clone(),
+        total_amount,
+        below_standard_lines,
+        reason: trimmed_reason,
+    };
+
+    record_quote_approval_audit_log(&tx, audit_args, "approved", uid, now)?;
+
+    let updated_quote = get_quote_row(&tx, tid, quote_id)?;
+    tx.commit().map_err(|e| QuoteError::Other(e.to_string()))?;
+
+    Ok(QuoteDetail {
+        quote: updated_quote,
+        lines,
+        total_amount,
+    })
+}
+
+pub fn reject_quote_impl(
+    conn: &mut rusqlite::Connection,
+    tenant_id: &str,
+    user_id: &str,
+    quote_id: &str,
+    reason: &str,
+    today_override: Option<&str>,
+) -> Result<QuoteDetail, QuoteError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(QuoteError::EmptyTenantId);
+    }
+    let uid = user_id.trim();
+    if uid.is_empty() {
+        return Err(QuoteError::EmptyUserId);
+    }
+    let trimmed_reason = reason.trim();
+    if trimmed_reason.is_empty() {
+        return Err(QuoteError::ApprovalReasonRequired);
+    }
+
+    let now = current_timestamp();
+    let today = match today_override {
+        Some(t) => t.to_string(),
+        None => get_today_local(conn).unwrap_or_else(|_| "1970-01-01".to_string()),
+    };
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| QuoteError::Other(e.to_string()))?;
+    expire_quotes(&tx, Some(tid), &today, now)?;
+
+    let quote = get_quote_row(&tx, tid, quote_id)?;
+    if is_terminal_status(&quote.status) {
+        return Err(QuoteError::TerminalStateImmutable);
+    }
+    if quote.status != "pending_approval" {
+        return Err(QuoteError::InvalidStatusTransition);
+    }
+
+    let lines = get_quote_lines(&tx, quote_id)?;
+    let total_amount = round_2(lines.iter().map(|l| l.line_amount).sum());
+    let below_standard_lines = get_below_standard_lines_from_lines(&lines);
+
+    tx.execute(
+        "UPDATE quotes 
+         SET status = 'draft', approval_rejection_reason = ?1
+         WHERE id = ?2 AND tenant_id = ?3",
+        params![trimmed_reason, quote_id, tid],
+    )?;
+
+    let audit_args = QuoteApprovalAuditArgs {
+        quote_id: quote.id.clone(),
+        quote_number: quote.quote_number.clone(),
+        total_amount,
+        below_standard_lines,
+        reason: Some(trimmed_reason.to_string()),
+    };
+
+    record_quote_approval_audit_log(&tx, audit_args, "rejected", uid, now)?;
+
+    let updated_quote = get_quote_row(&tx, tid, quote_id)?;
+    tx.commit().map_err(|e| QuoteError::Other(e.to_string()))?;
+
+    Ok(QuoteDetail {
+        quote: updated_quote,
+        lines,
+        total_amount,
+    })
+}
+
+pub fn list_pending_approval_quotes_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    today_override: Option<&str>,
+) -> Result<Vec<PendingApprovalQuoteItem>, QuoteError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(QuoteError::EmptyTenantId);
+    }
+    let now = current_timestamp();
+    let today = match today_override {
+        Some(t) => t.to_string(),
+        None => get_today_local(conn).unwrap_or_else(|_| "1970-01-01".to_string()),
+    };
+
+    expire_quotes(conn, Some(tid), &today, now)?;
+
+    let quotes = list_quotes_impl(
+        conn,
+        tid,
+        Some("pending_approval".to_string()),
+        None,
+        Some(&today),
+    )?;
+
+    let mut result = Vec::new();
+    for quote in quotes {
+        let lines = get_quote_lines(conn, &quote.id)?;
+        let total_amount = quote.total_amount;
+        let below_standard_lines = get_below_standard_lines_from_lines(&lines);
+        result.push(PendingApprovalQuoteItem {
+            quote,
+            below_standard_lines,
+            total_amount,
+        });
+    }
+
+    Ok(result)
+}
+
 // ==========================================
 // Tauri Commands
 // ==========================================
@@ -1469,6 +1753,54 @@ pub async fn list_quotes<R: tauri::Runtime>(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+#[specta::specta]
+pub async fn approve_quote<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    quote_id: String,
+    reason: Option<String>,
+) -> Result<QuoteDetail, String> {
+    let db_path = get_db_path(&app_handle);
+    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    let active_uid = crate::purchase_orders::resolve_active_user_id(&conn)?;
+    approve_quote_impl(&mut conn, &active_tid, &active_uid, &quote_id, reason, None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn reject_quote<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    quote_id: String,
+    reason: String,
+) -> Result<QuoteDetail, String> {
+    let db_path = get_db_path(&app_handle);
+    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    let active_uid = crate::purchase_orders::resolve_active_user_id(&conn)?;
+    reject_quote_impl(
+        &mut conn,
+        &active_tid,
+        &active_uid,
+        &quote_id,
+        &reason,
+        None,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_pending_approval_quotes<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+) -> Result<Vec<PendingApprovalQuoteItem>, String> {
+    let db_path = get_db_path(&app_handle);
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    list_pending_approval_quotes_impl(&conn, &active_tid, None).map_err(|e| e.to_string())
+}
+
 // ==========================================
 // Unit Tests (Layer 1)
 // ==========================================
@@ -1482,6 +1814,18 @@ mod tests {
         crate::partners::create_partners_table(&conn).unwrap();
         crate::products::create_products_tables(&conn).unwrap();
         create_quotes_tables(&conn).unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS audit_logs (
+                id TEXT PRIMARY KEY,
+                action_type TEXT NOT NULL,
+                arguments TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                operator TEXT NOT NULL,
+                timestamp INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
         conn
     }
 
@@ -2661,5 +3005,847 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err_cancel, QuoteError::TerminalStateImmutable);
+    }
+
+    // =========================================================================
+    // Issue #232 Tests: Quote Approval & Rejection with Audit Logs & Pending List
+    // =========================================================================
+
+    #[test]
+    fn test_tc_app_n01_and_n02_approve_quote_with_and_without_reason() {
+        // Given: Quote submitted with a line below standard price, in pending_approval
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "台積電客戶", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "高階晶片", true, 100.0);
+
+        let quote1 = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            CreateQuoteInput {
+                customer_partner_id: cid.clone(),
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote1.quote.id.clone(),
+                unit_id: uid.clone(),
+                quantity: 10.0,
+                unit_price: 80.0, // below 100.0
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        let sub1 = submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &quote1.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        assert_eq!(sub1.quote.status, "pending_approval");
+
+        // When: Approving quote1 with reason
+        let approved1 = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_approver",
+            &quote1.quote.id,
+            Some("客戶量大，給予八折優惠".to_string()),
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // Then: Status is sent, approved_by and approved_at are recorded, approval_rejection_reason is cleared
+        assert_eq!(approved1.quote.status, "sent");
+        assert_eq!(
+            approved1.quote.approved_by,
+            Some("usr_approver".to_string())
+        );
+        assert!(approved1.quote.approved_at.is_some());
+        assert!(approved1.quote.sent_at.is_some());
+        assert_eq!(approved1.quote.approval_rejection_reason, None);
+
+        // And: Audit log record written with decision='approved'
+        let (action_type, decision, operator, arguments): (String, String, String, String) = conn
+            .query_row(
+                "SELECT action_type, decision, operator, arguments FROM audit_logs WHERE arguments LIKE ?1",
+                params![format!("%{}%", quote1.quote.id)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(action_type, "quote_approval");
+        assert_eq!(decision, "approved");
+        assert_eq!(operator, "usr_approver");
+
+        let parsed_args: QuoteApprovalAuditArgs = serde_json::from_str(&arguments).unwrap();
+        assert_eq!(parsed_args.quote_id, quote1.quote.id);
+        assert_eq!(parsed_args.quote_number, quote1.quote.quote_number);
+        assert_eq!(parsed_args.total_amount, 800.0);
+        assert_eq!(
+            parsed_args.reason,
+            Some("客戶量大，給予八折優惠".to_string())
+        );
+        assert_eq!(parsed_args.below_standard_lines.len(), 1);
+        assert_eq!(parsed_args.below_standard_lines[0].difference, 20.0);
+        assert_eq!(parsed_args.below_standard_lines[0].unit_price, 80.0);
+        assert_eq!(parsed_args.below_standard_lines[0].standard_price, 100.0);
+
+        // When: TC-APP-N-02: Approving quote2 without reason (reason=None)
+        let quote2 = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            CreateQuoteInput {
+                customer_partner_id: cid,
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote2.quote.id.clone(),
+                unit_id: uid,
+                quantity: 5.0,
+                unit_price: 90.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &quote2.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        let approved2 = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_approver2",
+            &quote2.quote.id,
+            None,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // Then: Quote status is sent and audit log has reason=None
+        assert_eq!(approved2.quote.status, "sent");
+        let arguments2: String = conn
+            .query_row(
+                "SELECT arguments FROM audit_logs WHERE arguments LIKE ?1",
+                params![format!("%{}%", quote2.quote.id)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let parsed_args2: QuoteApprovalAuditArgs = serde_json::from_str(&arguments2).unwrap();
+        assert_eq!(parsed_args2.quote_id, quote2.quote.id);
+        assert_eq!(parsed_args2.reason, None);
+    }
+
+    #[test]
+    fn test_tc_app_n03_reject_quote_with_valid_reason() {
+        // Given: Quote in pending_approval
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "聯發科技客戶", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "旗艦主機板", true, 200.0);
+
+        let quote = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            CreateQuoteInput {
+                customer_partner_id: cid,
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote.quote.id.clone(),
+                unit_id: uid,
+                quantity: 2.0,
+                unit_price: 150.0, // below standard 200.0
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &quote.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // When: Rejecting quote with valid reason
+        let rejected = reject_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_approver",
+            &quote.quote.id,
+            "折扣過高，毛利率不足 15%，請重新協商",
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // Then: Quote status returns to draft, rejection reason is recorded
+        assert_eq!(rejected.quote.status, "draft");
+        assert_eq!(
+            rejected.quote.approval_rejection_reason,
+            Some("折扣過高，毛利率不足 15%，請重新協商".to_string())
+        );
+
+        // And: Audit log is recorded with decision='rejected'
+        let (decision, operator, arguments): (String, String, String) = conn
+            .query_row(
+                "SELECT decision, operator, arguments FROM audit_logs WHERE action_type = 'quote_approval' ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(decision, "rejected");
+        assert_eq!(operator, "usr_approver");
+
+        let parsed_args: QuoteApprovalAuditArgs = serde_json::from_str(&arguments).unwrap();
+        assert_eq!(parsed_args.quote_id, quote.quote.id);
+        assert_eq!(
+            parsed_args.reason,
+            Some("折扣過高，毛利率不足 15%，請重新協商".to_string())
+        );
+        assert_eq!(parsed_args.below_standard_lines.len(), 1);
+        assert_eq!(parsed_args.below_standard_lines[0].difference, 50.0);
+    }
+
+    #[test]
+    fn test_tc_app_n04_list_pending_approval_quotes() {
+        // Given: 2 quotes in pending_approval, 1 in sent
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "宏碁客戶", true, true);
+        let (_, uid1) = seed_product(&conn, "tnt_1", "螢幕A", true, 300.0);
+        let (_, uid2) = seed_product(&conn, "tnt_1", "鍵盤B", true, 100.0);
+
+        // Quote 1: pending approval (螢幕A @ 250, diff=50)
+        let q1 = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            CreateQuoteInput {
+                customer_partner_id: cid.clone(),
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: q1.quote.id.clone(),
+                unit_id: uid1,
+                quantity: 1.0,
+                unit_price: 250.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &q1.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // Quote 2: sent directly (鍵盤B @ 100, no discount)
+        let q2 = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            CreateQuoteInput {
+                customer_partner_id: cid.clone(),
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: q2.quote.id.clone(),
+                unit_id: uid2.clone(),
+                quantity: 2.0,
+                unit_price: 100.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &q2.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // Quote 3: pending approval (鍵盤B @ 80, diff=20)
+        let q3 = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            CreateQuoteInput {
+                customer_partner_id: cid,
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: q3.quote.id.clone(),
+                unit_id: uid2,
+                quantity: 5.0,
+                unit_price: 80.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &q3.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // When: Querying pending approval list
+        let pending_list =
+            list_pending_approval_quotes_impl(&conn, "tnt_1", Some("2026-11-09")).unwrap();
+
+        // Then: Returns 2 pending quotes with below_standard_lines populated
+        assert_eq!(pending_list.len(), 2);
+        for item in &pending_list {
+            assert_eq!(item.quote.status, "pending_approval");
+            assert!(!item.below_standard_lines.is_empty());
+        }
+        let found_q1 = pending_list
+            .iter()
+            .find(|i| i.quote.id == q1.quote.id)
+            .unwrap();
+        assert_eq!(found_q1.below_standard_lines[0].difference, 50.0);
+        assert_eq!(found_q1.below_standard_lines[0].product_name, "螢幕A");
+
+        let found_q3 = pending_list
+            .iter()
+            .find(|i| i.quote.id == q3.quote.id)
+            .unwrap();
+        assert_eq!(found_q3.below_standard_lines[0].difference, 20.0);
+        assert_eq!(found_q3.below_standard_lines[0].product_name, "鍵盤B");
+    }
+
+    #[test]
+    fn test_tc_app_b01_and_b02_reject_with_empty_or_whitespace_reason_rejected() {
+        // Given: Quote in pending_approval
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "華碩客戶", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "顯示卡", true, 500.0);
+
+        let quote = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            CreateQuoteInput {
+                customer_partner_id: cid,
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote.quote.id.clone(),
+                unit_id: uid,
+                quantity: 1.0,
+                unit_price: 450.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &quote.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // When: Rejecting with empty reason
+        let err_empty = reject_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_approver",
+            &quote.quote.id,
+            "",
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+
+        // Then: ApprovalReasonRequired error, status remains pending_approval
+        assert_eq!(err_empty, QuoteError::ApprovalReasonRequired);
+        assert_eq!(err_empty.to_string(), "駁回理由為必填");
+
+        // When: Rejecting with whitespace-only reason
+        let err_ws = reject_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_approver",
+            &quote.quote.id,
+            "   \t\n  ",
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+
+        // Then: ApprovalReasonRequired error
+        assert_eq!(err_ws, QuoteError::ApprovalReasonRequired);
+
+        // And: Quote status is still pending_approval, no audit log inserted
+        let current_quote = get_quote_row(&conn, "tnt_1", &quote.quote.id).unwrap();
+        assert_eq!(current_quote.status, "pending_approval");
+
+        let audit_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 0);
+    }
+
+    #[test]
+    fn test_tc_app_b03_and_b04_and_b05_boundary_prices_in_audit_and_pending_list() {
+        // Given: Product standard price 100.0, product with zero standard price 0.0
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "緯創客戶", true, true);
+        let (_, uid_std100) = seed_product(&conn, "tnt_1", "標準品100", true, 100.0);
+        let (_, uid_std0) = seed_product(&conn, "tnt_1", "標準價為零品項", true, 0.0);
+
+        let quote = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            CreateQuoteInput {
+                customer_partner_id: cid,
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // TC-APP-B-03: 1 cent discount: unit_price = 99.99 (difference = 0.01)
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote.quote.id.clone(),
+                unit_id: uid_std100.clone(),
+                quantity: 1.0,
+                unit_price: 99.99,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // TC-APP-B-04: zero unit price: unit_price = 0.0 (difference = 100.0)
+        // (Create another quote for zero price line since same quote cannot duplicate unit)
+        // TC-APP-B-05: zero standard price: standard_price = 0.0, unit_price = 50.0 (std <= 0 requires approval)
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote.quote.id.clone(),
+                unit_id: uid_std0,
+                quantity: 2.0,
+                unit_price: 50.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &quote.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // When: Querying pending list
+        let pending =
+            list_pending_approval_quotes_impl(&conn, "tnt_1", Some("2026-11-09")).unwrap();
+        assert_eq!(pending.len(), 1);
+        let lines = &pending[0].below_standard_lines;
+        assert_eq!(lines.len(), 2);
+
+        let line_1cent = lines.iter().find(|l| l.unit_id == uid_std100).unwrap();
+        assert_eq!(line_1cent.unit_price, 99.99);
+        assert_eq!(line_1cent.standard_price, 100.0);
+        assert_eq!(line_1cent.difference, 0.01);
+
+        // When: Approving
+        let app_res = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_approver",
+            &quote.quote.id,
+            Some("邊界價格核准".to_string()),
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        assert_eq!(app_res.quote.status, "sent");
+    }
+
+    #[test]
+    fn test_tc_app_e01_to_e06_invalid_status_and_terminal_approvals_rejected() {
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "客戶", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "商品", true, 100.0);
+
+        // 1. Draft quote
+        let draft_q = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            CreateQuoteInput {
+                customer_partner_id: cid.clone(),
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: draft_q.quote.id.clone(),
+                unit_id: uid.clone(),
+                quantity: 1.0,
+                unit_price: 80.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // TC-APP-E-01: Draft cannot approve
+        let err_draft_app = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            &draft_q.quote.id,
+            None,
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_draft_app, QuoteError::InvalidStatusTransition);
+
+        // TC-APP-E-04: Draft cannot reject
+        let err_draft_rej = reject_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            &draft_q.quote.id,
+            "理由",
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_draft_rej, QuoteError::InvalidStatusTransition);
+
+        // 2. Sent quote
+        let sent_q = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            CreateQuoteInput {
+                customer_partner_id: cid.clone(),
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: sent_q.quote.id.clone(),
+                unit_id: uid.clone(),
+                quantity: 1.0,
+                unit_price: 100.0, // standard price, goes directly to sent
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &sent_q.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // TC-APP-E-02: Sent cannot approve
+        let err_sent_app = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            &sent_q.quote.id,
+            None,
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_sent_app, QuoteError::InvalidStatusTransition);
+
+        // TC-APP-E-05: Sent cannot reject
+        let err_sent_rej = reject_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            &sent_q.quote.id,
+            "理由",
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_sent_rej, QuoteError::InvalidStatusTransition);
+
+        // 3. Terminal state (cancelled quote)
+        cancel_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &sent_q.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // TC-APP-E-03: Terminal cannot approve
+        let err_term_app = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            &sent_q.quote.id,
+            None,
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_term_app, QuoteError::TerminalStateImmutable);
+
+        // TC-APP-E-06: Terminal cannot reject
+        let err_term_rej = reject_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            &sent_q.quote.id,
+            "理由",
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_term_rej, QuoteError::TerminalStateImmutable);
+    }
+
+    #[test]
+    fn test_tc_app_e07_and_e08_nonexistent_and_cross_tenant_isolation() {
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "客戶", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "商品", true, 100.0);
+
+        let quote = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            CreateQuoteInput {
+                customer_partner_id: cid,
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote.quote.id.clone(),
+                unit_id: uid,
+                quantity: 1.0,
+                unit_price: 50.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &quote.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // TC-APP-E-07: Nonexistent quote
+        let err_nonexist = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            "quo_nonexistent_999",
+            None,
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_nonexist, QuoteError::QuoteNotFound);
+
+        // TC-APP-E-08: Cross tenant
+        let err_cross = approve_quote_impl(
+            &mut conn,
+            "tnt_2",
+            "usr_app",
+            &quote.quote.id,
+            None,
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_cross, QuoteError::QuoteNotFound);
+    }
+
+    #[test]
+    fn test_tc_app_e09_transaction_atomicity_and_audit_failure_rollback() {
+        // Given: Quote in pending_approval
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "客戶", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "商品", true, 100.0);
+
+        let quote = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            CreateQuoteInput {
+                customer_partner_id: cid,
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: quote.quote.id.clone(),
+                unit_id: uid,
+                quantity: 1.0,
+                unit_price: 50.0,
+                note: None,
+            },
+            Some("2026-11-09"),
+        )
+        .unwrap();
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &quote.quote.id,
+            Some("2026-11-09"),
+        )
+        .unwrap();
+
+        // Simulate audit log write failure by adding a trigger that aborts audit_logs insert
+        conn.execute(
+            "CREATE TRIGGER fail_audit BEFORE INSERT ON audit_logs BEGIN SELECT RAISE(ABORT, 'intentional audit failure'); END;",
+            [],
+        )
+        .unwrap();
+
+        // When: Attempting to approve quote, which tries to insert into audit_logs in same tx
+        let err = approve_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_app",
+            &quote.quote.id,
+            Some("核准理由".to_string()),
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+
+        // Then: The operation failed with error
+        assert!(err.to_string().contains("intentional audit failure"));
+
+        // And: Quotes status must have been completely ROLLED BACK to 'pending_approval'
+        let current_quote = get_quote_row(&conn, "tnt_1", &quote.quote.id).unwrap();
+        assert_eq!(current_quote.status, "pending_approval");
+        assert_eq!(current_quote.approved_by, None);
+        assert_eq!(current_quote.approved_at, None);
+        assert_eq!(current_quote.sent_at, None);
     }
 }
