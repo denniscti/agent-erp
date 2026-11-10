@@ -616,6 +616,7 @@ pub fn run() {
             quotes::submit_quote,
             quotes::withdraw_quote_approval,
             quotes::decline_quote,
+            quotes::convert_quote,
             quotes::cancel_quote,
             quotes::get_quote,
             quotes::list_quotes,

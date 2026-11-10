@@ -62,6 +62,7 @@
   import VendorBillsWorkspace from './lib/components/VendorBillsWorkspace.svelte';
   import WarehouseWorkspace from './lib/components/WarehouseWorkspace.svelte';
   import CreateWarehouseModal from './lib/components/CreateWarehouseModal.svelte';
+  import QuotesWorkspace from './lib/components/QuotesWorkspace.svelte';
 
   let activeTab = $derived(appState.activeWorkspace);
   let isNotificationOpen = $state(false);
@@ -1024,6 +1025,7 @@
     else if (ws === 'vendor-bills' || ws === 'bills') navigate('/app/vendor-bills');
     else if (ws === 'warehouses' || ws === 'warehouse') navigate('/app/warehouses');
     else if (ws === 'accounts-payable') navigate('/app/accounts-payable');
+    else if (ws === 'quotes' || ws === 'quote') navigate('/app/quotes');
     else if (ws === 'inventory') navigate('/app/inventory');
     else navigate(`/app/${ws}`);
   }
@@ -1122,6 +1124,23 @@
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect width="20" height="14" x="2" y="5" rx="2"></rect>
                 <line x1="2" x2="22" y1="10" y2="10"></line>
+              </svg>
+            </button>
+
+            <!-- 報價單 (Issue #233) -->
+            <button 
+              class="rail-nav-btn {activeTab === 'quotes' || activeTab === 'quote' ? 'active' : ''}" 
+              onclick={() => selectWorkspace('quotes')}
+              title="報價單"
+              aria-label="報價單"
+              id="rail-nav-quotes"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+                <path d="M9 14h6"></path>
+                <path d="M9 18h6"></path>
+                <path d="M9 10h6"></path>
               </svg>
             </button>
 
@@ -2955,6 +2974,9 @@
           {:else if activeTab === 'accounts-payable'}
             <!-- Accounts Payable Workspace View (Issue #200) -->
             <AccountsPayableWorkspace />
+          {:else if activeTab === 'quotes' || activeTab === 'quote'}
+            <!-- Quotes Workspace View (Issue #233) -->
+            <QuotesWorkspace />
           {:else}
             <!-- AI Chat Conversation Primary View -->
             <ChatBox />

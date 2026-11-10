@@ -168,6 +168,7 @@ pub struct Quote {
     pub decline_reason: Option<String>,
     pub expired_at: Option<i64>,
     pub cancelled_at: Option<i64>,
+    pub cancel_reason: Option<String>,
     pub converted_at: Option<i64>,
     pub accepted_by: Option<String>,
     pub converted_sales_order_id: Option<String>,
@@ -296,12 +297,16 @@ pub fn create_quotes_tables(conn: &rusqlite::Connection) -> Result<(), rusqlite:
             decline_reason TEXT,
             expired_at INTEGER,
             cancelled_at INTEGER,
+            cancel_reason TEXT,
             converted_at INTEGER,
             accepted_by TEXT,
             converted_sales_order_id TEXT
         )",
         [],
     )?;
+
+    // Backward-compatible schema migration
+    let _ = conn.execute("ALTER TABLE quotes ADD COLUMN cancel_reason TEXT", []);
 
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_quotes_tenant_number ON quotes (tenant_id, quote_number)",
@@ -493,10 +498,11 @@ fn row_to_quote(row: &rusqlite::Row) -> Result<Quote, rusqlite::Error> {
         decline_reason: row.get(19)?,
         expired_at: row.get(20)?,
         cancelled_at: row.get(21)?,
-        converted_at: row.get(22)?,
-        accepted_by: row.get(23)?,
-        converted_sales_order_id: row.get(24)?,
-        total_amount: row.get(25).unwrap_or(0.0),
+        cancel_reason: row.get(22)?,
+        converted_at: row.get(23)?,
+        accepted_by: row.get(24)?,
+        converted_sales_order_id: row.get(25)?,
+        total_amount: row.get(26).unwrap_or(0.0),
     })
 }
 
@@ -530,6 +536,7 @@ fn get_quote_row(
                 q.requires_approval, q.approval_rejection_reason, q.created_by, q.created_at,
                 q.submitted_at, q.approved_by, q.approved_at, q.sent_at,
                 q.declined_at, q.decline_reason, q.expired_at, q.cancelled_at,
+                q.cancel_reason,
                 q.converted_at, q.accepted_by, q.converted_sales_order_id,
                 COALESCE((SELECT SUM(l.line_amount) FROM quote_lines l WHERE l.quote_id = q.id), 0.0) AS total_amount
                FROM quotes q
@@ -1204,11 +1211,12 @@ pub fn decline_quote_impl(
     })
 }
 
-pub fn cancel_quote_impl(
+pub fn convert_quote_impl(
     conn: &mut rusqlite::Connection,
     tenant_id: &str,
-    _user_id: &str,
+    user_id: &str,
     quote_id: &str,
+    sales_order_id: Option<String>,
     today_override: Option<&str>,
 ) -> Result<QuoteDetail, QuoteError> {
     let tid = tenant_id.trim();
@@ -1230,12 +1238,73 @@ pub fn cancel_quote_impl(
     if is_terminal_status(&quote.status) {
         return Err(QuoteError::TerminalStateImmutable);
     }
+    if quote.status != "sent" {
+        return Err(QuoteError::InvalidStatusTransition);
+    }
+
+    let trimmed_so_id = sales_order_id
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
 
     tx.execute(
         "UPDATE quotes 
-         SET status = 'cancelled', cancelled_at = ?1 
-         WHERE id = ?2 AND tenant_id = ?3",
-        params![now, quote_id, tid],
+         SET status = 'converted', converted_at = ?1, accepted_by = ?2, converted_sales_order_id = ?3 
+         WHERE id = ?4 AND tenant_id = ?5",
+        params![now, user_id, trimmed_so_id, quote_id, tid],
+    )?;
+
+    let updated_quote = get_quote_row(&tx, tid, quote_id)?;
+    let lines = get_quote_lines(&tx, quote_id)?;
+    let total_amount = round_2(lines.iter().map(|l| l.line_amount).sum());
+
+    tx.commit().map_err(|e| QuoteError::Other(e.to_string()))?;
+
+    Ok(QuoteDetail {
+        quote: updated_quote,
+        lines,
+        total_amount,
+    })
+}
+
+pub fn cancel_quote_impl(
+    conn: &mut rusqlite::Connection,
+    tenant_id: &str,
+    _user_id: &str,
+    quote_id: &str,
+    reason: Option<&str>,
+    today_override: Option<&str>,
+) -> Result<QuoteDetail, QuoteError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(QuoteError::EmptyTenantId);
+    }
+    let r = reason.unwrap_or("").trim();
+    if r.is_empty() {
+        return Err(QuoteError::Other("取消理由為必填".to_string()));
+    }
+    let now = current_timestamp();
+    let today = match today_override {
+        Some(t) => t.to_string(),
+        None => get_today_local(conn).unwrap_or_else(|_| "1970-01-01".to_string()),
+    };
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| QuoteError::Other(e.to_string()))?;
+    expire_quotes(&tx, Some(tid), &today, now)?;
+
+    let quote = get_quote_row(&tx, tid, quote_id)?;
+    if is_terminal_status(&quote.status) {
+        return Err(QuoteError::TerminalStateImmutable);
+    }
+
+    tx.execute(
+        "UPDATE quotes 
+         SET status = 'cancelled', cancelled_at = ?1, cancel_reason = ?2 
+         WHERE id = ?3 AND tenant_id = ?4",
+        params![now, r, quote_id, tid],
     )?;
 
     let updated_quote = get_quote_row(&tx, tid, quote_id)?;
@@ -1305,6 +1374,7 @@ pub fn list_quotes_impl(
                         q.requires_approval, q.approval_rejection_reason, q.created_by, q.created_at,
                         q.submitted_at, q.approved_by, q.approved_at, q.sent_at,
                         q.declined_at, q.decline_reason, q.expired_at, q.cancelled_at,
+                        q.cancel_reason,
                         q.converted_at, q.accepted_by, q.converted_sales_order_id,
                         COALESCE((SELECT SUM(l.line_amount) FROM quote_lines l WHERE l.quote_id = q.id), 0.0) AS total_amount
                      FROM quotes q
@@ -1715,16 +1785,46 @@ pub async fn decline_quote<R: tauri::Runtime>(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn cancel_quote<R: tauri::Runtime>(
+pub async fn convert_quote<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
     quote_id: String,
+    sales_order_id: Option<String>,
 ) -> Result<QuoteDetail, String> {
     let db_path = get_db_path(&app_handle);
     let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     let active_uid = crate::purchase_orders::resolve_active_user_id(&conn)?;
-    cancel_quote_impl(&mut conn, &active_tid, &active_uid, &quote_id, None)
-        .map_err(|e| e.to_string())
+    convert_quote_impl(
+        &mut conn,
+        &active_tid,
+        &active_uid,
+        &quote_id,
+        sales_order_id,
+        None,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_quote<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    quote_id: String,
+    reason: Option<String>,
+) -> Result<QuoteDetail, String> {
+    let db_path = get_db_path(&app_handle);
+    let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    let active_uid = crate::purchase_orders::resolve_active_user_id(&conn)?;
+    cancel_quote_impl(
+        &mut conn,
+        &active_tid,
+        &active_uid,
+        &quote_id,
+        reason.as_deref(),
+        None,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2435,19 +2535,48 @@ mod tests {
         )
         .unwrap();
 
-        // When: Cancelling quote
+        // When: Cancelling quote without reason is rejected
+        let err_no_reason = cancel_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &quote.quote.id,
+            None,
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_no_reason.to_string(), "取消理由為必填");
+
+        // When: Cancelling quote with whitespace reason is rejected
+        let err_ws_reason = cancel_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_1",
+            &quote.quote.id,
+            Some("   "),
+            Some("2026-11-09"),
+        )
+        .unwrap_err();
+        assert_eq!(err_ws_reason.to_string(), "取消理由為必填");
+
+        // When: Cancelling quote with valid reason
         let cancelled = cancel_quote_impl(
             &mut conn,
             "tnt_1",
             "usr_1",
             &quote.quote.id,
+            Some("客戶規格變更，故取消作廢"),
             Some("2026-11-09"),
         )
         .unwrap();
 
-        // Then: Status is cancelled, cancelled_at recorded
+        // Then: Status is cancelled, cancelled_at and cancel_reason recorded
         assert_eq!(cancelled.quote.status, "cancelled");
         assert!(cancelled.quote.cancelled_at.is_some());
+        assert_eq!(
+            cancelled.quote.cancel_reason,
+            Some("客戶規格變更，故取消作廢".to_string())
+        );
     }
 
     #[test]
@@ -2790,6 +2919,7 @@ mod tests {
             "tnt_1",
             "usr_1",
             &quote.quote.id,
+            Some("測試取消"),
             Some("2026-11-09"),
         )
         .unwrap();
@@ -3001,6 +3131,7 @@ mod tests {
             "tnt_1",
             "usr_1",
             &quote.quote.id,
+            Some("測試取消"),
             Some("2026-11-11"),
         )
         .unwrap_err();
@@ -3683,6 +3814,7 @@ mod tests {
             "tnt_1",
             "usr_1",
             &sent_q.quote.id,
+            Some("測試取消"),
             Some("2026-11-09"),
         )
         .unwrap();
