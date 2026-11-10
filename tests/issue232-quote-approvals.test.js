@@ -327,7 +327,7 @@ test.describe('Issue #232: Quote Approval & Rejection with Audit Logs & Pending 
     );
 
     // Given: A cancelled quote (terminal)
-    await invoke('cancel_quote', { quote_id: sentQuote.quote.id });
+    await invoke('cancel_quote', { quote_id: sentQuote.quote.id, reason: '作廢結案' });
 
     // When & Then: TC-APP-E-03: Cannot approve terminal quote
     await assert.rejects(

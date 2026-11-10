@@ -290,12 +290,14 @@ test.describe('Issue #231: Quotes Core Business Logic & State Machine', () => {
 
     // When: Cancelling
     const cancelled = await invoke('cancel_quote', {
-      quote_id: quote.quote.id
+      quote_id: quote.quote.id,
+      reason: '客戶需求取消'
     });
 
     // Then: Status is cancelled and cancelled_at is recorded
     assert.equal(cancelled.quote.status, 'cancelled');
     assert.ok(cancelled.quote.cancelled_at);
+    assert.equal(cancelled.quote.cancel_reason, '客戶需求取消');
   });
 
   test('TC-QUO-B-06 & TC-QUO-B-07: valid_until date boundaries on submit', async () => {
@@ -498,7 +500,7 @@ test.describe('Issue #231: Quotes Core Business Logic & State Machine', () => {
     );
 
     // When / Then: Cancelling the quote turns it into terminal state
-    await invoke('cancel_quote', { quote_id: quote.quote.id });
+    await invoke('cancel_quote', { quote_id: quote.quote.id, reason: '作廢結案' });
 
     // When / Then: Modifying terminal quote is rejected (R13)
     await assert.rejects(
@@ -552,6 +554,7 @@ test.describe('Issue #231: Quotes Core Business Logic & State Machine', () => {
       async () => {
         await invoke('cancel_quote', {
           quote_id: quote.quote.id,
+          reason: '嘗試取消過期單',
           today_override: '2026-11-11'
         });
       },

@@ -6831,11 +6831,40 @@ export async function invoke(cmd, args = {}) {
       return formatMockQuote(quote);
     }
 
-    case 'cancel_quote': {
-      const { quote_id, quoteId, today_override } = args || {};
+    case 'convert_quote': {
+      const { quote_id, quoteId, sales_order_id, salesOrderId, today_override } = args || {};
       const targetTenantId = resolveMockActiveTenantId();
       const qId = (quote_id || quoteId || '').trim();
       const today = today_override || new Date().toISOString().slice(0, 10);
+      expireMockQuotes(targetTenantId, today);
+
+      const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
+      if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
+      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+        throw new Error('此報價單已結案，無法修改');
+      }
+      if (quote.status !== 'sent') {
+        throw new Error('目前狀態不允許此操作');
+      }
+
+      const activeUid = resolveMockActiveUserId();
+      const now = Math.floor(Date.now() / 1000);
+      const soId = (sales_order_id || salesOrderId) ? String(sales_order_id || salesOrderId).trim() : null;
+      quote.status = 'converted';
+      quote.converted_at = now;
+      quote.accepted_by = activeUid;
+      quote.converted_sales_order_id = soId;
+      saveStorage('agent_erp_mock_quotes', mockQuotes);
+      return formatMockQuote(quote);
+    }
+
+    case 'cancel_quote': {
+      const { quote_id, quoteId, reason, today_override, todayOverride } = args || {};
+      const targetTenantId = resolveMockActiveTenantId();
+      const qId = (quote_id || quoteId || '').trim();
+      const r = (reason || '').trim();
+      if (!r) throw new Error('取消理由為必填');
+      const today = today_override || todayOverride || new Date().toISOString().slice(0, 10);
       expireMockQuotes(targetTenantId, today);
 
       const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
@@ -6847,6 +6876,7 @@ export async function invoke(cmd, args = {}) {
       const now = Math.floor(Date.now() / 1000);
       quote.status = 'cancelled';
       quote.cancelled_at = now;
+      quote.cancel_reason = r;
       saveStorage('agent_erp_mock_quotes', mockQuotes);
       return formatMockQuote(quote);
     }

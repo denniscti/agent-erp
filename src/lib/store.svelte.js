@@ -223,6 +223,16 @@ export const appState = $state({
   /** @type {any | null} */
   payablesAgingReport: null,
 
+  // Quotes cache (Issue #231, #232, #233)
+  /** @type {any[]} */
+  quotes: [],
+  /** @type {any | null} */
+  currentQuoteDetail: null,
+  /** @type {string | null} */
+  selectedQuoteId: null,
+  /** @type {any[]} */
+  pendingApprovalQuotes: [],
+
   // Lightweight task confirmation state
   /** @type {import('./workflow/types.js').PendingConfirmation | null} */
   pendingTaskConfirmation: null
@@ -290,6 +300,7 @@ export function getWorkspaceLabel(workspace) {
   if (workspace === 'warehouses' || workspace === 'warehouse') return '倉庫管理';
   if (workspace === 'accounts-payable') return '應付帳款';
   if (workspace === 'vendor-bills' || workspace === 'bills') return '請款單';
+  if (workspace === 'quotes' || workspace === 'quote') return '報價單';
   return '業務工作區';
 }
 
@@ -4634,6 +4645,349 @@ export async function loadVendorStatementAction(vendorPartnerId, startDate, endD
     return statement;
   } catch (err) {
     console.error("Failed to load vendor statement:", err);
+    throw err;
+  }
+}
+
+// ==========================================
+// Quotes Store Actions (Issue #231, #232, #233)
+// ==========================================
+
+/**
+ * Fetch quotes list with optional filters
+ * @param {Object} [filter]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchQuotes(filter = {}) {
+  try {
+    const payload = {};
+    if (filter.filter_status || filter.filterStatus || filter.status) {
+      const s = filter.filter_status || filter.filterStatus || filter.status;
+      payload.filter_status = s;
+      payload.filterStatus = s;
+    }
+    if (filter.filter_customer_id || filter.filterCustomerId || filter.customer_partner_id || filter.customerPartnerId) {
+      const c = filter.filter_customer_id || filter.filterCustomerId || filter.customer_partner_id || filter.customerPartnerId;
+      payload.filter_customer_id = c;
+      payload.filterCustomerId = c;
+    }
+    const list = await invoke('list_quotes', payload);
+    appState.quotes = list || [];
+    return appState.quotes;
+  } catch (err) {
+    console.error("Failed to fetch quotes:", err);
+    throw err;
+  }
+}
+
+/**
+ * Fetch quote detail with line items
+ * @param {string} quoteId
+ * @returns {Promise<any>}
+ */
+export async function fetchQuoteDetail(quoteId) {
+  try {
+    const detail = await invoke('get_quote', {
+      quote_id: quoteId,
+      quoteId: quoteId,
+      id: quoteId
+    });
+    appState.currentQuoteDetail = detail;
+    appState.selectedQuoteId = quoteId;
+    return detail;
+  } catch (err) {
+    console.error("Failed to fetch quote detail:", err);
+    throw err;
+  }
+}
+
+/**
+ * Fetch quotes pending approval with below-standard items
+ * @returns {Promise<any[]>}
+ */
+export async function fetchPendingApprovalQuotes() {
+  try {
+    const list = await invoke('list_pending_approval_quotes', {});
+    appState.pendingApprovalQuotes = list || [];
+    return appState.pendingApprovalQuotes;
+  } catch (err) {
+    console.error("Failed to fetch pending approval quotes:", err);
+    throw err;
+  }
+}
+
+/**
+ * Create a new draft quote
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function createQuoteAction(input) {
+  try {
+    const payload = input?.input ? input : { input };
+    const res = await invoke('create_quote', payload);
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to create quote:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update quote header (draft only)
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function updateQuoteHeaderAction(input) {
+  try {
+    const payload = input?.input ? input : { input };
+    const res = await invoke('update_quote_header', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to update quote header:", err);
+    throw err;
+  }
+}
+
+/**
+ * Add line item to quote (draft only)
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function addQuoteLineAction(input) {
+  try {
+    const payload = input?.input ? input : { input };
+    const res = await invoke('add_quote_line', payload);
+    appState.currentQuoteDetail = res;
+    return res;
+  } catch (err) {
+    console.error("Failed to add quote line:", err);
+    throw err;
+  }
+}
+
+/**
+ * Update line item in quote (draft only)
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function updateQuoteLineAction(input) {
+  try {
+    const payload = input?.input ? input : { input };
+    const res = await invoke('update_quote_line', payload);
+    appState.currentQuoteDetail = res;
+    return res;
+  } catch (err) {
+    console.error("Failed to update quote line:", err);
+    throw err;
+  }
+}
+
+/**
+ * Delete line item from quote (draft only)
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function deleteQuoteLineAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const lId = input.line_id || input.lineId;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      line_id: lId,
+      lineId: lId
+    };
+    const res = await invoke('delete_quote_line', payload);
+    appState.currentQuoteDetail = res;
+    return res;
+  } catch (err) {
+    console.error("Failed to delete quote line:", err);
+    throw err;
+  }
+}
+
+/**
+ * Submit quote for approval or send
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function submitQuoteAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const today = input.today_override || input.todayOverride;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      today_override: today,
+      todayOverride: today
+    };
+    const res = await invoke('submit_quote', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to submit quote:", err);
+    throw err;
+  }
+}
+
+/**
+ * Withdraw quote from pending approval back to draft
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function withdrawQuoteApprovalAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const today = input.today_override || input.todayOverride;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      reason: input.reason,
+      today_override: today,
+      todayOverride: today
+    };
+    const res = await invoke('withdraw_quote_approval', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to withdraw quote approval:", err);
+    throw err;
+  }
+}
+
+/**
+ * Approve pending quote
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function approveQuoteAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const today = input.today_override || input.todayOverride;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      reason: input.reason,
+      today_override: today,
+      todayOverride: today
+    };
+    const res = await invoke('approve_quote', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to approve quote:", err);
+    throw err;
+  }
+}
+
+/**
+ * Reject pending quote
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function rejectQuoteAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const today = input.today_override || input.todayOverride;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      reason: input.reason,
+      today_override: today,
+      todayOverride: today
+    };
+    const res = await invoke('reject_quote', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to reject quote:", err);
+    throw err;
+  }
+}
+
+/**
+ * Mark sent quote as declined by customer
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function declineQuoteAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const today = input.today_override || input.todayOverride;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      reason: input.reason,
+      today_override: today,
+      todayOverride: today
+    };
+    const res = await invoke('decline_quote', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to decline quote:", err);
+    throw err;
+  }
+}
+
+/**
+ * Cancel quote
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function cancelQuoteAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const today = input.today_override || input.todayOverride;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      reason: input.reason,
+      today_override: today,
+      todayOverride: today
+    };
+    const res = await invoke('cancel_quote', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to cancel quote:", err);
+    throw err;
+  }
+}
+
+/**
+ * Convert quote to sales order
+ * @param {Object} input
+ * @returns {Promise<any>}
+ */
+export async function convertQuoteAction(input) {
+  try {
+    const qId = input.quote_id || input.quoteId;
+    const soId = input.sales_order_id || input.salesOrderId;
+    const today = input.today_override || input.todayOverride;
+    const payload = {
+      quote_id: qId,
+      quoteId: qId,
+      sales_order_id: soId,
+      salesOrderId: soId,
+      today_override: today,
+      todayOverride: today
+    };
+    const res = await invoke('convert_quote', payload);
+    appState.currentQuoteDetail = res;
+    await fetchQuotes();
+    return res;
+  } catch (err) {
+    console.error("Failed to convert quote:", err);
     throw err;
   }
 }
