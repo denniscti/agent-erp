@@ -101,6 +101,7 @@
   let currentDetail = $state(null);
   let isDetailLoading = $state(false);
   let detailError = $state('');
+  let actionError = $state('');
 
   // Modals state
   let isCreateModalOpen = $state(false);
@@ -197,6 +198,7 @@
   async function openDetail(quoteId) {
     isDetailLoading = true;
     detailError = '';
+    actionError = '';
     viewMode = 'detail';
     try {
       if (availableSellableUnits.length === 0) {
@@ -219,6 +221,8 @@
   function backToList() {
     viewMode = 'list';
     currentDetail = null;
+    detailError = '';
+    actionError = '';
     loadQuotesList();
   }
 
@@ -287,7 +291,7 @@
   async function handleSaveHeader() {
     if (!currentDetail) return;
     isSavingHeader = true;
-    detailError = '';
+    actionError = '';
     try {
       const updated = await updateQuoteHeaderAction({
         quote_id: currentDetail.quote.id,
@@ -300,7 +304,8 @@
       isEditingHeader = false;
       showToast('表頭資訊已更新');
     } catch (e) {
-      detailError = e.message || String(e);
+      actionError = e.message || String(e);
+      showToast(actionError, 'error');
     } finally {
       isSavingHeader = false;
     }
@@ -380,7 +385,7 @@
     }
 
     isSavingLine = true;
-    detailError = '';
+    actionError = '';
     try {
       const updated = await updateQuoteLineAction({
         quote_id: currentDetail.quote.id,
@@ -393,7 +398,8 @@
       editingLine = null;
       showToast('品項已更新');
     } catch (e) {
-      detailError = e.message || String(e);
+      actionError = e.message || String(e);
+      showToast(actionError, 'error');
     } finally {
       isSavingLine = false;
     }
@@ -402,7 +408,7 @@
   // Delete Line Item
   async function handleDeleteLine(lineId) {
     if (!currentDetail) return;
-    detailError = '';
+    actionError = '';
     try {
       const updated = await deleteQuoteLineAction({
         quote_id: currentDetail.quote.id,
@@ -411,14 +417,15 @@
       currentDetail = updated;
       showToast('品項已刪除');
     } catch (e) {
-      detailError = e.message || String(e);
+      actionError = e.message || String(e);
+      showToast(actionError, 'error');
     }
   }
 
   // Lifecycle Action Handlers
   async function handleSubmitQuote() {
     if (!currentDetail) return;
-    detailError = '';
+    actionError = '';
     try {
       const updated = await submitQuoteAction({
         quote_id: currentDetail.quote.id
@@ -430,7 +437,8 @@
         showToast(updated.message || '報價單已成功送出');
       }
     } catch (e) {
-      detailError = e.message || String(e);
+      actionError = e.message || String(e);
+      showToast(actionError, 'error');
     }
   }
 
@@ -708,7 +716,10 @@
     {#if isDetailLoading}
       <div class="loading-state">載入報價單詳細資訊中...</div>
     {:else if detailError}
-      <div class="alert alert-danger">{detailError}</div>
+      <div class="detail-load-error-box glass-panel">
+        <div class="alert alert-danger">{detailError}</div>
+        <button class="btn btn-secondary mt-3" onclick={backToList}>← 返回報價清單</button>
+      </div>
     {:else if currentDetail}
       {@const q = currentDetail.quote}
       {@const isDraft = q.status === 'draft'}
@@ -717,6 +728,16 @@
       {@const isTerminal = ['converted', 'declined', 'expired', 'cancelled'].includes(q.status)}
 
       <div class="detail-container">
+        <!-- Action Error Banner -->
+        {#if actionError}
+          <div class="action-error-banner glass-panel" role="alert" id="quote-action-error-banner">
+            <div class="action-error-content">
+              <span class="action-error-icon">⚠️</span>
+              <span class="action-error-msg">{actionError}</span>
+            </div>
+            <button class="btn-close-error" onclick={() => actionError = ''} aria-label="關閉錯誤提示">✕</button>
+          </div>
+        {/if}
         <!-- Rejection Alert Banner on Draft -->
         {#if isDraft && q.approval_rejection_reason}
           <div class="rejection-callout glass-panel" id="rejection-reason-banner">
@@ -1762,6 +1783,47 @@
     background: rgba(239, 68, 68, 0.1);
     color: #F87171;
     border: 1px solid rgba(239, 68, 68, 0.3);
+  }
+
+  .detail-load-error-box {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .action-error-banner {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 18px;
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    color: #FCA5A5;
+    border-radius: var(--radius-md);
+    margin-bottom: 8px;
+  }
+
+  .action-error-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.9rem;
+  }
+
+  .btn-close-error {
+    background: transparent;
+    border: none;
+    color: #FCA5A5;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 4px 8px;
+    line-height: 1;
+  }
+
+  .btn-close-error:hover {
+    color: #FFFFFF;
   }
 
   .empty-state, .loading-state {
