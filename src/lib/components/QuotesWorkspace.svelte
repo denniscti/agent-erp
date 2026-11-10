@@ -341,7 +341,7 @@
         unit_id: newLineUnitId,
         quantity: newLineQuantity,
         unit_price: newLineUnitPrice,
-        notes: newLineNotes || undefined
+        note: newLineNotes || undefined
       });
       currentDetail = updated;
       newLineUnitId = '';
@@ -361,7 +361,7 @@
     editingLine = line;
     editLineQuantity = line.quantity;
     editLineUnitPrice = line.unit_price;
-    editLineNotes = line.notes || '';
+    editLineNotes = line.note || line.notes || '';
   }
 
   function cancelEditLine() {
@@ -387,7 +387,7 @@
         line_id: editingLine.id,
         quantity: editLineQuantity,
         unit_price: editLineUnitPrice,
-        notes: editLineNotes || null
+        note: editLineNotes || null
       });
       currentDetail = updated;
       editingLine = null;
@@ -425,9 +425,9 @@
       });
       currentDetail = updated;
       if (updated.quote.status === 'pending_approval') {
-        showToast('報價單含低於標準價品項，已送出並進入待核准審核');
+        showToast(updated.message || '報價單含低於標準價品項，已送出並進入待核准審核');
       } else {
-        showToast('報價單已成功送出');
+        showToast(updated.message || '報價單已成功送出');
       }
     } catch (e) {
       detailError = e.message || String(e);
@@ -968,7 +968,12 @@
 
                     <tr>
                       <td class="text-muted">{line.line_no}</td>
-                      <td class="font-bold">{line.product_name_snapshot}</td>
+                      <td class="font-bold">
+                        {line.product_name_snapshot}
+                        {#if line.note}
+                          <div class="line-note-subtext text-muted font-normal">{line.note}</div>
+                        {/if}
+                      </td>
                       <td>{line.variant_name_snapshot || '單一規格'}</td>
                       <td>{line.unit_name_snapshot}</td>
                       <td>{line.quantity}</td>
@@ -1370,6 +1375,13 @@
   .std-price {
     font-size: 0.78rem;
     color: var(--text-muted);
+  }
+
+  .line-note-subtext {
+    font-size: 0.78rem;
+    font-weight: 400;
+    margin-top: 3px;
+    opacity: 0.85;
   }
 
   /* Detail Layout */

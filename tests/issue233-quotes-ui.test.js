@@ -130,6 +130,18 @@ test.describe('Issue #233: Quotes UI Workspace & Layer 2 End-to-End Workflow Ver
     assert.equal(line.standard_price_snapshot, 100.0);
     assert.equal(line.line_amount, 750.0);
     assert.equal(detail.total_amount, 750.0);
+    assert.equal(line.note, '溢價販售');
+
+    // And: Updating line note and price works without overwriting note to null
+    const updated = await updateQuoteLineAction({
+      quote_id: draft.quote.id,
+      line_id: line.id,
+      quantity: 5,
+      unit_price: 160.0,
+      note: '更新溢價備註'
+    });
+    assert.equal(updated.lines[0].note, '更新溢價備註');
+    assert.equal(updated.lines[0].unit_price, 160.0);
   });
 
   test('TC-UI-N-03: Add quote line with price < standard price (below standard price comparison)', async () => {
@@ -182,6 +194,12 @@ test.describe('Issue #233: Quotes UI Workspace & Layer 2 End-to-End Workflow Ver
     assert.equal(submitted.quote.status, 'pending_approval');
     assert.equal(submitted.quote.requires_approval, 1);
     assert.ok(submitted.quote.submitted_at);
+
+    // And: Returns full QuoteDetail structure so currentDetail.lines.length does not throw TypeError
+    assert.ok(Array.isArray(submitted.lines));
+    assert.equal(submitted.lines.length, 1);
+    assert.equal(submitted.total_amount, 140.0);
+    assert.ok(submitted.message);
   });
 
   test('TC-UI-N-05: Reject pending quote records rejection reason and returns status to draft', async () => {

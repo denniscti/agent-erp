@@ -4758,7 +4758,11 @@ export async function updateQuoteHeaderAction(input) {
  */
 export async function addQuoteLineAction(input) {
   try {
-    const payload = input?.input ? input : { input };
+    const raw = input?.input ? input.input : input;
+    const note = raw.note !== undefined ? raw.note : (raw.notes !== undefined ? raw.notes : null);
+    const inner = { ...raw, note };
+    delete inner.notes;
+    const payload = { input: inner };
     const res = await invoke('add_quote_line', payload);
     appState.currentQuoteDetail = res;
     return res;
@@ -4775,7 +4779,11 @@ export async function addQuoteLineAction(input) {
  */
 export async function updateQuoteLineAction(input) {
   try {
-    const payload = input?.input ? input : { input };
+    const raw = input?.input ? input.input : input;
+    const note = raw.note !== undefined ? raw.note : (raw.notes !== undefined ? raw.notes : null);
+    const inner = { ...raw, note };
+    delete inner.notes;
+    const payload = { input: inner };
     const res = await invoke('update_quote_line', payload);
     appState.currentQuoteDetail = res;
     return res;
@@ -4825,9 +4833,13 @@ export async function submitQuoteAction(input) {
       todayOverride: today
     };
     const res = await invoke('submit_quote', payload);
-    appState.currentQuoteDetail = res;
+    // Re-fetch complete QuoteDetail with lines and total_amount to prevent TypeError in UI
+    const detail = await fetchQuoteDetail(qId);
     await fetchQuotes();
-    return res;
+    return {
+      ...detail,
+      message: res?.message
+    };
   } catch (err) {
     console.error("Failed to submit quote:", err);
     throw err;
