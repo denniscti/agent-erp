@@ -1,5 +1,7 @@
 # 雲端模組市集同步與下載設計說明書 (Dynamic Module Gallery)
 
+> **⚠️ 歷史文件**：本文件描述 Phase 0/1 時期提出、但從未在現在的 ERP 程式碼上落地的模組化構想（manifest.json、五插槽 Shell、動態 ESM 載入等），對應的實作程式碼已經在清理舊展示功能時移除，現在的程式碼完全沒有採用這套設計。現況請看 [`module_boundary_architecture.md`](module_boundary_architecture.md)。本文件保留作為歷史記錄，不代表現行架構。
+
 本設計定義了 AgentERP 主程式如何向雲端同步可用模組列表，並在背景下載安裝模組包的流程與資料格式。
 
 ---

@@ -1,5 +1,7 @@
 # SVG 圖示安全過濾與限制設計說明書 (SVG Sanitizer Security)
 
+> **⚠️ 歷史文件**：本文件描述 Phase 0/1 時期提出、但從未在現在的 ERP 程式碼上落地的模組化構想（manifest.json、五插槽 Shell、動態 ESM 載入等），對應的實作程式碼已經在清理舊展示功能時移除，現在的程式碼完全沒有採用這套設計。現況請看 [`module_boundary_architecture.md`](module_boundary_architecture.md)。本文件保留作為歷史記錄，不代表現行架構。
+
 本設計定義了 Rust 本地核心在將模組的 SVG 圖示存入本地 SQLite 前，如何進行字串長度與標籤/屬性的安全過濾，杜絕跨站腳本攻擊 (XSS) 與本地程式控制權限外洩。
 
 ---

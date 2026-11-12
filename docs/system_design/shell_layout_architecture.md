@@ -1,5 +1,7 @@
 # Shell 佈局架構設計說明書 (Shell Layout Architecture)
 
+> **⚠️ 歷史文件**：本文件描述 Phase 0/1 時期提出、但從未在現在的 ERP 程式碼上落地的模組化構想（manifest.json、五插槽 Shell、動態 ESM 載入等），對應的實作程式碼已經在清理舊展示功能時移除，現在的程式碼完全沒有採用這套設計。現況請看 [`module_boundary_architecture.md`](module_boundary_architecture.md)。本文件保留作為歷史記錄，不代表現行架構。
+
 本設計定義了 AgentERP 桌面應用的外殼（Shell）如何以「插槽」（Slot）為核心概念，為各業務模組提供一套可預期、可組合的版面配置系統。其設計靈感來自 VSCode 的面板區域劃分模型。
 
 ---

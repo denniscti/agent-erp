@@ -1,5 +1,7 @@
 # 模組 Manifest 合約規格說明書 (Module Manifest Contract)
 
+> **⚠️ 歷史文件**：本文件描述 Phase 0/1 時期提出、但從未在現在的 ERP 程式碼上落地的模組化構想（manifest.json、五插槽 Shell、動態 ESM 載入等），對應的實作程式碼已經在清理舊展示功能時移除，現在的程式碼完全沒有採用這套設計。現況請看 [`module_boundary_architecture.md`](module_boundary_architecture.md)。本文件保留作為歷史記錄，不代表現行架構。
+
 本設計定義了每個可安裝業務模組**必須**提供的 `manifest.json` 完整規格。Manifest 是模組的唯一合約文件，Shell 與 Rust 後端依賴它來確認模組的身份、版面配置、AI 技能、存取權限及資料庫需求。
 
 ---

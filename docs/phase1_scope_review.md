@@ -1,5 +1,7 @@
 # Phase 1 範圍檢視與優先順序建議
 
+> **⚠️ 歷史文件**：本文件描述 Phase 0/1 時期提出、但從未在現在的 ERP 程式碼上落地的模組化構想（manifest.json、五插槽 Shell、動態 ESM 載入等），對應的實作程式碼已經在清理舊展示功能時移除，現在的程式碼完全沒有採用這套設計。現況請看 [`system_design/module_boundary_architecture.md`](system_design/module_boundary_architecture.md)。本文件保留作為歷史記錄，不代表現行架構。
+
 本文件記錄對 `docs/phases/1.md` 與 `docs/system_design/` 底下模組系統相關設計（`module_manifest_contract.md`、`dynamic_module_gallery.md`、`dynamic_sqlite_initialization.md`、`svg_sanitizer_security.md`、`pluggable_svg_menu_keepalive.md`）的檢視結論，供後續排優先順序參考。
 
 ---

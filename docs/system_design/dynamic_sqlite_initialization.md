@@ -1,5 +1,7 @@
 # 模組專屬 SQLite 加密建表機制設計說明書 (Dynamic SQLite Initialization)
 
+> **⚠️ 歷史文件**：本文件描述 Phase 0/1 時期提出、但從未在現在的 ERP 程式碼上落地的模組化構想（manifest.json、五插槽 Shell、動態 ESM 載入等），對應的實作程式碼已經在清理舊展示功能時移除，現在的程式碼完全沒有採用這套設計。現況請看 [`module_boundary_architecture.md`](module_boundary_architecture.md)。本文件保留作為歷史記錄，不代表現行架構。
+
 本設計定義了 Rust 後端如何提供一個安全的安全 IPC 通道，允許獨立下載的業務模組動態初始化自己所需的加密 SQLite 資料表，同時不危害核心資料表的安全。
 
 ---
