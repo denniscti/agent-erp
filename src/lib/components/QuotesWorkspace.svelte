@@ -8,8 +8,11 @@
     formatTime,
     fetchPartners,
     fetchProducts,
+    fetchWarehouses,
+    getWarehouseName,
     fetchQuotes,
     fetchQuoteDetail,
+    fetchSalesOrderDetail,
     fetchPendingApprovalQuotes,
     createQuoteAction,
     updateQuoteHeaderAction,
@@ -42,6 +45,9 @@
       p.is_active !== false &&
       p.is_active !== 0
     )
+  );
+  let activeWarehouses = $derived(
+    (appState.warehouses || []).filter(w => w.is_active !== false && w.is_active !== 0)
   );
 
   // Flattened sellable units for line item selection
@@ -137,7 +143,7 @@
   let isSavingLine = $state(false);
 
   // Generic Prompt / Action Modal
-  // actionType: 'withdraw' | 'approve' | 'reject' | 'decline' | 'convert' | 'cancel'
+  // actionType: 'withdraw' | 'approve' | 'reject' | 'decline' | 'cancel'
   let isActionModalOpen = $state(false);
   let actionModalType = $state('');
   let actionModalTitle = $state('');
@@ -148,6 +154,20 @@
   let actionModalInputPlaceholder = $state('');
   let actionModalError = $state('');
   let isSubmittingAction = $state(false);
+
+  // Convert Quote -> Sales Order Modal (Issue #234)
+  let isConvertModalOpen = $state(false);
+  let convertWarehouseId = $state('');
+  let convertPoNumber = $state('');
+  let convertExpectedShipDate = $state('');
+  let convertNote = $state('');
+  let convertModalError = $state('');
+  let isSubmittingConvert = $state(false);
+
+  // Converted Sales Order link preview
+  let convertedSalesOrder = $state(null);
+  let isSalesOrderModalOpen = $state(false);
+  let isLoadingSalesOrder = $state(false);
 
   function getDefaultValidUntil() {
     const d = new Date();
@@ -164,6 +184,7 @@
     try {
       await Promise.all([
         fetchPartners(),
+        fetchWarehouses(),
         loadSellableUnits(),
         loadQuotesList()
       ]);
@@ -195,16 +216,34 @@
     }
   }
 
+  async function loadConvertedSalesOrder(orderId) {
+    if (!orderId) {
+      convertedSalesOrder = null;
+      return;
+    }
+    try {
+      convertedSalesOrder = await fetchSalesOrderDetail(orderId);
+    } catch (e) {
+      console.warn('Failed to fetch converted sales order detail:', e);
+      convertedSalesOrder = null;
+    }
+  }
+
   async function openDetail(quoteId) {
     isDetailLoading = true;
     detailError = '';
     actionError = '';
+    convertedSalesOrder = null;
+    isSalesOrderModalOpen = false;
     viewMode = 'detail';
     try {
       if (availableSellableUnits.length === 0) {
         loadSellableUnits();
       }
       currentDetail = await fetchQuoteDetail(quoteId);
+      if (currentDetail?.quote?.converted_sales_order_id) {
+        await loadConvertedSalesOrder(currentDetail.quote.converted_sales_order_id);
+      }
       isEditingHeader = false;
       newLineUnitId = '';
       newLineQuantity = 1;
@@ -472,18 +511,95 @@
       actionModalInputLabel = '客戶拒絕理由（選填）';
       actionModalInputPlaceholder = '例如：預算不足、選用其他廠商...';
       actionModalInputRequired = false;
-    } else if (type === 'convert') {
-      actionModalTitle = '轉為銷售訂單';
-      actionModalPrompt = '客戶已確認報價，將此報價單標記為已轉單 (converted) 並結案。';
-      actionModalInputLabel = '銷售訂單編號（選填）';
-      actionModalInputPlaceholder = '例如：SO-2026-0001...';
-      actionModalInputRequired = false;
     } else if (type === 'cancel') {
       actionModalTitle = '取消報價單確認';
       actionModalPrompt = '您確定要取消此報價單嗎？取消後將結案且不可再次修改。請填寫取消理由：';
       actionModalInputLabel = '取消理由（必填）';
       actionModalInputPlaceholder = '請輸入取消理由，例如：客戶需求變更、重複開單...';
       actionModalInputRequired = true;
+    }
+  }
+
+  async function openConvertModal() {
+    if (!currentDetail) return;
+    if (!appState.warehouses || appState.warehouses.length === 0) {
+      try {
+        await fetchWarehouses();
+      } catch (e) {
+        console.warn('Failed to fetch warehouses:', e);
+      }
+    }
+    const defaultWh = activeWarehouses.find(w => w.is_default) || activeWarehouses[0];
+    convertWarehouseId = defaultWh ? defaultWh.id : '';
+    convertPoNumber = currentDetail.quote.customer_po_number || '';
+    convertExpectedShipDate = '';
+    convertNote = currentDetail.quote.note || '';
+    convertModalError = '';
+    isConvertModalOpen = true;
+  }
+
+  async function handleExecuteConvertModal(e) {
+    if (e) e.preventDefault();
+    if (!currentDetail) return;
+    const qId = currentDetail.quote.id;
+    if (!convertWarehouseId) {
+      convertModalError = '請選擇出貨倉庫';
+      return;
+    }
+
+    isSubmittingConvert = true;
+    convertModalError = '';
+    try {
+      const res = await convertQuoteAction({
+        quote_id: qId,
+        warehouse_id: convertWarehouseId,
+        customer_po_number: convertPoNumber.trim(),
+        expected_ship_date: convertExpectedShipDate || null,
+        note: convertNote.trim()
+      });
+      currentDetail = {
+        quote: res.quote,
+        lines: res.lines,
+        total_amount: res.total_amount
+      };
+      convertedSalesOrder = res.sales_order;
+      isConvertModalOpen = false;
+      showToast(`已標記客戶接受並轉單：${res.sales_order.order.so_number}`);
+    } catch (err) {
+      const msg = err.message || String(err);
+      convertModalError = msg;
+      if (msg.includes('過期')) {
+        try {
+          currentDetail = await fetchQuoteDetail(qId);
+          await fetchQuotes();
+        } catch (refreshErr) {
+          console.warn('Failed to refresh quote after expiration:', refreshErr);
+        }
+      }
+    } finally {
+      isSubmittingConvert = false;
+    }
+  }
+
+  async function openSalesOrderModal() {
+    if (!currentDetail?.quote?.converted_sales_order_id) return;
+    isSalesOrderModalOpen = true;
+    isLoadingSalesOrder = true;
+    try {
+      convertedSalesOrder = await fetchSalesOrderDetail(currentDetail.quote.converted_sales_order_id);
+    } catch (e) {
+      showToast(e.message || String(e), 'error');
+    } finally {
+      isLoadingSalesOrder = false;
+    }
+  }
+
+  function getSoStatusLabel(status) {
+    switch (status) {
+      case 'confirmed': return '已確認';
+      case 'shipped': return '已出貨';
+      case 'cancelled': return '已取消';
+      default: return status || '未知';
     }
   }
 
@@ -523,12 +639,6 @@
           reason: actionModalInputVal.trim() || undefined
         });
         showToast('報價單已標記為客戶拒絕');
-      } else if (actionModalType === 'convert') {
-        updated = await convertQuoteAction({
-          quote_id: qId,
-          sales_order_id: actionModalInputVal.trim() || undefined
-        });
-        showToast('報價單已成功轉單結案');
       } else if (actionModalType === 'cancel') {
         updated = await cancelQuoteAction({
           quote_id: qId,
@@ -796,8 +906,8 @@
                 <button class="btn btn-warning" onclick={() => openActionModal('decline')} id="btn-decline-quote">
                   標記客戶拒絕
                 </button>
-                <button class="btn btn-primary" onclick={() => openActionModal('convert')} id="btn-convert-quote">
-                  轉為銷售訂單
+                <button class="btn btn-primary" onclick={openConvertModal} id="btn-convert-quote">
+                  標記客戶接受並轉單
                 </button>
                 <button class="btn btn-danger btn-sm" onclick={() => openActionModal('cancel')} id="btn-cancel-quote">
                   取消報價
@@ -873,9 +983,26 @@
                 </div>
               {/if}
               {#if q.converted_sales_order_id}
-                <div class="info-item full-width">
+                <div class="info-item full-width" id="converted-sales-order-info">
                   <span class="info-label">轉入銷售訂單</span>
-                  <span class="info-value text-emerald">{q.converted_sales_order_id}</span>
+                  <div class="converted-so-link-row">
+                    <button
+                      type="button"
+                      class="so-link-btn"
+                      id="converted-sales-order-link"
+                      onclick={openSalesOrderModal}
+                    >
+                      🔗 {convertedSalesOrder ? convertedSalesOrder.order.so_number : q.converted_sales_order_id}
+                    </button>
+                    {#if convertedSalesOrder}
+                      <span class="badge badge-so-status">
+                        {getSoStatusLabel(convertedSalesOrder.order.status)} ({convertedSalesOrder.order.status})
+                      </span>
+                    {/if}
+                    {#if q.converted_at}
+                      <span class="text-muted so-meta-text">轉單時間：{formatTime(q.converted_at)}</span>
+                    {/if}
+                  </div>
                 </div>
               {/if}
               {#if q.cancel_reason}
@@ -1199,6 +1326,181 @@
           id="btn-confirm-action"
         >
           {isSubmittingAction ? '處理中...' : '確認執行'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Modal 4: Convert Quote to Sales Order Modal (Issue #234) -->
+{#if isConvertModalOpen && currentDetail}
+  <div class="modal-backdrop">
+    <div class="modal-dialog glass-panel">
+      <div class="modal-header">
+        <h3>標記客戶接受並轉單</h3>
+        <button class="btn-close" onclick={() => isConvertModalOpen = false}>✕</button>
+      </div>
+      <form onsubmit={handleExecuteConvertModal}>
+        <div class="modal-body">
+          <div class="info-summary">
+            <div><strong>報價單：</strong>{currentDetail.quote.quote_number}（{currentDetail.quote.customer_name_snapshot}）</div>
+            <div class="text-muted" style="margin-top: 4px; font-size: 0.82rem;">
+              整張轉單共 {currentDetail.lines.length} 項明細，總計 {currentDetail.quote.currency} {formatCurrency(currentDetail.total_amount)}（價格與數量將原封不動帶入銷售單，且無法部分轉單）
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="convert-warehouse-id">出貨倉庫 <span class="required">*</span></label>
+            <select
+              id="convert-warehouse-id"
+              bind:value={convertWarehouseId}
+              class="input-select"
+            >
+              <option value="">-- 請選擇出貨倉庫 --</option>
+              {#each activeWarehouses as wh}
+                <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' [預設]' : ''}</option>
+              {/each}
+            </select>
+            {#if activeWarehouses.length === 0}
+              <span class="line-error-msg">尚未建立任何啟用中的倉庫，請先至「倉庫管理」建立倉庫。</span>
+            {/if}
+          </div>
+
+          <div class="form-group">
+            <label for="convert-po-number">客戶採購單號 (PO)</label>
+            <input
+              id="convert-po-number"
+              type="text"
+              bind:value={convertPoNumber}
+              placeholder="選填，例如：PO-CUST-2026-001"
+              class="input-text"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="convert-expected-ship-date">預計出貨日</label>
+            <input
+              id="convert-expected-ship-date"
+              type="date"
+              bind:value={convertExpectedShipDate}
+              class="input-text"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="convert-note">銷售單備註</label>
+            <textarea
+              id="convert-note"
+              bind:value={convertNote}
+              placeholder="選填備註..."
+              class="input-textarea"
+            ></textarea>
+          </div>
+
+          {#if convertModalError}
+            <div class="alert alert-danger" id="convert-modal-error">{convertModalError}</div>
+          {/if}
+        </div>
+        <div class="modal-footer">
+          <button
+            type="button"
+            class="btn btn-secondary"
+            onclick={() => isConvertModalOpen = false}
+            disabled={isSubmittingConvert}
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            disabled={isSubmittingConvert}
+            id="btn-confirm-convert"
+          >
+            {isSubmittingConvert ? '轉單處理中...' : '確認接受並轉單'}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+<!-- Modal 5: Linked Sales Order Detail Modal (Issue #234) -->
+{#if isSalesOrderModalOpen}
+  <div class="modal-backdrop">
+    <div class="modal-dialog modal-dialog-wide glass-panel" id="sales-order-detail-modal">
+      <div class="modal-header">
+        <h3>銷售訂單明細</h3>
+        <button class="btn-close" onclick={() => isSalesOrderModalOpen = false}>✕</button>
+      </div>
+      <div class="modal-body">
+        {#if isLoadingSalesOrder}
+          <div class="loading-state">載入銷售訂單中...</div>
+        {:else if convertedSalesOrder}
+          {@const so = convertedSalesOrder.order}
+          <div class="header-info-grid">
+            <div class="info-item">
+              <span class="info-label">銷售單號</span>
+              <span class="info-value font-bold">{so.so_number}</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">狀態</span>
+              <span class="info-value">
+                <span class="badge badge-so-status">{getSoStatusLabel(so.status)} ({so.status})</span>
+              </span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">往來客戶</span>
+              <span class="info-value">{so.customer_name_snapshot}</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">出貨倉庫</span>
+              <span class="info-value">{getWarehouseName(so.warehouse_id)}</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">客戶採購單號 (PO)</span>
+              <span class="info-value">{so.customer_reference || '—'}</span>
+            </div>
+            <div class="info-item">
+              <span class="info-label">總計金額</span>
+              <span class="info-value amount-total">{so.currency} {formatCurrency(so.total_amount)}</span>
+            </div>
+          </div>
+
+          <div class="table-container" style="margin-top: 12px;">
+            <table class="lines-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>商品名稱</th>
+                  <th>規格</th>
+                  <th>單位</th>
+                  <th>數量</th>
+                  <th>單價</th>
+                  <th>小計</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each convertedSalesOrder.lines as l (l.id)}
+                  <tr>
+                    <td class="text-muted">{l.line_no}</td>
+                    <td class="font-bold">{l.product_name_snapshot}</td>
+                    <td>{l.variant_name_snapshot}</td>
+                    <td>{l.unit_name_snapshot}</td>
+                    <td>{l.quantity}</td>
+                    <td class="amount-cell">{formatCurrency(l.unit_price)}</td>
+                    <td class="amount-cell font-bold">{formatCurrency(l.subtotal)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <div class="empty-lines-state">找不到對應的銷售訂單資料</div>
+        {/if}
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick={() => isSalesOrderModalOpen = false}>
+          關閉
         </button>
       </div>
     </div>
@@ -1830,6 +2132,49 @@
     padding: 40px;
     text-align: center;
     color: var(--text-muted);
+  }
+
+  .modal-dialog-wide {
+    width: 720px;
+    max-width: 94vw;
+  }
+
+  .converted-so-link-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 2px;
+  }
+
+  .so-link-btn {
+    background: rgba(16, 185, 129, 0.12);
+    color: #34D399;
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    border-radius: var(--radius-sm);
+    padding: 4px 10px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+  }
+
+  .so-link-btn:hover {
+    background: rgba(16, 185, 129, 0.22);
+    border-color: rgba(16, 185, 129, 0.6);
+  }
+
+  .badge-so-status {
+    background: rgba(59, 130, 246, 0.15);
+    color: #60A5FA;
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+  }
+
+  .so-meta-text {
+    font-size: 0.82rem;
   }
 
   .text-muted { color: var(--text-muted); }

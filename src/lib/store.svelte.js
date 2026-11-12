@@ -4671,6 +4671,11 @@ export async function fetchQuotes(filter = {}) {
       payload.filter_customer_id = c;
       payload.filterCustomerId = c;
     }
+    const today = filter.today_override || filter.todayOverride;
+    if (today) {
+      payload.today_override = today;
+      payload.todayOverride = today;
+    }
     const list = await invoke('list_quotes', payload);
     appState.quotes = list || [];
     return appState.quotes;
@@ -4683,15 +4688,21 @@ export async function fetchQuotes(filter = {}) {
 /**
  * Fetch quote detail with line items
  * @param {string} quoteId
+ * @param {string} [todayOverride]
  * @returns {Promise<any>}
  */
-export async function fetchQuoteDetail(quoteId) {
+export async function fetchQuoteDetail(quoteId, todayOverride = undefined) {
   try {
-    const detail = await invoke('get_quote', {
+    const payload = {
       quote_id: quoteId,
       quoteId: quoteId,
       id: quoteId
-    });
+    };
+    if (todayOverride) {
+      payload.today_override = todayOverride;
+      payload.todayOverride = todayOverride;
+    }
+    const detail = await invoke('get_quote', payload);
     appState.currentQuoteDetail = detail;
     appState.selectedQuoteId = quoteId;
     return detail;
@@ -4834,8 +4845,8 @@ export async function submitQuoteAction(input) {
     };
     const res = await invoke('submit_quote', payload);
     // Re-fetch complete QuoteDetail with lines and total_amount to prevent TypeError in UI
-    const detail = await fetchQuoteDetail(qId);
-    await fetchQuotes();
+    const detail = await fetchQuoteDetail(qId, today);
+    await fetchQuotes(today ? { today_override: today } : {});
     return {
       ...detail,
       message: res?.message
@@ -4890,7 +4901,7 @@ export async function approveQuoteAction(input) {
     };
     const res = await invoke('approve_quote', payload);
     appState.currentQuoteDetail = res;
-    await fetchQuotes();
+    await fetchQuotes(today ? { today_override: today } : {});
     return res;
   } catch (err) {
     console.error("Failed to approve quote:", err);
@@ -4916,7 +4927,7 @@ export async function rejectQuoteAction(input) {
     };
     const res = await invoke('reject_quote', payload);
     appState.currentQuoteDetail = res;
-    await fetchQuotes();
+    await fetchQuotes(today ? { today_override: today } : {});
     return res;
   } catch (err) {
     console.error("Failed to reject quote:", err);
@@ -4942,7 +4953,7 @@ export async function declineQuoteAction(input) {
     };
     const res = await invoke('decline_quote', payload);
     appState.currentQuoteDetail = res;
-    await fetchQuotes();
+    await fetchQuotes(today ? { today_override: today } : {});
     return res;
   } catch (err) {
     console.error("Failed to decline quote:", err);
@@ -4968,7 +4979,7 @@ export async function cancelQuoteAction(input) {
     };
     const res = await invoke('cancel_quote', payload);
     appState.currentQuoteDetail = res;
-    await fetchQuotes();
+    await fetchQuotes(today ? { today_override: today } : {});
     return res;
   } catch (err) {
     console.error("Failed to cancel quote:", err);
@@ -4977,29 +4988,59 @@ export async function cancelQuoteAction(input) {
 }
 
 /**
- * Convert quote to sales order
+ * Mark sent quote as accepted by customer and convert to confirmed sales order (Issue #234)
  * @param {Object} input
  * @returns {Promise<any>}
  */
 export async function convertQuoteAction(input) {
   try {
-    const qId = input.quote_id || input.quoteId;
-    const soId = input.sales_order_id || input.salesOrderId;
-    const today = input.today_override || input.todayOverride;
-    const payload = {
+    const raw = input?.input ? input.input : (input || {});
+    const qId = raw.quote_id || raw.quoteId;
+    const whId = raw.warehouse_id !== undefined ? raw.warehouse_id : raw.warehouseId;
+    const poNum = raw.customer_po_number !== undefined
+      ? raw.customer_po_number
+      : (raw.customerPoNumber !== undefined ? raw.customerPoNumber : raw.customer_reference);
+    const expShip = raw.expected_ship_date !== undefined ? raw.expected_ship_date : raw.expectedShipDate;
+    const today = input?.today_override ?? input?.todayOverride ?? raw.today_override ?? raw.todayOverride;
+    const inner = {
       quote_id: qId,
-      quoteId: qId,
-      sales_order_id: soId,
-      salesOrderId: soId,
-      today_override: today,
-      todayOverride: today
+      warehouse_id: whId !== undefined && whId !== null && String(whId).trim() !== '' ? String(whId).trim() : null,
+      customer_po_number: poNum !== undefined && poNum !== null ? String(poNum) : null,
+      expected_ship_date: expShip !== undefined && expShip !== null && String(expShip).trim() !== '' ? String(expShip).trim() : null,
+      note: raw.note !== undefined && raw.note !== null ? String(raw.note) : null
     };
+    const payload = { input: inner };
+    if (today) {
+      payload.today_override = today;
+      payload.todayOverride = today;
+    }
     const res = await invoke('convert_quote', payload);
-    appState.currentQuoteDetail = res;
-    await fetchQuotes();
+    appState.currentQuoteDetail = {
+      quote: res.quote,
+      lines: res.lines,
+      total_amount: res.total_amount
+    };
+    await fetchQuotes(today ? { today_override: today } : {});
     return res;
   } catch (err) {
     console.error("Failed to convert quote:", err);
+    throw err;
+  }
+}
+
+/**
+ * Fetch sales order detail by order ID
+ * @param {string} orderId
+ * @returns {Promise<any>}
+ */
+export async function fetchSalesOrderDetail(orderId) {
+  try {
+    return await invoke('get_sales_order', {
+      order_id: orderId,
+      orderId: orderId
+    });
+  } catch (err) {
+    console.error("Failed to fetch sales order detail:", err);
     throw err;
   }
 }

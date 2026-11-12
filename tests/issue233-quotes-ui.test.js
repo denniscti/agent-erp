@@ -296,15 +296,18 @@ test.describe('Issue #233: Quotes UI Workspace & Layer 2 End-to-End Workflow Ver
     await addQuoteLineAction({ quote_id: draft.quote.id, unit_id: unitId, quantity: 2, unit_price: 100.0 });
     await submitQuoteAction({ quote_id: draft.quote.id });
 
-    // When: Sales rep converts quote to sales order SO-2026-001
+    // When: Sales rep marks quote accepted and converts to sales order
     const converted = await convertQuoteAction({
       quote_id: draft.quote.id,
-      sales_order_id: 'SO-2026-001'
+      customer_po_number: 'PO-2026-001'
     });
 
-    // Then: Status becomes converted with sales order link
+    // Then: Status becomes converted with confirmed sales order link
     assert.equal(converted.quote.status, 'converted');
-    assert.equal(converted.quote.converted_sales_order_id, 'SO-2026-001');
+    assert.ok(converted.sales_order?.order?.id);
+    assert.equal(converted.sales_order.order.status, 'confirmed');
+    assert.equal(converted.sales_order.order.customer_reference, 'PO-2026-001');
+    assert.equal(converted.quote.converted_sales_order_id, converted.sales_order.order.id);
     assert.ok(converted.quote.converted_at);
   });
 
@@ -563,7 +566,7 @@ test.describe('Issue #233: Quotes UI Workspace & Layer 2 End-to-End Workflow Ver
     const draft = await createQuoteAction({ customer_partner_id: customer.id, valid_until: validUntil });
     await addQuoteLineAction({ quote_id: draft.quote.id, unit_id: unitId, quantity: 1, unit_price: 100.0 });
     await submitQuoteAction({ quote_id: draft.quote.id });
-    await convertQuoteAction({ quote_id: draft.quote.id, sales_order_id: 'SO-101' });
+    await convertQuoteAction({ quote_id: draft.quote.id });
 
     // When & Then: Attempting to update header on terminal quote is rejected
     await assert.rejects(

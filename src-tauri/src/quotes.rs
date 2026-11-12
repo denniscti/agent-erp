@@ -59,6 +59,9 @@ pub enum QuoteError {
     #[error("日期格式需為 YYYY-MM-DD")]
     InvalidDateFormat(String),
 
+    #[error("報價單已過期，無法轉為銷售單")]
+    QuoteExpiredForConvert,
+
     #[error("{0}")]
     Other(String),
 }
@@ -266,6 +269,31 @@ pub struct PendingApprovalQuoteItem {
     pub quote: Quote,
     pub below_standard_lines: Vec<BelowStandardLine>,
     pub total_amount: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct ConvertQuoteInput {
+    #[serde(alias = "quoteId")]
+    pub quote_id: String,
+    #[serde(alias = "warehouseId")]
+    pub warehouse_id: Option<String>,
+    #[serde(
+        alias = "customerPoNumber",
+        alias = "customer_reference",
+        alias = "customerReference"
+    )]
+    pub customer_po_number: Option<String>,
+    #[serde(alias = "expectedShipDate")]
+    pub expected_ship_date: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+pub struct ConvertQuoteResult {
+    pub quote: Quote,
+    pub lines: Vec<QuoteLine>,
+    pub total_amount: f64,
+    pub sales_order: crate::sales_orders::SalesOrderDetail,
 }
 
 // ==========================================
@@ -1215,14 +1243,22 @@ pub fn convert_quote_impl(
     conn: &mut rusqlite::Connection,
     tenant_id: &str,
     user_id: &str,
-    quote_id: &str,
-    sales_order_id: Option<String>,
+    input: ConvertQuoteInput,
     today_override: Option<&str>,
-) -> Result<QuoteDetail, QuoteError> {
+) -> Result<ConvertQuoteResult, QuoteError> {
     let tid = tenant_id.trim();
     if tid.is_empty() {
         return Err(QuoteError::EmptyTenantId);
     }
+    let uid = user_id.trim();
+    if uid.is_empty() {
+        return Err(QuoteError::EmptyUserId);
+    }
+    let q_id = input.quote_id.trim();
+    if q_id.is_empty() {
+        return Err(QuoteError::QuoteNotFound);
+    }
+
     let now = current_timestamp();
     let today = match today_override {
         Some(t) => t.to_string(),
@@ -1230,11 +1266,18 @@ pub fn convert_quote_impl(
     };
 
     let tx = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| QuoteError::Other(e.to_string()))?;
+
+    // In-transaction expiration check before conversion
     expire_quotes(&tx, Some(tid), &today, now)?;
 
-    let quote = get_quote_row(&tx, tid, quote_id)?;
+    let quote = get_quote_row(&tx, tid, q_id)?;
+    if quote.status == "expired" {
+        // Persist any lazy expiration applied inside this transaction before rejecting conversion
+        tx.commit().map_err(|e| QuoteError::Other(e.to_string()))?;
+        return Err(QuoteError::QuoteExpiredForConvert);
+    }
     if is_terminal_status(&quote.status) {
         return Err(QuoteError::TerminalStateImmutable);
     }
@@ -1242,29 +1285,86 @@ pub fn convert_quote_impl(
         return Err(QuoteError::InvalidStatusTransition);
     }
 
-    let trimmed_so_id = sales_order_id
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let lines = get_quote_lines(&tx, &quote.id)?;
+    if lines.is_empty() {
+        return Err(QuoteError::Other("銷售單至少需有 1 筆明細".to_string()));
+    }
 
-    tx.execute(
+    let customer_reference = match input.customer_po_number {
+        Some(po) => {
+            let trimmed = po.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        None => quote.customer_po_number.clone(),
+    };
+
+    let note = match input.note {
+        Some(n) => {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        None => quote.note.clone(),
+    };
+
+    let so_input = crate::sales_orders::CreateSalesOrderFromQuoteInput {
+        source_quote_id: quote.id.clone(),
+        customer_partner_id: quote.customer_partner_id.clone(),
+        customer_name_snapshot: Some(quote.customer_name_snapshot.clone()),
+        customer_reference,
+        warehouse_id: input.warehouse_id,
+        currency: Some(quote.currency.clone()),
+        expected_ship_date: input.expected_ship_date,
+        note,
+        task_id: None,
+        lines: lines
+            .iter()
+            .map(
+                |l| crate::sales_orders::CreateSalesOrderLineFromQuoteInput {
+                    unit_id: l.unit_id.clone(),
+                    product_name_snapshot: l.product_name_snapshot.clone(),
+                    variant_name_snapshot: l.variant_name_snapshot.clone(),
+                    sku_snapshot: l.sku_snapshot.clone(),
+                    unit_name_snapshot: l.unit_name_snapshot.clone(),
+                    quantity: l.quantity,
+                    unit_price: l.unit_price,
+                    standard_price_snapshot: l.standard_price_snapshot,
+                },
+            )
+            .collect(),
+    };
+
+    let sales_order =
+        crate::sales_orders::create_sales_order_from_quote_in_tx(&tx, tid, uid, so_input)
+            .map_err(|e| QuoteError::Other(e.to_string()))?;
+
+    let affected = tx.execute(
         "UPDATE quotes 
          SET status = 'converted', converted_at = ?1, accepted_by = ?2, converted_sales_order_id = ?3 
-         WHERE id = ?4 AND tenant_id = ?5",
-        params![now, user_id, trimmed_so_id, quote_id, tid],
+         WHERE id = ?4 AND tenant_id = ?5 AND status = 'sent'",
+        params![now, uid, sales_order.order.id, quote.id, tid],
     )?;
+    if affected == 0 {
+        return Err(QuoteError::InvalidStatusTransition);
+    }
 
-    let updated_quote = get_quote_row(&tx, tid, quote_id)?;
-    let lines = get_quote_lines(&tx, quote_id)?;
+    let updated_quote = get_quote_row(&tx, tid, &quote.id)?;
     let total_amount = round_2(lines.iter().map(|l| l.line_amount).sum());
 
     tx.commit().map_err(|e| QuoteError::Other(e.to_string()))?;
 
-    Ok(QuoteDetail {
+    Ok(ConvertQuoteResult {
         quote: updated_quote,
         lines,
         total_amount,
+        sales_order,
     })
 }
 
@@ -1787,22 +1887,13 @@ pub async fn decline_quote<R: tauri::Runtime>(
 #[specta::specta]
 pub async fn convert_quote<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
-    quote_id: String,
-    sales_order_id: Option<String>,
-) -> Result<QuoteDetail, String> {
+    input: ConvertQuoteInput,
+) -> Result<ConvertQuoteResult, String> {
     let db_path = get_db_path(&app_handle);
     let mut conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     let active_uid = crate::purchase_orders::resolve_active_user_id(&conn)?;
-    convert_quote_impl(
-        &mut conn,
-        &active_tid,
-        &active_uid,
-        &quote_id,
-        sales_order_id,
-        None,
-    )
-    .map_err(|e| e.to_string())
+    convert_quote_impl(&mut conn, &active_tid, &active_uid, input, None).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1913,7 +2004,11 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::partners::create_partners_table(&conn).unwrap();
         crate::products::create_products_tables(&conn).unwrap();
+        crate::warehouses::create_warehouses_tables(&conn).unwrap();
+        crate::purchase_orders::create_purchase_orders_tables(&conn).unwrap();
+        crate::warehouses::ensure_warehouse_columns_and_indices(&conn).unwrap();
         create_quotes_tables(&conn).unwrap();
+        crate::sales_orders::create_sales_orders_tables(&conn).unwrap();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_logs (
                 id TEXT PRIMARY KEY,
@@ -3979,5 +4074,776 @@ mod tests {
         assert_eq!(current_quote.approved_by, None);
         assert_eq!(current_quote.approved_at, None);
         assert_eq!(current_quote.sent_at, None);
+    }
+
+    // =========================================================================
+    // Issue #234 Tests: Mark Quote Accepted & Convert to Sales Order
+    // =========================================================================
+
+    fn create_sent_quote_with_lines(
+        conn: &mut rusqlite::Connection,
+        tid: &str,
+        cid: &str,
+        valid_until: &str,
+        today: &str,
+        lines: Vec<(&str, f64, f64)>,
+        quote_po: Option<&str>,
+    ) -> QuoteDetail {
+        let q = create_quote_impl(
+            conn,
+            tid,
+            "usr_sales",
+            CreateQuoteInput {
+                customer_partner_id: cid.to_string(),
+                valid_until: valid_until.to_string(),
+                note: Some("報價備註".to_string()),
+                customer_po_number: quote_po.map(String::from),
+            },
+            Some(today),
+        )
+        .unwrap();
+
+        for (uid, qty, price) in lines {
+            add_quote_line_impl(
+                conn,
+                tid,
+                AddQuoteLineInput {
+                    quote_id: q.quote.id.clone(),
+                    unit_id: uid.to_string(),
+                    quantity: qty,
+                    unit_price: price,
+                    note: Some("行備註".to_string()),
+                },
+                Some(today),
+            )
+            .unwrap();
+        }
+
+        let sub = submit_quote_impl(conn, tid, "usr_sales", &q.quote.id, Some(today)).unwrap();
+        if sub.quote.status == "pending_approval" {
+            approve_quote_impl(conn, tid, "usr_mgr", &q.quote.id, None, Some(today)).unwrap();
+        }
+        get_quote_impl(conn, tid, &q.quote.id, Some(today)).unwrap()
+    }
+
+    #[test]
+    fn test_tc_cnv_n01_and_n02_convert_sent_quote_copies_all_lines_and_skips_audit_logs() {
+        // Given: Active tenant with two warehouses (default + secondary), customer, two sellable products, and a sent quote
+        let mut conn = setup_test_db();
+        let wh_default =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "MAIN", "主倉").unwrap();
+        let wh_sec =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "B02", "二號倉").unwrap();
+        let cid = seed_customer(&conn, "tnt_1", "鴻海精密", true, true);
+        let (_, uid1) = seed_product(&conn, "tnt_1", "工業馬達", true, 500.0);
+        let (_, uid2) = seed_product(&conn, "tnt_1", "伺服控制器", true, 1200.0);
+
+        let sent = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid1, 3.0, 520.0), (&uid2, 2.0, 1200.0)],
+            Some("PO-OLD"),
+        );
+
+        // When: Converting quote with explicit warehouse, customer_po_number, and expected_ship_date
+        let res = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales_rep",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh_sec.id.clone()),
+                customer_po_number: Some("PO-2026-88".to_string()),
+                expected_ship_date: Some("2026-11-20".to_string()),
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+
+        // Then: Quote becomes converted with SO link, accepted_by, converted_at; SO is confirmed with copied lines
+        assert_eq!(res.quote.status, "converted");
+        assert_eq!(res.quote.accepted_by.as_deref(), Some("usr_sales_rep"));
+        assert!(res.quote.converted_at.is_some());
+        assert_eq!(
+            res.quote.converted_sales_order_id.as_deref(),
+            Some(res.sales_order.order.id.as_str())
+        );
+
+        let so = &res.sales_order.order;
+        assert_eq!(so.status, "confirmed");
+        assert_eq!(so.so_number, "SO-00001");
+        assert_eq!(so.source_quote_id, sent.quote.id);
+        assert_eq!(so.customer_partner_id, cid);
+        assert_eq!(so.customer_name_snapshot, "鴻海精密");
+        assert_eq!(so.customer_reference.as_deref(), Some("PO-2026-88"));
+        assert_eq!(so.warehouse_id, wh_sec.id);
+        assert_eq!(so.currency, "TWD");
+        assert_eq!(so.expected_ship_date.as_deref(), Some("2026-11-20"));
+        assert_eq!(so.note.as_deref(), Some("報價備註"));
+        assert_eq!(so.total_amount, res.total_amount);
+
+        assert_eq!(res.sales_order.lines.len(), 2);
+        assert_eq!(res.sales_order.lines[0].unit_id, uid1);
+        assert_eq!(res.sales_order.lines[0].quantity, 3.0);
+        assert_eq!(res.sales_order.lines[0].unit_price, 520.0);
+        assert_eq!(res.sales_order.lines[0].standard_price_snapshot, 500.0);
+        assert_eq!(res.sales_order.lines[0].subtotal, 1560.0);
+        assert_eq!(res.sales_order.lines[1].unit_id, uid2);
+        assert_eq!(res.sales_order.lines[1].quantity, 2.0);
+        assert_eq!(res.sales_order.lines[1].unit_price, 1200.0);
+        assert_eq!(res.sales_order.lines[1].subtotal, 2400.0);
+
+        // And: No audit_logs written for customer acceptance conversion
+        let audit_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 0);
+
+        // When: Converting a second sent quote with warehouse_id = None and customer_po_number = None
+        let sent2 = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid1, 1.0, 500.0)],
+            Some("PO-Q2"),
+        );
+        let res2 = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales_rep",
+            ConvertQuoteInput {
+                quote_id: sent2.quote.id.clone(),
+                warehouse_id: None,
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+
+        // Then: Resolves default warehouse and inherits quote's customer_po_number
+        assert_eq!(res2.sales_order.order.warehouse_id, wh_default.id);
+        assert_eq!(
+            res2.sales_order.order.customer_reference.as_deref(),
+            Some("PO-Q2")
+        );
+        assert_eq!(res2.sales_order.order.so_number, "SO-00002");
+    }
+
+    #[test]
+    fn test_tc_cnv_n03_cancelling_converted_sales_order_keeps_quote_converted() {
+        // Given: A converted quote and its confirmed sales order
+        let mut conn = setup_test_db();
+        let wh =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "MAIN", "主倉").unwrap();
+        let cid = seed_customer(&conn, "tnt_1", "和碩聯合", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "電源供應器", true, 300.0);
+        let sent = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid, 4.0, 300.0)],
+            None,
+        );
+        let converted = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh.id),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+
+        // When: The resulting sales order is cancelled
+        let cancelled_so = crate::sales_orders::cancel_sales_order_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &converted.sales_order.order.id,
+        )
+        .unwrap();
+
+        // Then: Sales order is cancelled, while quote stays 'converted' and does not revert
+        assert_eq!(cancelled_so.order.status, "cancelled");
+        let reloaded_quote =
+            get_quote_impl(&conn, "tnt_1", &sent.quote.id, Some("2026-11-10")).unwrap();
+        assert_eq!(reloaded_quote.quote.status, "converted");
+        assert_eq!(
+            reloaded_quote.quote.converted_sales_order_id.as_deref(),
+            Some(converted.sales_order.order.id.as_str())
+        );
+    }
+
+    #[test]
+    fn test_tc_cnv_b01_and_b02_expiration_boundary_persists_expired_status() {
+        // Given: Two sent quotes with valid_until = 2026-11-10
+        let mut conn = setup_test_db();
+        let wh =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "MAIN", "主倉").unwrap();
+        let cid = seed_customer(&conn, "tnt_1", "廣達電腦", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "散熱模組", true, 200.0);
+
+        let q_exact = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-11-10",
+            "2026-11-09",
+            vec![(&uid, 1.0, 200.0)],
+            None,
+        );
+        let q_expired = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-11-10",
+            "2026-11-09",
+            vec![(&uid, 1.0, 200.0)],
+            None,
+        );
+
+        // When: Converting q_exact on exact valid_until date (2026-11-10)
+        let ok_res = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: q_exact.quote.id.clone(),
+                warehouse_id: Some(wh.id.clone()),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+
+        // Then: Exact boundary succeeds
+        assert_eq!(ok_res.quote.status, "converted");
+        assert_eq!(ok_res.sales_order.order.status, "confirmed");
+
+        // When: Converting q_expired one day past valid_until (2026-11-11) WITHOUT prior get_quote
+        let err = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: q_expired.quote.id.clone(),
+                warehouse_id: Some(wh.id),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-11"),
+        )
+        .unwrap_err();
+
+        // Then: Rejected with QuoteExpiredForConvert and quote status 'expired' is persisted in DB
+        assert_eq!(err, QuoteError::QuoteExpiredForConvert);
+        assert_eq!(err.to_string(), "報價單已過期，無法轉為銷售單");
+
+        let persisted = get_quote_row(&conn, "tnt_1", &q_expired.quote.id).unwrap();
+        assert_eq!(persisted.status, "expired");
+        assert!(persisted.expired_at.is_some());
+        assert_eq!(persisted.converted_sales_order_id, None);
+
+        let so_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sales_orders WHERE source_quote_id = ?1",
+                params![q_expired.quote.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(so_count, 0);
+    }
+
+    #[test]
+    fn test_tc_cnv_b03_and_b04_empty_po_and_zero_price_fractional_rounding() {
+        // Given: Sent quote (via approval) with unit_price = 0.0 and fractional qty 1.5 * 33.33
+        let mut conn = setup_test_db();
+        let wh =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "MAIN", "主倉").unwrap();
+        let cid = seed_customer(&conn, "tnt_1", "仁寶電腦", true, true);
+        let (_, uid1) = seed_product(&conn, "tnt_1", "贈品配件", true, 50.0);
+        let (_, uid2) = seed_product(&conn, "tnt_1", "精密線材", true, 30.0);
+
+        let sent = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid1, 2.0, 0.0), (&uid2, 1.5, 33.33)],
+            Some("PO-OLD"),
+        );
+
+        // When: Converting with whitespace-only customer_po_number and empty expected_ship_date
+        let converted = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh.id),
+                customer_po_number: Some("   \t  ".to_string()),
+                expected_ship_date: Some("".to_string()),
+                note: Some("   ".to_string()),
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+
+        // Then: Trims empty optional fields to None and preserves 0.0 price & exact rounded subtotal (1.5 * 33.33 = 49.995 -> 50.0)
+        assert_eq!(converted.sales_order.order.customer_reference, None);
+        assert_eq!(converted.sales_order.order.expected_ship_date, None);
+        assert_eq!(converted.sales_order.order.note, None);
+        assert_eq!(converted.sales_order.lines[0].unit_price, 0.0);
+        assert_eq!(converted.sales_order.lines[0].subtotal, 0.0);
+        assert_eq!(converted.sales_order.lines[1].quantity, 1.5);
+        assert_eq!(converted.sales_order.lines[1].unit_price, 33.33);
+        assert_eq!(converted.sales_order.lines[1].subtotal, 50.0);
+        assert_eq!(
+            converted.sales_order.order.total_amount,
+            converted.total_amount
+        );
+    }
+
+    #[test]
+    fn test_tc_cnv_e01_and_e02_duplicate_and_invalid_status_transitions() {
+        // Given: Quotes in converted, draft, pending_approval, declined, and cancelled statuses
+        let mut conn = setup_test_db();
+        let wh =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "MAIN", "主倉").unwrap();
+        let cid = seed_customer(&conn, "tnt_1", "緯創資通", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "伺服器板", true, 100.0);
+
+        let sent = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid, 1.0, 100.0)],
+            None,
+        );
+        convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh.id.clone()),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+
+        // When / Then (TC-CNV-E-01): Re-converting already converted quote is rejected
+        let err_dup = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh.id.clone()),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(err_dup, QuoteError::TerminalStateImmutable);
+        assert_eq!(err_dup.to_string(), "此報價單已結案，無法修改");
+
+        let so_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sales_orders WHERE source_quote_id = ?1",
+                params![sent.quote.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(so_count, 1);
+
+        // When / Then (TC-CNV-E-02): Draft & pending_approval rejected with InvalidStatusTransition
+        let draft = create_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            CreateQuoteInput {
+                customer_partner_id: cid.clone(),
+                valid_until: "2026-12-31".to_string(),
+                note: None,
+                customer_po_number: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+        add_quote_line_impl(
+            &mut conn,
+            "tnt_1",
+            AddQuoteLineInput {
+                quote_id: draft.quote.id.clone(),
+                unit_id: uid.clone(),
+                quantity: 1.0,
+                unit_price: 80.0,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap();
+        let err_draft = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: draft.quote.id.clone(),
+                warehouse_id: Some(wh.id.clone()),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(err_draft, QuoteError::InvalidStatusTransition);
+
+        submit_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &draft.quote.id,
+            Some("2026-11-10"),
+        )
+        .unwrap();
+        let err_pending = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: draft.quote.id.clone(),
+                warehouse_id: Some(wh.id.clone()),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(err_pending, QuoteError::InvalidStatusTransition);
+
+        // Declined & cancelled rejected with TerminalStateImmutable
+        let sent_for_decline = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid, 1.0, 100.0)],
+            None,
+        );
+        decline_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            &sent_for_decline.quote.id,
+            None,
+            Some("2026-11-10"),
+        )
+        .unwrap();
+        let err_declined = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent_for_decline.quote.id,
+                warehouse_id: Some(wh.id),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(err_declined, QuoteError::TerminalStateImmutable);
+    }
+
+    #[test]
+    fn test_tc_cnv_e03_to_e06_rollback_on_warehouse_customer_date_failures() {
+        // Given: Tenant without warehouses initially, active customer, and sent quote
+        let mut conn = setup_test_db();
+        let cid = seed_customer(&conn, "tnt_1", "英業達", true, true);
+        let (_, uid) = seed_product(&conn, "tnt_1", "電源模組", true, 400.0);
+        let sent = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_1",
+            &cid,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid, 2.0, 400.0)],
+            None,
+        );
+
+        // When / Then (TC-CNV-E-04): Missing default warehouse fails and rolls back
+        let err_no_wh = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: None,
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert!(err_no_wh.to_string().contains("尚未建立任何倉別"));
+        assert_eq!(
+            get_quote_row(&conn, "tnt_1", &sent.quote.id)
+                .unwrap()
+                .status,
+            "sent"
+        );
+
+        // Given: Warehouses created (wh1 active, wh2 deactivated)
+        let wh1 =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "MAIN", "主倉").unwrap();
+        let wh2 =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_1", "OLD", "舊倉").unwrap();
+        crate::warehouses::deactivate_warehouse_impl(&mut conn, "tnt_1", &wh2.id).unwrap();
+
+        // When / Then (TC-CNV-E-03): Inactive or nonexistent warehouse fails and rolls back
+        let err_bad_wh = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh2.id),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(err_bad_wh.to_string(), "找不到倉別或倉別已停用");
+        assert_eq!(
+            get_quote_row(&conn, "tnt_1", &sent.quote.id)
+                .unwrap()
+                .status,
+            "sent"
+        );
+
+        // When / Then (TC-CNV-E-06): Invalid calendar date fails and rolls back
+        let err_bad_date = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh1.id.clone()),
+                customer_po_number: None,
+                expected_ship_date: Some("2026-02-29".to_string()),
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(err_bad_date.to_string(), "日期超出該月份天數");
+        assert_eq!(
+            get_quote_row(&conn, "tnt_1", &sent.quote.id)
+                .unwrap()
+                .status,
+            "sent"
+        );
+
+        // When / Then (TC-CNV-E-05): Deactivated customer fails and rolls back
+        conn.execute(
+            "UPDATE partners SET is_active = 0 WHERE id = ?1",
+            params![cid],
+        )
+        .unwrap();
+        let err_cust = convert_quote_impl(
+            &mut conn,
+            "tnt_1",
+            "usr_sales",
+            ConvertQuoteInput {
+                quote_id: sent.quote.id.clone(),
+                warehouse_id: Some(wh1.id),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_cust.to_string(),
+            "找不到此客戶，或該往來對象未設定為客戶"
+        );
+        let reloaded = get_quote_row(&conn, "tnt_1", &sent.quote.id).unwrap();
+        assert_eq!(reloaded.status, "sent");
+        assert_eq!(reloaded.converted_sales_order_id, None);
+    }
+
+    #[test]
+    fn test_tc_cnv_e07_e08_e09_empty_guards_isolation_and_db_rollback() {
+        // Given: Tenant A with sent quote and Tenant B
+        let mut conn = setup_test_db();
+        let wh_a =
+            crate::warehouses::create_warehouse_impl(&mut conn, "tnt_a", "MAIN", "主倉A").unwrap();
+        let cid_a = seed_customer(&conn, "tnt_a", "客戶A", true, true);
+        let (_, uid_a) = seed_product(&conn, "tnt_a", "商品A", true, 100.0);
+        let sent_a = create_sent_quote_with_lines(
+            &mut conn,
+            "tnt_a",
+            &cid_a,
+            "2026-12-31",
+            "2026-11-10",
+            vec![(&uid_a, 1.0, 100.0)],
+            None,
+        );
+
+        // When / Then (TC-CNV-E-07): Empty tenant_id, empty user_id, empty quote_id
+        assert_eq!(
+            convert_quote_impl(
+                &mut conn,
+                "   ",
+                "usr_1",
+                ConvertQuoteInput {
+                    quote_id: sent_a.quote.id.clone(),
+                    warehouse_id: Some(wh_a.id.clone()),
+                    customer_po_number: None,
+                    expected_ship_date: None,
+                    note: None,
+                },
+                Some("2026-11-10"),
+            )
+            .unwrap_err(),
+            QuoteError::EmptyTenantId
+        );
+        assert_eq!(
+            convert_quote_impl(
+                &mut conn,
+                "tnt_a",
+                "  ",
+                ConvertQuoteInput {
+                    quote_id: sent_a.quote.id.clone(),
+                    warehouse_id: Some(wh_a.id.clone()),
+                    customer_po_number: None,
+                    expected_ship_date: None,
+                    note: None,
+                },
+                Some("2026-11-10"),
+            )
+            .unwrap_err(),
+            QuoteError::EmptyUserId
+        );
+        assert_eq!(
+            convert_quote_impl(
+                &mut conn,
+                "tnt_a",
+                "usr_1",
+                ConvertQuoteInput {
+                    quote_id: "".to_string(),
+                    warehouse_id: Some(wh_a.id.clone()),
+                    customer_po_number: None,
+                    expected_ship_date: None,
+                    note: None,
+                },
+                Some("2026-11-10"),
+            )
+            .unwrap_err(),
+            QuoteError::QuoteNotFound
+        );
+
+        // When / Then (TC-CNV-E-08): Cross-tenant conversion attempt rejected
+        let err_iso = convert_quote_impl(
+            &mut conn,
+            "tnt_b",
+            "usr_b",
+            ConvertQuoteInput {
+                quote_id: sent_a.quote.id.clone(),
+                warehouse_id: None,
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert_eq!(err_iso, QuoteError::QuoteNotFound);
+        assert_eq!(
+            get_quote_row(&conn, "tnt_a", &sent_a.quote.id)
+                .unwrap()
+                .status,
+            "sent"
+        );
+
+        // When / Then (TC-CNV-E-09): Triggering UPDATE quotes failure rolls back newly inserted sales_order
+        conn.execute(
+            "CREATE TRIGGER fail_quote_convert BEFORE UPDATE ON quotes
+             WHEN NEW.status = 'converted'
+             BEGIN
+                 SELECT RAISE(ABORT, 'intentional quote update failure');
+             END;",
+            [],
+        )
+        .unwrap();
+
+        let err_tx = convert_quote_impl(
+            &mut conn,
+            "tnt_a",
+            "usr_a",
+            ConvertQuoteInput {
+                quote_id: sent_a.quote.id.clone(),
+                warehouse_id: Some(wh_a.id),
+                customer_po_number: None,
+                expected_ship_date: None,
+                note: None,
+            },
+            Some("2026-11-10"),
+        )
+        .unwrap_err();
+        assert!(err_tx
+            .to_string()
+            .contains("intentional quote update failure"));
+
+        // Verify sales_order insert was rolled back too
+        let so_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sales_orders WHERE source_quote_id = ?1",
+                params![sent_a.quote.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(so_count, 0);
+        assert_eq!(
+            get_quote_row(&conn, "tnt_a", &sent_a.quote.id)
+                .unwrap()
+                .status,
+            "sent"
+        );
     }
 }

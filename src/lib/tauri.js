@@ -6906,30 +6906,165 @@ export async function invoke(cmd, args = {}) {
     }
 
     case 'convert_quote': {
-      const { quote_id, quoteId, sales_order_id, salesOrderId, today_override } = args || {};
+      const payload = args?.input || args || {};
       const targetTenantId = resolveMockActiveTenantId();
-      const qId = (quote_id || quoteId || '').trim();
-      const today = today_override || new Date().toISOString().slice(0, 10);
+      if (!targetTenantId || !targetTenantId.trim()) {
+        throw new Error('Tenant ID cannot be empty');
+      }
+      const activeUid = resolveMockActiveUserId();
+      if (!activeUid || !activeUid.trim()) {
+        throw new Error('無法解析有效使用者 session，操作被拒絕');
+      }
+
+      const qId = String(payload.quote_id || payload.quoteId || '').trim();
+      const rawToday = args?.today_override !== undefined
+        ? args.today_override
+        : (args?.todayOverride !== undefined
+          ? args.todayOverride
+          : (payload.today_override !== undefined ? payload.today_override : payload.todayOverride));
+      const today = (rawToday !== undefined && rawToday !== null && String(rawToday).trim() !== '')
+        ? String(rawToday).trim()
+        : new Date().toISOString().slice(0, 10);
+
+      // In-transaction lazy expiration check before conversion
       expireMockQuotes(targetTenantId, today);
 
       const quote = mockQuotes.find(q => q.id === qId && (q.tenant_id || 'tnt_mock_1') === targetTenantId);
       if (!quote) throw new Error('找不到報價單或不屬於目前租戶');
-      if (['converted', 'declined', 'expired', 'cancelled'].includes(quote.status)) {
+      if (quote.status === 'expired') {
+        throw new Error('報價單已過期，無法轉為銷售單');
+      }
+      if (['converted', 'declined', 'cancelled'].includes(quote.status)) {
         throw new Error('此報價單已結案，無法修改');
       }
       if (quote.status !== 'sent') {
         throw new Error('目前狀態不允許此操作');
       }
 
-      const activeUid = resolveMockActiveUserId();
+      const quoteLines = mockQuoteLines
+        .filter(l => l.quote_id === quote.id)
+        .sort((a, b) => a.line_no - b.line_no);
+      if (quoteLines.length === 0) {
+        throw new Error('銷售單至少需有 1 筆明細');
+      }
+
+      // Validate all #220 sales order preconditions atomically before mutating anything
+      if (mockSalesOrders.some(o => o.source_quote_id === quote.id)) {
+        throw new Error('此報價單已轉換過銷售單，不可重複轉單');
+      }
+
+      const customer = mockPartners.find(
+        p => p.id === quote.customer_partner_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId
+      );
+      if (!customer || !customer.is_customer || customer.is_active === false) {
+        throw new Error('找不到此客戶，或該往來對象未設定為客戶');
+      }
+
+      const rawWhId = payload.warehouse_id !== undefined ? payload.warehouse_id : payload.warehouseId;
+      const wh = (rawWhId && String(rawWhId).trim())
+        ? validateMockWarehouseActive(targetTenantId, rawWhId)
+        : resolveMockDefaultWarehouse(targetTenantId);
+
+      const currency = (quote.currency && String(quote.currency).trim()) || 'TWD';
+      if (currency !== 'TWD') {
+        throw new Error('幣別僅支援 TWD');
+      }
+
+      const rawExpected = payload.expected_ship_date !== undefined ? payload.expected_ship_date : payload.expectedShipDate;
+      const expectedShipDate = (rawExpected && String(rawExpected).trim())
+        ? validateMockCalendarDate(rawExpected)
+        : null;
+
+      const seenUnits = new Set();
+      for (const l of quoteLines) {
+        resolveMockUnitSnapshot(targetTenantId, l.unit_id);
+        if (seenUnits.has(l.unit_id)) {
+          throw new Error('同一銷售單內商品單位不可重複');
+        }
+        seenUnits.add(l.unit_id);
+        const qty = Number(l.quantity);
+        if (!Number.isFinite(qty) || qty <= 0) {
+          throw new Error('數量必須大於 0');
+        }
+        const price = Number(l.unit_price);
+        if (!Number.isFinite(price) || price < 0) {
+          throw new Error('單價不可為負數');
+        }
+      }
+
+      const rawPo = payload.customer_po_number !== undefined
+        ? payload.customer_po_number
+        : (payload.customerPoNumber !== undefined
+          ? payload.customerPoNumber
+          : (payload.customer_reference !== undefined ? payload.customer_reference : payload.customerReference));
+      const customerReference = (rawPo !== undefined && rawPo !== null)
+        ? (String(rawPo).trim() !== '' ? String(rawPo).trim() : null)
+        : (quote.customer_po_number || null);
+
+      const rawNote = payload.note;
+      const soNote = (rawNote !== undefined && rawNote !== null)
+        ? (String(rawNote).trim() !== '' ? String(rawNote).trim() : null)
+        : (quote.note || null);
+
       const now = Math.floor(Date.now() / 1000);
-      const soId = (sales_order_id || salesOrderId) ? String(sales_order_id || salesOrderId).trim() : null;
+      const soId = nextMockUid('so');
+      const soNumber = nextMockSoNumber(targetTenantId);
+      const order = {
+        id: soId,
+        tenant_id: targetTenantId,
+        so_number: soNumber,
+        customer_partner_id: quote.customer_partner_id,
+        customer_name_snapshot: quote.customer_name_snapshot || customer.name,
+        customer_reference: customerReference,
+        source_quote_id: quote.id,
+        warehouse_id: wh.id,
+        currency,
+        status: 'confirmed',
+        expected_ship_date: expectedShipDate,
+        ship_date: null,
+        note: soNote,
+        created_by: activeUid,
+        created_at: now,
+        confirmed_at: now,
+        shipped_by: null,
+        shipped_at: null,
+        cancelled_at: null,
+        task_id: null
+      };
+      mockSalesOrders.push(order);
+
+      quoteLines.forEach((l, idx) => {
+        mockSalesOrderLines.push({
+          id: nextMockUid('sol'),
+          sales_order_id: soId,
+          line_no: idx + 1,
+          unit_id: l.unit_id,
+          product_name_snapshot: l.product_name_snapshot,
+          variant_name_snapshot: l.variant_name_snapshot,
+          sku_snapshot: l.sku_snapshot || null,
+          unit_name_snapshot: l.unit_name_snapshot,
+          quantity: Number(l.quantity),
+          shipped_quantity: null,
+          unit_price: Number(l.unit_price),
+          standard_price_snapshot: Number(l.standard_price_snapshot),
+          created_at: now
+        });
+      });
+
       quote.status = 'converted';
       quote.converted_at = now;
       quote.accepted_by = activeUid;
       quote.converted_sales_order_id = soId;
+
+      saveStorage('agent_erp_mock_sales_orders', mockSalesOrders);
+      saveStorage('agent_erp_mock_sales_order_lines', mockSalesOrderLines);
       saveStorage('agent_erp_mock_quotes', mockQuotes);
-      return formatMockQuote(quote);
+
+      const formattedQuote = formatMockQuote(quote);
+      return {
+        ...formattedQuote,
+        sales_order: formatMockSalesOrder(order)
+      };
     }
 
     case 'cancel_quote': {
