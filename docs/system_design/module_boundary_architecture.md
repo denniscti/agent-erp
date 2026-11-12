@@ -82,16 +82,6 @@ Stage 2 具體要做的事（排在 Stage 1 之後，本文件先留下方向，
 
 ## 6. 跟舊文件的關係
 
-以下文件描述的是 Phase 0/1 時期的舊構想（manifest.json、五插槽 Shell、動態 ESM 載入、雲端模組市集、SHA-256 五步驟安裝驗證鏈），對應的實作程式碼（`mock_cdn/`、`downloader.rs`）已經在清理舊展示功能時移除，現在的 ERP 程式碼完全沒有採用這套設計：
+Phase 0/1 時期的舊構想（manifest.json、五插槽 Shell、動態 ESM 載入、雲端模組市集、SHA-256 五步驟安裝驗證鏈）對應的實作程式碼（`mock_cdn/`、`downloader.rs`）已經在清理舊展示功能時移除，現在的 ERP 程式碼完全沒有採用這套設計。描述這套舊設計的文件（`phase1_scope_review.md`、`module_manifest_contract.md`、`shell_layout_architecture.md`、`dynamic_module_gallery.md`、`dynamic_sqlite_initialization.md`、`svg_sanitizer_security.md`、`pluggable_svg_menu_keepalive.md`、`phases/0.md`、`phases/1.md`）已經整份移除，不留存——跟現在程式碼完全脫節的舊設計文件留著只會誤導之後的人以為這條架構還活著，過去的決策脈絡已經寫進本文件第 1 節，不需要靠保留原文件追溯。
 
-- `docs/phase1_scope_review.md`
-- `docs/system_design/module_manifest_contract.md`
-- `docs/system_design/shell_layout_architecture.md`
-- `docs/system_design/dynamic_module_gallery.md`
-- `docs/system_design/dynamic_sqlite_initialization.md`
-- `docs/system_design/svg_sanitizer_security.md`
-- `docs/system_design/pluggable_svg_menu_keepalive.md`
-- `docs/phases/0.md`
-- `docs/phases/1.md`
-
-這些文件保留作為歷史記錄（說明當年為什麼做、後來為什麼沒有延用），各自開頭都加了指向本文件的說明。本文件（Stage 1 的目標架構）跟舊設計最大的差異：舊設計一開始就假設要做動態載入（Stage 2/3 的東西），本文件把動態載入排到邊界先穩定之後才做，而且後端動態載入（Stage 3）明確不做。
+本文件（Stage 1 的目標架構）跟舊設計最大的差異：舊設計一開始就假設要做動態載入（Stage 2/3 的東西），本文件把動態載入排到邊界先穩定之後才做，而且後端動態載入（Stage 3）明確不做。
