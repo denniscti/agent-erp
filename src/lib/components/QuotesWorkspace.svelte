@@ -13,6 +13,7 @@
     fetchQuotes,
     fetchQuoteDetail,
     fetchSalesOrderDetail,
+    selectSalesOrder,
     fetchPendingApprovalQuotes,
     createQuoteAction,
     updateQuoteHeaderAction,
@@ -188,10 +189,23 @@
         loadSellableUnits(),
         loadQuotesList()
       ]);
+      if (appState.pendingQuoteDetailId) {
+        const targetId = appState.pendingQuoteDetailId;
+        appState.pendingQuoteDetailId = null;
+        await openDetail(targetId);
+      }
     } catch (e) {
       errorMsg = e.message || String(e);
     } finally {
       isLoading = false;
+    }
+  });
+
+  $effect(() => {
+    if (appState.pendingQuoteDetailId) {
+      const targetId = appState.pendingQuoteDetailId;
+      appState.pendingQuoteDetailId = null;
+      openDetail(targetId);
     }
   });
 
@@ -597,6 +611,7 @@
   function getSoStatusLabel(status) {
     switch (status) {
       case 'confirmed': return '已確認';
+      case 'partially_shipped': return '部分出貨';
       case 'shipped': return '已出貨';
       case 'cancelled': return '已取消';
       default: return status || '未知';
@@ -1499,6 +1514,20 @@
         {/if}
       </div>
       <div class="modal-footer">
+        {#if convertedSalesOrder?.order?.id}
+          <button
+            type="button"
+            class="btn btn-primary"
+            id="btn-go-to-sales-order-workspace"
+            onclick={() => {
+              const targetSoId = convertedSalesOrder.order.id;
+              isSalesOrderModalOpen = false;
+              selectSalesOrder(targetSoId);
+            }}
+          >
+            前往銷售單工作區
+          </button>
+        {/if}
         <button type="button" class="btn btn-secondary" onclick={() => isSalesOrderModalOpen = false}>
           關閉
         </button>

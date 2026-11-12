@@ -140,24 +140,40 @@ test.describe('Issue #220: Sales Orders & Shipment Mock IPC', () => {
       ]
     });
 
-    // When: Shipping line 1 = 6, line 2 = 0
-    const shipped = await invoke('ship_sales_order', {
+    // When: Shipping line 1 = 6, line 2 = 0 (batch 1)
+    const partial = await invoke('ship_sales_order', {
       order_id: created.order.id,
       ship_date: '2026-11-10',
       today_override: '2026-11-11',
+      note: '第一批出貨',
       line_shipped_quantities: [
         { line_id: created.lines[0].id, shipped_quantity: 6 },
         { line_id: created.lines[1].id, shipped_quantity: 0 }
       ]
     });
 
-    // Then: Shipped amount is 3000, u2 has NO sales_shipment movement
-    assert.equal(shipped.order.status, 'shipped');
-    assert.equal(shipped.order.shipped_amount, 3000);
-    assert.equal(shipped.lines[1].shipped_quantity, 0);
+    // Then: Order becomes partially_shipped, shipped amount is 3000, u2 has NO sales_shipment movement, 1 shipment record logged
+    assert.equal(partial.order.status, 'partially_shipped');
+    assert.equal(partial.order.shipped_amount, 3000);
+    assert.equal(partial.lines[1].shipped_quantity, 0);
+    assert.equal(partial.shipments.length, 1);
+    assert.equal(partial.shipments[0].shipment_number, 'SHP-00001');
+    assert.equal(partial.shipments[0].note, '第一批出貨');
+    assert.equal(partial.shipments[0].lines.length, 1);
 
     const u2Movs = await invoke('list_inventory_movements', { unit_id: u2, warehouse_id: wh.id });
     assert.equal(u2Movs.filter(m => m.reference_id === created.order.id).length, 0);
+
+    // And: Second shipment completes the remaining quantities (4 + 4) to close as shipped
+    const completed = await invoke('ship_sales_order', {
+      order_id: created.order.id,
+      ship_date: '2026-11-11',
+      today_override: '2026-11-11'
+    });
+    assert.equal(completed.order.status, 'shipped');
+    assert.equal(completed.order.shipped_amount, 5400);
+    assert.equal(completed.shipments.length, 2);
+    assert.equal(completed.shipments[1].shipment_number, 'SHP-00002');
   });
 
   test('TC-JS-SO-N-03 & A-02: Cancel confirmed SO and reject invalid state transitions', async () => {

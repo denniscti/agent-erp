@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static SO_ID_COUNTER: AtomicU64 = AtomicU64::new(1000);
 static SOL_ID_COUNTER: AtomicU64 = AtomicU64::new(1000);
+static SHP_ID_COUNTER: AtomicU64 = AtomicU64::new(1000);
+static SHPL_ID_COUNTER: AtomicU64 = AtomicU64::new(1000);
 static MOV_SO_ID_COUNTER: AtomicU64 = AtomicU64::new(1000);
 
 fn current_timestamp() -> i64 {
@@ -132,9 +134,44 @@ pub struct SalesOrderLine {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+pub struct SalesShipmentLine {
+    pub id: String,
+    pub shipment_id: String,
+    pub sales_order_line_id: String,
+    pub line_no: i64,
+    pub unit_id: String,
+    pub product_name_snapshot: String,
+    pub variant_name_snapshot: String,
+    pub sku_snapshot: Option<String>,
+    pub unit_name_snapshot: String,
+    pub shipped_quantity: f64,
+    pub unit_price: f64,
+    pub subtotal: f64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
+pub struct SalesShipmentRecord {
+    pub id: String,
+    pub tenant_id: String,
+    pub sales_order_id: String,
+    pub shipment_number: String,
+    pub warehouse_id: String,
+    pub ship_date: String,
+    pub note: Option<String>,
+    pub shipped_by: String,
+    pub shipped_at: i64,
+    pub created_at: i64,
+    pub total_amount: f64,
+    pub lines: Vec<SalesShipmentLine>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
 pub struct SalesOrderDetail {
     pub order: SalesOrder,
     pub lines: Vec<SalesOrderLine>,
+    #[serde(default)]
+    pub shipments: Vec<SalesShipmentRecord>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type, PartialEq)]
@@ -247,6 +284,54 @@ pub fn create_sales_orders_tables(conn: &rusqlite::Connection) -> Result<(), rus
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sales_shipments (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            sales_order_id TEXT NOT NULL,
+            shipment_number TEXT NOT NULL,
+            warehouse_id TEXT NOT NULL,
+            ship_date TEXT NOT NULL,
+            note TEXT,
+            shipped_by TEXT NOT NULL,
+            shipped_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_shp_tenant_number ON sales_shipments (tenant_id, shipment_number)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shp_order ON sales_shipments (sales_order_id)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sales_shipment_lines (
+            id TEXT PRIMARY KEY,
+            shipment_id TEXT NOT NULL,
+            sales_order_line_id TEXT NOT NULL,
+            line_no INTEGER NOT NULL,
+            unit_id TEXT NOT NULL,
+            product_name_snapshot TEXT NOT NULL,
+            variant_name_snapshot TEXT NOT NULL,
+            sku_snapshot TEXT,
+            unit_name_snapshot TEXT NOT NULL,
+            shipped_quantity REAL NOT NULL,
+            unit_price REAL NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shpl_shipment ON sales_shipment_lines (shipment_id)",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -335,6 +420,9 @@ pub enum SalesOrderError {
     #[error("出貨數量不可超過訂購數量")]
     ShippedQuantityExceedsOrder,
 
+    #[error("出貨數量不可超過剩餘可出貨數量")]
+    ShippedQuantityExceedsRemaining,
+
     #[error("出貨數量不可小於 0")]
     ShippedQuantityNegative,
 
@@ -406,6 +494,31 @@ fn next_so_number(tx: &rusqlite::Transaction, tenant_id: &str) -> Result<String,
         }
     }
     Ok(format!("SO-{:05}", max_seq + 1))
+}
+
+fn next_shipment_number(
+    tx: &rusqlite::Transaction,
+    tenant_id: &str,
+) -> Result<String, SalesOrderError> {
+    let mut stmt = tx.prepare(
+        "SELECT shipment_number FROM sales_shipments
+         WHERE tenant_id = ?1 AND shipment_number LIKE 'SHP-%'
+         ORDER BY shipment_number DESC",
+    )?;
+
+    let mut rows = stmt.query(params![tenant_id])?;
+    let mut max_seq: i64 = 0;
+    while let Some(row) = rows.next()? {
+        let code: String = row.get(0)?;
+        if let Some(num_part) = code.strip_prefix("SHP-") {
+            if let Ok(seq) = num_part.parse::<i64>() {
+                if seq > max_seq {
+                    max_seq = seq;
+                }
+            }
+        }
+    }
+    Ok(format!("SHP-{:05}", max_seq + 1))
 }
 
 fn validate_customer_active(
@@ -543,7 +656,75 @@ fn fetch_sales_order_detail(
     );
     order.lines_count = Some(lines.len() as i64);
 
-    Ok(SalesOrderDetail { order, lines })
+    let mut shp_stmt = conn.prepare(
+        "SELECT
+            id, tenant_id, sales_order_id, shipment_number, warehouse_id,
+            ship_date, note, shipped_by, shipped_at, created_at
+         FROM sales_shipments
+         WHERE sales_order_id = ?1 AND tenant_id = ?2
+         ORDER BY shipped_at ASC, created_at ASC, shipment_number ASC",
+    )?;
+
+    let shp_rows = shp_stmt.query_map(params![order_id, tenant_id], |r| {
+        Ok(SalesShipmentRecord {
+            id: r.get(0)?,
+            tenant_id: r.get(1)?,
+            sales_order_id: r.get(2)?,
+            shipment_number: r.get(3)?,
+            warehouse_id: r.get(4)?,
+            ship_date: r.get(5)?,
+            note: r.get(6)?,
+            shipped_by: r.get(7)?,
+            shipped_at: r.get(8)?,
+            created_at: r.get(9)?,
+            total_amount: 0.0,
+            lines: Vec::new(),
+        })
+    })?;
+
+    let mut shipments = Vec::new();
+    let mut shpl_stmt = conn.prepare(
+        "SELECT
+            id, shipment_id, sales_order_line_id, line_no, unit_id,
+            product_name_snapshot, variant_name_snapshot, sku_snapshot, unit_name_snapshot,
+            shipped_quantity, unit_price, created_at
+         FROM sales_shipment_lines
+         WHERE shipment_id = ?1
+         ORDER BY line_no ASC, created_at ASC",
+    )?;
+    for shp_res in shp_rows {
+        let mut shp = shp_res?;
+        let line_rows = shpl_stmt.query_map(params![shp.id], |r| {
+            let qty: f64 = r.get(9)?;
+            let price: f64 = r.get(10)?;
+            Ok(SalesShipmentLine {
+                id: r.get(0)?,
+                shipment_id: r.get(1)?,
+                sales_order_line_id: r.get(2)?,
+                line_no: r.get(3)?,
+                unit_id: r.get(4)?,
+                product_name_snapshot: r.get(5)?,
+                variant_name_snapshot: r.get(6)?,
+                sku_snapshot: r.get(7)?,
+                unit_name_snapshot: r.get(8)?,
+                shipped_quantity: qty,
+                unit_price: price,
+                subtotal: round_2(qty * price),
+                created_at: r.get(11)?,
+            })
+        })?;
+        for l_res in line_rows {
+            shp.lines.push(l_res?);
+        }
+        shp.total_amount = round_2(shp.lines.iter().map(|l| l.subtotal).sum());
+        shipments.push(shp);
+    }
+
+    Ok(SalesOrderDetail {
+        order,
+        lines,
+        shipments,
+    })
 }
 
 // ==========================================
@@ -738,6 +919,14 @@ pub fn reject_sales_order_line_modification() -> Result<(), SalesOrderError> {
     Err(SalesOrderError::LinesImmutable)
 }
 
+#[derive(Debug, Default)]
+pub struct ShipSalesOrderOptions<'a> {
+    pub ship_date: Option<String>,
+    pub line_shipped_quantities: Option<Vec<ShippedLineInput>>,
+    pub note: Option<String>,
+    pub today_override: Option<&'a str>,
+}
+
 pub fn ship_sales_order_impl(
     conn: &mut rusqlite::Connection,
     tenant_id: &str,
@@ -747,6 +936,33 @@ pub fn ship_sales_order_impl(
     line_shipped_quantities: Option<Vec<ShippedLineInput>>,
     today_override: Option<&str>,
 ) -> Result<SalesOrderDetail, SalesOrderError> {
+    ship_sales_order_with_note_impl(
+        conn,
+        tenant_id,
+        user_id,
+        order_id,
+        ShipSalesOrderOptions {
+            ship_date,
+            line_shipped_quantities,
+            note: None,
+            today_override,
+        },
+    )
+}
+
+pub fn ship_sales_order_with_note_impl(
+    conn: &mut rusqlite::Connection,
+    tenant_id: &str,
+    user_id: &str,
+    order_id: &str,
+    options: ShipSalesOrderOptions<'_>,
+) -> Result<SalesOrderDetail, SalesOrderError> {
+    let ShipSalesOrderOptions {
+        ship_date,
+        line_shipped_quantities,
+        note,
+        today_override,
+    } = options;
     let tid = tenant_id.trim();
     if tid.is_empty() {
         return Err(SalesOrderError::EmptyTenantId);
@@ -776,6 +992,7 @@ pub fn ship_sales_order_impl(
         }
         None => today,
     };
+    let clean_note = clean_opt_str(note);
 
     let trimmed_order_id = order_id.trim();
     let (status, warehouse_id): (String, String) = {
@@ -788,8 +1005,8 @@ pub fn ship_sales_order_impl(
         .map_err(|_| SalesOrderError::OrderNotFound)?
     };
 
-    // SH-01 pre-check
-    if status != "confirmed" {
+    // SH-01 pre-check: allow confirmed or partially_shipped
+    if status != "confirmed" && status != "partially_shipped" {
         return Err(SalesOrderError::InvalidStateTransition {
             from: status,
             to: "shipped".to_string(),
@@ -803,50 +1020,43 @@ pub fn ship_sales_order_impl(
     let now = current_timestamp();
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-    // SH-01: Conditional UPDATE inside Immediate transaction to prevent duplicate shipment
-    let affected = tx.execute(
-        "UPDATE sales_orders
-         SET status = 'shipped', ship_date = ?1, shipped_by = ?2, shipped_at = ?3
-         WHERE id = ?4 AND status = 'confirmed' AND tenant_id = ?5",
-        params![resolved_ship_date, trimmed_uid, now, trimmed_order_id, tid],
-    )?;
-
-    crate::ensure_guarded_mutation_affected(
-        &tx,
-        "sales_orders",
-        trimmed_order_id,
-        tid,
-        affected,
-        SalesOrderError::OrderNotFound,
-        |s| {
-            if s != "confirmed" {
-                Err(SalesOrderError::InvalidStateTransition {
-                    from: s,
-                    to: "shipped".to_string(),
-                })
-            } else {
-                Ok(())
-            }
-        },
-    )?;
-
     // Fetch order lines inside transaction
-    let lines: Vec<(String, String, f64, String, String, String)> = {
+    struct OrderLineRow {
+        id: String,
+        line_no: i64,
+        unit_id: String,
+        product_name: String,
+        variant_name: String,
+        sku: Option<String>,
+        unit_name: String,
+        ordered_qty: f64,
+        already_shipped: f64,
+        unit_price: f64,
+    }
+
+    let lines: Vec<OrderLineRow> = {
         let mut stmt = tx.prepare(
-            "SELECT id, unit_id, quantity, product_name_snapshot, variant_name_snapshot, unit_name_snapshot
+            "SELECT
+                id, line_no, unit_id,
+                product_name_snapshot, variant_name_snapshot, sku_snapshot, unit_name_snapshot,
+                quantity, COALESCE(shipped_quantity, 0.0), unit_price
              FROM sales_order_lines
              WHERE sales_order_id = ?1
              ORDER BY line_no ASC",
         )?;
         let rows = stmt.query_map(params![trimmed_order_id], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
+            Ok(OrderLineRow {
+                id: r.get(0)?,
+                line_no: r.get(1)?,
+                unit_id: r.get(2)?,
+                product_name: r.get(3)?,
+                variant_name: r.get(4)?,
+                sku: r.get(5)?,
+                unit_name: r.get(6)?,
+                ordered_qty: r.get(7)?,
+                already_shipped: r.get(8)?,
+                unit_price: r.get(9)?,
+            })
         })?;
         let mut list = Vec::new();
         for r in rows {
@@ -859,7 +1069,7 @@ pub fn ship_sales_order_impl(
         return Err(SalesOrderError::EmptyLines);
     }
 
-    let known_line_ids: HashSet<&str> = lines.iter().map(|l| l.0.as_str()).collect();
+    let known_line_ids: HashSet<&str> = lines.iter().map(|l| l.id.as_str()).collect();
     let mut override_map: HashMap<String, f64> = HashMap::new();
     if let Some(inputs) = line_shipped_quantities {
         for item in inputs {
@@ -873,37 +1083,128 @@ pub fn ship_sales_order_impl(
         }
     }
 
-    // SH-02: Validate 0 <= shipped_quantity <= quantity for every line, and SUM(shipped_quantity) > 0
+    // SH-02: Validate 0 <= batch_qty <= remaining_qty for every line, and SUM(batch_qty) > 0
+    struct ResolvedShipLine {
+        line: OrderLineRow,
+        actual_qty: f64,
+        new_cum_shipped: f64,
+    }
+
     let mut resolved_lines = Vec::with_capacity(lines.len());
     let mut total_shipped = 0.0_f64;
-    for (lid, unit_id, ordered_qty, prod_name, var_name, unit_name) in lines {
-        let actual_qty = match override_map.get(&lid) {
+    let mut all_fully_shipped = true;
+
+    for line in lines {
+        let remaining_qty = (line.ordered_qty - line.already_shipped).max(0.0);
+        let actual_qty = match override_map.get(&line.id) {
             Some(&q) => q,
-            None => ordered_qty,
+            None => remaining_qty,
         };
         if actual_qty.is_nan() || actual_qty.is_infinite() || actual_qty < 0.0 {
             return Err(SalesOrderError::ShippedQuantityNegative);
         }
-        if actual_qty > ordered_qty {
-            return Err(SalesOrderError::ShippedQuantityExceedsOrder);
+        if actual_qty > remaining_qty + 1e-9 {
+            return Err(if line.already_shipped <= 1e-9 {
+                SalesOrderError::ShippedQuantityExceedsOrder
+            } else {
+                SalesOrderError::ShippedQuantityExceedsRemaining
+            });
+        }
+        let mut new_cum_shipped = line.already_shipped + actual_qty;
+        if new_cum_shipped + 1e-9 >= line.ordered_qty {
+            if new_cum_shipped > line.ordered_qty {
+                new_cum_shipped = line.ordered_qty;
+            }
+        } else {
+            all_fully_shipped = false;
         }
         total_shipped += actual_qty;
-        resolved_lines.push((lid, unit_id, actual_qty, prod_name, var_name, unit_name));
+        resolved_lines.push(ResolvedShipLine {
+            line,
+            actual_qty,
+            new_cum_shipped,
+        });
     }
 
     if total_shipped <= 0.0 {
         return Err(SalesOrderError::TotalShippedQuantityMustBePositive);
     }
 
-    // SH-03: Check available stock per (unit_id + warehouse_id) inside Immediate tx; deduct & record movements
-    for (lid, unit_id, actual_qty, prod_name, var_name, unit_name) in resolved_lines {
+    let target_status = if all_fully_shipped {
+        "shipped"
+    } else {
+        "partially_shipped"
+    };
+
+    // SH-01: Conditional UPDATE inside Immediate transaction to prevent concurrent invalid transitions
+    let affected = tx.execute(
+        "UPDATE sales_orders
+         SET status = ?1, ship_date = ?2, shipped_by = ?3, shipped_at = ?4
+         WHERE id = ?5 AND status IN ('confirmed', 'partially_shipped') AND tenant_id = ?6",
+        params![
+            target_status,
+            resolved_ship_date,
+            trimmed_uid,
+            now,
+            trimmed_order_id,
+            tid
+        ],
+    )?;
+
+    crate::ensure_guarded_mutation_affected(
+        &tx,
+        "sales_orders",
+        trimmed_order_id,
+        tid,
+        affected,
+        SalesOrderError::OrderNotFound,
+        |s| {
+            if s != "confirmed" && s != "partially_shipped" {
+                Err(SalesOrderError::InvalidStateTransition {
+                    from: s,
+                    to: target_status.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        },
+    )?;
+
+    // Record shipment batch header
+    let shipment_id = format!(
+        "shp_{}_{}",
+        now,
+        SHP_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+    );
+    let shipment_number = next_shipment_number(&tx, tid)?;
+    tx.execute(
+        "INSERT INTO sales_shipments (
+            id, tenant_id, sales_order_id, shipment_number, warehouse_id,
+            ship_date, note, shipped_by, shipped_at, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            shipment_id,
+            tid,
+            trimmed_order_id,
+            shipment_number,
+            warehouse.id,
+            resolved_ship_date,
+            clean_note,
+            trimmed_uid,
+            now,
+            now
+        ],
+    )?;
+
+    // SH-03: Check available stock per (unit_id + warehouse_id) inside Immediate tx; deduct & record movements & shipment lines
+    for item in resolved_lines {
         tx.execute(
             "UPDATE sales_order_lines SET shipped_quantity = ?1 WHERE id = ?2",
-            params![actual_qty, lid],
+            params![item.new_cum_shipped, item.line.id],
         )?;
 
-        // Intentionally skip writing inventory_movements when shipped_quantity == 0
-        if actual_qty <= 0.0 {
+        // Intentionally skip writing shipment line / inventory_movements when batch shipped_quantity == 0
+        if item.actual_qty <= 0.0 {
             continue;
         }
 
@@ -911,22 +1212,49 @@ pub fn ship_sales_order_impl(
             "SELECT COALESCE(SUM(quantity_delta), 0.0)
              FROM inventory_movements
              WHERE tenant_id = ?1 AND unit_id = ?2 AND warehouse_id = ?3",
-            params![tid, unit_id, warehouse.id],
+            params![tid, item.line.unit_id, warehouse.id],
             |r| r.get(0),
         )?;
 
-        if current_stock + 1e-9 < actual_qty {
+        if current_stock + 1e-9 < item.actual_qty {
             return Err(SalesOrderError::InsufficientStock(Box::new(
                 InsufficientStockDetails {
-                    product_name: prod_name,
-                    variant_name: var_name,
-                    unit_name,
+                    product_name: item.line.product_name,
+                    variant_name: item.line.variant_name,
+                    unit_name: item.line.unit_name,
                     warehouse_name: warehouse.name.clone(),
                     available_qty: format_qty(current_stock),
-                    requested_qty: format_qty(actual_qty),
+                    requested_qty: format_qty(item.actual_qty),
                 },
             )));
         }
+
+        let shpl_id = format!(
+            "shpl_{}_{}",
+            now,
+            SHPL_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
+        );
+        tx.execute(
+            "INSERT INTO sales_shipment_lines (
+                id, shipment_id, sales_order_line_id, line_no, unit_id,
+                product_name_snapshot, variant_name_snapshot, sku_snapshot, unit_name_snapshot,
+                shipped_quantity, unit_price, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                shpl_id,
+                shipment_id,
+                item.line.id,
+                item.line.line_no,
+                item.line.unit_id,
+                item.line.product_name,
+                item.line.variant_name,
+                item.line.sku,
+                item.line.unit_name,
+                item.actual_qty,
+                item.line.unit_price,
+                now,
+            ],
+        )?;
 
         let mov_id = format!(
             "mov_so_{}_{}",
@@ -941,9 +1269,9 @@ pub fn ship_sales_order_impl(
             params![
                 mov_id,
                 tid,
-                unit_id,
+                item.line.unit_id,
                 warehouse.id,
-                -actual_qty,
+                -item.actual_qty,
                 trimmed_order_id,
                 trimmed_uid,
                 now,
@@ -1111,20 +1439,24 @@ pub async fn ship_sales_order<R: tauri::Runtime>(
     order_id: String,
     ship_date: Option<String>,
     line_shipped_quantities: Option<Vec<ShippedLineInput>>,
+    note: Option<String>,
     today_override: Option<String>,
 ) -> Result<SalesOrderDetail, String> {
     let db_path = get_db_path(&app_handle);
     let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
     let active_uid = crate::purchase_orders::resolve_active_user_id(&conn)?;
-    ship_sales_order_impl(
+    ship_sales_order_with_note_impl(
         &mut conn,
         &active_tid,
         &active_uid,
         &order_id,
-        ship_date,
-        line_shipped_quantities,
-        today_override.as_deref(),
+        ShipSalesOrderOptions {
+            ship_date,
+            line_shipped_quantities,
+            note,
+            today_override: today_override.as_deref(),
+        },
     )
     .map_err(|e| e.to_string())
 }
@@ -1577,34 +1909,42 @@ mod tests {
         let l1_id = so.lines[0].id.clone();
         let l2_id = so.lines[1].id.clone();
 
-        // When: Shipping line 1 with 7 and line 2 with 0
-        let shipped = ship_sales_order_impl(
+        // When: Shipping line 1 with 7 and line 2 with 0 (batch 1)
+        let partial = ship_sales_order_with_note_impl(
             &mut conn,
             "tnt_test",
             "usr_wh",
             &so.order.id,
-            Some("2026-11-10".to_string()),
-            Some(vec![
-                ShippedLineInput {
-                    line_id: l1_id,
-                    shipped_quantity: 7.0,
-                },
-                ShippedLineInput {
-                    line_id: l2_id,
-                    shipped_quantity: 0.0,
-                },
-            ]),
-            Some("2026-11-11"),
+            ShipSalesOrderOptions {
+                ship_date: Some("2026-11-10".to_string()),
+                line_shipped_quantities: Some(vec![
+                    ShippedLineInput {
+                        line_id: l1_id.clone(),
+                        shipped_quantity: 7.0,
+                    },
+                    ShippedLineInput {
+                        line_id: l2_id.clone(),
+                        shipped_quantity: 0.0,
+                    },
+                ]),
+                note: Some("第一批出貨".to_string()),
+                today_override: Some("2026-11-11"),
+            },
         )
         .unwrap();
 
-        // Then: Order closes as shipped, line 2 shipped_quantity is 0, NO 0-delta movement written for line 2
-        assert_eq!(shipped.order.status, "shipped");
-        assert_eq!(shipped.order.ship_date.as_deref(), Some("2026-11-10"));
-        assert_eq!(shipped.order.total_amount, 2000.0);
-        assert_eq!(shipped.order.shipped_amount, 700.0);
-        assert_eq!(shipped.lines[0].shipped_quantity, Some(7.0));
-        assert_eq!(shipped.lines[1].shipped_quantity, Some(0.0));
+        // Then: Order transitions to partially_shipped, line 2 shipped_quantity is 0, NO 0-delta movement written for line 2
+        assert_eq!(partial.order.status, "partially_shipped");
+        assert_eq!(partial.order.ship_date.as_deref(), Some("2026-11-10"));
+        assert_eq!(partial.order.total_amount, 2000.0);
+        assert_eq!(partial.order.shipped_amount, 700.0);
+        assert_eq!(partial.lines[0].shipped_quantity, Some(7.0));
+        assert_eq!(partial.lines[1].shipped_quantity, Some(0.0));
+        assert_eq!(partial.shipments.len(), 1);
+        assert_eq!(partial.shipments[0].shipment_number, "SHP-00001");
+        assert_eq!(partial.shipments[0].note.as_deref(), Some("第一批出貨"));
+        assert_eq!(partial.shipments[0].lines.len(), 1);
+        assert_eq!(partial.shipments[0].lines[0].shipped_quantity, 7.0);
 
         let mov_count: i64 = conn
             .query_row(
@@ -1623,6 +1963,59 @@ mod tests {
             )
             .unwrap();
         assert!((u2_stock - 20.0).abs() < 1e-9);
+
+        // And: Cancel is blocked once partially_shipped
+        let cancel_err =
+            cancel_sales_order_impl(&mut conn, "tnt_test", "usr_1", &so.order.id).unwrap_err();
+        assert_eq!(
+            cancel_err,
+            SalesOrderError::InvalidStateTransition {
+                from: "partially_shipped".to_string(),
+                to: "cancelled".to_string(),
+            }
+        );
+
+        // And: Exceeding remaining quantity (e.g. 4 > remaining 3 on line 1) is rejected
+        let exceed_err = ship_sales_order_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_wh",
+            &so.order.id,
+            Some("2026-11-11".to_string()),
+            Some(vec![ShippedLineInput {
+                line_id: l1_id,
+                shipped_quantity: 4.0,
+            }]),
+            Some("2026-11-11"),
+        )
+        .unwrap_err();
+        assert_eq!(exceed_err, SalesOrderError::ShippedQuantityExceedsRemaining);
+
+        // When: Shipping remaining quantities (line 1 = 3, line 2 = 5 via default remaining) in batch 2
+        let completed = ship_sales_order_with_note_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_wh",
+            &so.order.id,
+            ShipSalesOrderOptions {
+                ship_date: Some("2026-11-11".to_string()),
+                line_shipped_quantities: None,
+                note: Some("尾批補齊".to_string()),
+                today_override: Some("2026-11-11"),
+            },
+        )
+        .unwrap();
+
+        // Then: Cumulative quantities reach ordered quantities, status becomes shipped, and 2 shipment records exist
+        assert_eq!(completed.order.status, "shipped");
+        assert_eq!(completed.order.shipped_amount, 2000.0);
+        assert_eq!(completed.lines[0].shipped_quantity, Some(10.0));
+        assert_eq!(completed.lines[1].shipped_quantity, Some(5.0));
+        assert_eq!(completed.shipments.len(), 2);
+        assert_eq!(completed.shipments[1].shipment_number, "SHP-00002");
+        assert_eq!(completed.shipments[1].lines.len(), 2);
+        assert_eq!(completed.shipments[1].lines[0].shipped_quantity, 3.0);
+        assert_eq!(completed.shipments[1].lines[1].shipped_quantity, 5.0);
     }
 
     #[test]

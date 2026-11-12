@@ -63,6 +63,7 @@
   import WarehouseWorkspace from './lib/components/WarehouseWorkspace.svelte';
   import CreateWarehouseModal from './lib/components/CreateWarehouseModal.svelte';
   import QuotesWorkspace from './lib/components/QuotesWorkspace.svelte';
+  import SalesOrdersWorkspace from './lib/components/SalesOrdersWorkspace.svelte';
 
   let activeTab = $derived(appState.activeWorkspace);
   let isNotificationOpen = $state(false);
@@ -1026,6 +1027,7 @@
     else if (ws === 'warehouses' || ws === 'warehouse') navigate('/app/warehouses');
     else if (ws === 'accounts-payable') navigate('/app/accounts-payable');
     else if (ws === 'quotes' || ws === 'quote') navigate('/app/quotes');
+    else if (ws === 'sales-orders' || ws === 'sales-order') navigate('/app/sales-orders');
     else if (ws === 'inventory') navigate('/app/inventory');
     else navigate(`/app/${ws}`);
   }
@@ -1141,6 +1143,22 @@
                 <path d="M9 14h6"></path>
                 <path d="M9 18h6"></path>
                 <path d="M9 10h6"></path>
+              </svg>
+            </button>
+
+            <!-- 銷售單 (Issue #221) -->
+            <button
+              class="rail-nav-btn {activeTab === 'sales-orders' || activeTab === 'sales-order' ? 'active' : ''}"
+              onclick={() => selectWorkspace('sales-orders')}
+              title="銷售單"
+              aria-label="銷售單"
+              id="rail-nav-sales-orders"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="1" y="3" width="15" height="13" rx="1"></rect>
+                <polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon>
+                <circle cx="5.5" cy="18.5" r="2.5"></circle>
+                <circle cx="18.5" cy="18.5" r="2.5"></circle>
               </svg>
             </button>
 
@@ -2977,6 +2995,9 @@
           {:else if activeTab === 'quotes' || activeTab === 'quote'}
             <!-- Quotes Workspace View (Issue #233) -->
             <QuotesWorkspace />
+          {:else if activeTab === 'sales-orders' || activeTab === 'sales-order'}
+            <!-- Sales Orders Workspace View (Issue #221) -->
+            <SalesOrdersWorkspace />
           {:else}
             <!-- AI Chat Conversation Primary View -->
             <ChatBox />

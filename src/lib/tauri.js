@@ -748,6 +748,18 @@ if (!mockSalesOrderLines || !Array.isArray(mockSalesOrderLines)) {
   saveStorage('agent_erp_mock_sales_order_lines', mockSalesOrderLines);
 }
 
+let mockSalesShipments = loadStorage('agent_erp_mock_sales_shipments', []);
+if (!mockSalesShipments || !Array.isArray(mockSalesShipments)) {
+  mockSalesShipments = [];
+  saveStorage('agent_erp_mock_sales_shipments', mockSalesShipments);
+}
+
+let mockSalesShipmentLines = loadStorage('agent_erp_mock_sales_shipment_lines', []);
+if (!mockSalesShipmentLines || !Array.isArray(mockSalesShipmentLines)) {
+  mockSalesShipmentLines = [];
+  saveStorage('agent_erp_mock_sales_shipment_lines', mockSalesShipmentLines);
+}
+
 function nextMockSoNumber(tenantId) {
   const existing = mockSalesOrders.filter(o => (o.tenant_id || 'tnt_mock_1') === tenantId);
   let maxSeq = 0;
@@ -760,6 +772,20 @@ function nextMockSoNumber(tenantId) {
     }
   }
   return `SO-${String(maxSeq + 1).padStart(5, '0')}`;
+}
+
+function nextMockShipmentNumber(tenantId) {
+  const existing = mockSalesShipments.filter(s => (s.tenant_id || 'tnt_mock_1') === tenantId);
+  let maxSeq = 0;
+  for (const s of existing) {
+    if (s.shipment_number && s.shipment_number.startsWith('SHP-')) {
+      const num = parseInt(s.shipment_number.substring(4), 10);
+      if (!isNaN(num) && num > maxSeq) {
+        maxSeq = num;
+      }
+    }
+  }
+  return `SHP-${String(maxSeq + 1).padStart(5, '0')}`;
 }
 
 function validateMockCalendarDate(dateStr) {
@@ -799,6 +825,24 @@ function formatMockSalesOrder(order) {
     });
   const total_amount = Math.round(lines.reduce((sum, l) => sum + l.subtotal, 0) * 100) / 100;
   const shipped_amount = Math.round(lines.reduce((sum, l) => sum + (l.shipped_subtotal || 0), 0) * 100) / 100;
+  const shipments = mockSalesShipments
+    .filter(s => s.sales_order_id === order.id)
+    .sort((a, b) => (a.shipped_at - b.shipped_at) || (a.created_at - b.created_at) || String(a.shipment_number).localeCompare(String(b.shipment_number)))
+    .map(s => {
+      const shpLines = mockSalesShipmentLines
+        .filter(sl => sl.shipment_id === s.id)
+        .sort((a, b) => a.line_no - b.line_no)
+        .map(sl => ({
+          ...sl,
+          subtotal: Math.round(Number(sl.shipped_quantity) * Number(sl.unit_price) * 100) / 100
+        }));
+      const shpTotal = Math.round(shpLines.reduce((sum, sl) => sum + sl.subtotal, 0) * 100) / 100;
+      return {
+        ...s,
+        total_amount: shpTotal,
+        lines: shpLines
+      };
+    });
   return {
     order: {
       ...order,
@@ -806,7 +850,8 @@ function formatMockSalesOrder(order) {
       shipped_amount,
       lines_count: lines.length
     },
-    lines
+    lines,
+    shipments
   };
 }
 
@@ -7281,6 +7326,7 @@ export async function invoke(cmd, args = {}) {
         shipDate,
         line_shipped_quantities,
         lineShippedQuantities,
+        note,
         today_override,
         todayOverride
       } = args || {};
@@ -7306,6 +7352,9 @@ export async function invoke(cmd, args = {}) {
           throw new Error('出貨日不可晚於今天');
         }
       }
+      const cleanNote = note !== undefined && note !== null && String(note).trim() !== ''
+        ? String(note).trim()
+        : null;
 
       const targetOrderId = String(order_id || orderId || '').trim();
       const order = mockSalesOrders.find(
@@ -7314,7 +7363,7 @@ export async function invoke(cmd, args = {}) {
       if (!order) {
         throw new Error('找不到銷售單或不屬於目前租戶');
       }
-      if (order.status !== 'confirmed') {
+      if (order.status !== 'confirmed' && order.status !== 'partially_shipped') {
         throw new Error(`無效的狀態轉換：不可從 ${order.status} 轉換至 shipped`);
       }
 
@@ -7354,16 +7403,26 @@ export async function invoke(cmd, args = {}) {
 
       const resolvedLines = [];
       let totalShipped = 0;
+      let allFullyShipped = true;
       for (const line of lines) {
-        const actualQty = overrideMap.has(line.id) ? overrideMap.get(line.id) : Number(line.quantity);
+        const orderedQty = Number(line.quantity);
+        const alreadyShipped = Number(line.shipped_quantity || 0);
+        const remainingQty = Math.max(0, orderedQty - alreadyShipped);
+        const actualQty = overrideMap.has(line.id) ? overrideMap.get(line.id) : remainingQty;
         if (!Number.isFinite(actualQty) || actualQty < 0) {
           throw new Error('出貨數量不可小於 0');
         }
-        if (actualQty > Number(line.quantity)) {
-          throw new Error('出貨數量不可超過訂購數量');
+        if (actualQty > remainingQty + 1e-9) {
+          throw new Error(alreadyShipped <= 1e-9 ? '出貨數量不可超過訂購數量' : '出貨數量不可超過剩餘可出貨數量');
+        }
+        let newCumShipped = alreadyShipped + actualQty;
+        if (newCumShipped + 1e-9 >= orderedQty) {
+          if (newCumShipped > orderedQty) newCumShipped = orderedQty;
+        } else {
+          allFullyShipped = false;
         }
         totalShipped += actualQty;
-        resolvedLines.push({ line, actualQty });
+        resolvedLines.push({ line, actualQty, newCumShipped });
       }
       if (totalShipped <= 0) {
         throw new Error('出貨數量合計需大於 0');
@@ -7390,14 +7449,43 @@ export async function invoke(cmd, args = {}) {
       }
 
       const now = Math.floor(Date.now() / 1000);
-      order.status = 'shipped';
+      order.status = allFullyShipped ? 'shipped' : 'partially_shipped';
       order.ship_date = resolvedShipDate;
       order.shipped_by = activeUid;
       order.shipped_at = now;
 
-      for (const { line, actualQty } of resolvedLines) {
-        line.shipped_quantity = actualQty;
+      const shipmentId = nextMockUid('shp');
+      const shipmentNumber = nextMockShipmentNumber(targetTenantId);
+      mockSalesShipments.push({
+        id: shipmentId,
+        tenant_id: targetTenantId,
+        sales_order_id: order.id,
+        shipment_number: shipmentNumber,
+        warehouse_id: wh.id,
+        ship_date: resolvedShipDate,
+        note: cleanNote,
+        shipped_by: activeUid,
+        shipped_at: now,
+        created_at: now
+      });
+
+      for (const { line, actualQty, newCumShipped } of resolvedLines) {
+        line.shipped_quantity = newCumShipped;
         if (actualQty <= 0) continue;
+        mockSalesShipmentLines.push({
+          id: nextMockUid('shpl'),
+          shipment_id: shipmentId,
+          sales_order_line_id: line.id,
+          line_no: line.line_no,
+          unit_id: line.unit_id,
+          product_name_snapshot: line.product_name_snapshot,
+          variant_name_snapshot: line.variant_name_snapshot,
+          sku_snapshot: line.sku_snapshot || null,
+          unit_name_snapshot: line.unit_name_snapshot,
+          shipped_quantity: actualQty,
+          unit_price: Number(line.unit_price),
+          created_at: now
+        });
         mockInventoryMovements.push({
           id: nextMockUid('mov_so'),
           tenant_id: targetTenantId,
@@ -7415,6 +7503,8 @@ export async function invoke(cmd, args = {}) {
 
       saveStorage('agent_erp_mock_sales_orders', mockSalesOrders);
       saveStorage('agent_erp_mock_sales_order_lines', mockSalesOrderLines);
+      saveStorage('agent_erp_mock_sales_shipments', mockSalesShipments);
+      saveStorage('agent_erp_mock_sales_shipment_lines', mockSalesShipmentLines);
       saveStorage('agent_erp_mock_inventory_movements', mockInventoryMovements);
       return formatMockSalesOrder(order);
     }
@@ -7608,14 +7698,23 @@ export async function invoke(cmd, args = {}) {
         const removedIds = new Set(
           mockSalesOrders.filter(o => (o.tenant_id || 'tnt_mock_1') === targetTid).map(o => o.id)
         );
+        const removedShipmentIds = new Set(
+          mockSalesShipments.filter(s => removedIds.has(s.sales_order_id)).map(s => s.id)
+        );
         mockSalesOrders = mockSalesOrders.filter(o => (o.tenant_id || 'tnt_mock_1') !== targetTid);
         mockSalesOrderLines = mockSalesOrderLines.filter(l => !removedIds.has(l.sales_order_id));
+        mockSalesShipments = mockSalesShipments.filter(s => !removedIds.has(s.sales_order_id));
+        mockSalesShipmentLines = mockSalesShipmentLines.filter(sl => !removedShipmentIds.has(sl.shipment_id));
       } else {
         mockSalesOrders = [];
         mockSalesOrderLines = [];
+        mockSalesShipments = [];
+        mockSalesShipmentLines = [];
       }
       saveStorage('agent_erp_mock_sales_orders', mockSalesOrders);
       saveStorage('agent_erp_mock_sales_order_lines', mockSalesOrderLines);
+      saveStorage('agent_erp_mock_sales_shipments', mockSalesShipments);
+      saveStorage('agent_erp_mock_sales_shipment_lines', mockSalesShipmentLines);
       return true;
     }
     
