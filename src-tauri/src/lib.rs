@@ -16,6 +16,7 @@ pub mod partners;
 pub mod products;
 pub mod purchase_orders;
 pub mod quotes;
+pub mod sales_orders;
 pub mod stock_transfers;
 pub mod stocktakes;
 pub mod tasks;
@@ -56,6 +57,7 @@ where
         "stocktakes",
         "inventory_adjustments",
         "purchase_orders",
+        "sales_orders",
         "stock_transfers",
         "accounts_payable",
         "vendor_bills",
@@ -261,6 +263,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     quotes::create_quotes_tables(&conn)
         .map_err(|e| format!("Failed to create quotes tables: {}", e))?;
+
+    sales_orders::create_sales_orders_tables(&conn)
+        .map_err(|e| format!("Failed to create sales orders tables: {}", e))?;
 
     llm_traces::create_llm_traces_table(&conn)
         .map_err(|e| format!("Failed to create llm_traces table: {}", e))?;
@@ -623,6 +628,10 @@ pub fn run() {
             quotes::approve_quote,
             quotes::reject_quote,
             quotes::list_pending_approval_quotes,
+            sales_orders::ship_sales_order,
+            sales_orders::cancel_sales_order,
+            sales_orders::get_sales_order,
+            sales_orders::list_sales_orders,
             llm::detect_department_intent,
             llm::detect_intent,
             llm_traces::record_llm_trace,
