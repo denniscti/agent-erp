@@ -9,7 +9,7 @@ import {
   vendorCreateBasicProfileAgentProfile
 } from '../partners/workflow.js';
 import { productManagementAgentProfile } from '../products/workflow.js';
-import { purchaseOrderAgentProfile } from './purchaseOrders.js';
+import { purchaseOrderAgentProfile } from '../purchaseOrders/workflow.js';
 import { isKnownDomain } from './domains.js';
 
 export * from './types.js';
@@ -17,7 +17,7 @@ export * from './harness.js';
 export * from '../departments/workflow.js';
 export * from '../partners/workflow.js';
 export * from '../products/workflow.js';
-export * from './purchaseOrders.js';
+export * from '../purchaseOrders/workflow.js';
 export * from './domains.js';
 
 /**

@@ -57,7 +57,7 @@
   import TenantPicker from './lib/components/auth/TenantPicker.svelte';
   import OnboardingScreen from './lib/components/auth/OnboardingScreen.svelte';
   import SettingsEntityCard from './lib/components/SettingsEntityCard.svelte';
-  import PurchaseOrdersWorkspace from './lib/components/PurchaseOrdersWorkspace.svelte';
+  import PurchaseOrdersWorkspace from './lib/purchaseOrders/Workspace.svelte';
   import AccountsPayableWorkspace from './lib/components/AccountsPayableWorkspace.svelte';
   import VendorBillsWorkspace from './lib/components/VendorBillsWorkspace.svelte';
   import WarehouseWorkspace from './lib/components/WarehouseWorkspace.svelte';

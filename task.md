@@ -1,0 +1,24 @@
+# 任務清單：採購單領域模組化重構（Issue #245）
+
+- [x] 0. 準備與規劃 <!-- id: 0 -->
+  - [x] 調查 `purchase_orders.rs` 與相關 IPC 指令清單 <!-- id: 0.1 -->
+  - [x] 擬定實作計畫與測試觀點表 <!-- id: 0.2 -->
+- [x] 1. 建立 `src/lib/purchaseOrders/mocks.js` 與重構 `tauri.js` <!-- id: 1 -->
+  - [x] 移出採購單 mock 狀態與 10 個 IPC 指令處理器至 `mocks.js` <!-- id: 1.1 -->
+  - [x] 在 `tauri.js` 註冊 `purchaseOrderMocks` 至 `domainMocks` <!-- id: 1.2 -->
+- [x] 2. 建立 `src/lib/purchaseOrders/store.js` 與更新 `store.svelte.js` <!-- id: 2 -->
+  - [x] 搬移純採購單核心 actions 至 `src/lib/purchaseOrders/store.js` <!-- id: 2.1 -->
+  - [x] 在 `store.svelte.js` 建立具名 re-export 以保證 100% 向後相容 <!-- id: 2.2 -->
+- [x] 3. 搬移 `workflow.js` <!-- id: 3 -->
+  - [x] 搬移 `workflow/purchaseOrders.js` 至 `src/lib/purchaseOrders/workflow.js` <!-- id: 3.1 -->
+  - [x] 在 `src/lib/workflow/purchaseOrders.js` 建立相容 re-export stub <!-- id: 3.2 -->
+  - [x] 更新 `src/lib/workflow/index.js` 引用新路徑 <!-- id: 3.3 -->
+- [x] 4. 搬移 `Workspace.svelte` <!-- id: 4 -->
+  - [x] 搬移 `components/PurchaseOrdersWorkspace.svelte` 至 `src/lib/purchaseOrders/Workspace.svelte` <!-- id: 4.1 -->
+  - [x] 在 `components/PurchaseOrdersWorkspace.svelte` 建立相容 stub <!-- id: 4.2 -->
+  - [x] 更新 `src/App.svelte` 引用新路徑 <!-- id: 4.3 -->
+- [x] 5. 全面驗證與測試 <!-- id: 5 -->
+  - [x] 執行 `npm test` 驗證所有前端測試通過 (657/657 passed) <!-- id: 5.1 -->
+  - [x] 執行 `npm run build` 驗證前端建置無誤 <!-- id: 5.2 -->
+  - [x] 執行 `cargo test` 驗證後端測試無誤 (445/445 passed) <!-- id: 5.3 -->
+  - [x] 驗證表單入口與對話入口雙路徑生命週期正常運作 <!-- id: 5.4 -->
