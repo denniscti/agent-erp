@@ -679,6 +679,35 @@ pub fn deactivate_warehouse_impl(
         }
     }
 
+    // W-03 Extension: Cannot deactivate if referenced by draft unit conversions
+    let has_ucv_table = match conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unit_conversions'",
+        [],
+        |_| Ok(true),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => false,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    if has_ucv_table {
+        let pending_ucv: Option<String> = match conn.query_row(
+            "SELECT conversion_number FROM unit_conversions
+             WHERE tenant_id = ?1 AND warehouse_id = ?2 AND status = 'draft'
+             ORDER BY created_at ASC LIMIT 1",
+            params![tenant_id, trimmed_id],
+            |r| r.get(0),
+        ) {
+            Ok(ucv_num) => Some(ucv_num),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.to_string()),
+        };
+
+        if let Some(ucv_num) = pending_ucv {
+            return Err(format!("此倉仍被未結案單據引用：{}", ucv_num));
+        }
+    }
+
     conn.execute(
         "UPDATE warehouses SET is_active = 0 WHERE id = ?1 AND tenant_id = ?2",
         params![trimmed_id, tenant_id],

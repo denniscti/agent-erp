@@ -64,10 +64,16 @@
     updateStockTransferLineAction,
     removeStockTransferLineAction,
     postStockTransferAction,
-    cancelStockTransferAction
+    cancelStockTransferAction,
+    fetchUnitConversions,
+    fetchUnitConversionDetail,
+    selectUnitConversion,
+    createUnitConversionAction,
+    postUnitConversionAction,
+    cancelUnitConversionAction
   } from '../store.svelte.js';
 
-  // Subtabs: 'inventory' | 'warehouses' | 'adjustments' | 'stocktakes' | 'transfers'
+  // Subtabs: 'inventory' | 'warehouses' | 'adjustments' | 'stocktakes' | 'transfers' | 'conversions'
   let activeSubTab = $state('inventory');
 
   // Loading and error states
@@ -78,6 +84,47 @@
 
   // Warehouse filter for inventory query
   let selectedWarehouseId = $state('');
+
+  // Unit Conversions State (Issue #230)
+  let conversionLoading = $state(false);
+  let conversionError = $state('');
+  let selectedConversionStatusFilter = $state('all');
+  let selectedConversionWhFilter = $state('');
+  let selectedConversionId = $derived(appState.selectedUnitConversionId);
+  let currentConversion = $derived(appState.currentUnitConversion);
+
+  let showCreateConversionModal = $state(false);
+  let conversionModalLoading = $state(false);
+  let conversionModalError = $state('');
+  let newConversionWarehouseId = $state('');
+  let newConversionFromUnitId = $state('');
+  let newConversionFromQty = $state('1');
+  let newConversionToUnitId = $state('');
+  let newConversionToQty = $state('');
+  let newConversionNote = $state('');
+  let newConversionToQtyTouched = $state(false);
+
+  let selectedFromUnitObj = $derived(
+    availableUnits.find(u => u.unit_id === newConversionFromUnitId) || null
+  );
+  let filteredConversionToUnits = $derived.by(() => {
+    if (!selectedFromUnitObj) return [];
+    return availableUnits.filter(
+      u => u.variant_id === selectedFromUnitObj.variant_id && u.unit_id !== selectedFromUnitObj.unit_id
+    );
+  });
+  let selectedToUnitObj = $derived(
+    filteredConversionToUnits.find(u => u.unit_id === newConversionToUnitId) || null
+  );
+  let suggestedConversionToQty = $derived.by(() => {
+    const fQty = parseFloat(newConversionFromQty);
+    if (!selectedFromUnitObj || !selectedToUnitObj || isNaN(fQty) || fQty <= 0) return null;
+    const fromRatio = Number(selectedFromUnitObj.conversion_ratio) || 1;
+    const toRatio = Number(selectedToUnitObj.conversion_ratio) || 1;
+    if (toRatio <= 0) return null;
+    const raw = fQty * (fromRatio / toRatio);
+    return Math.round(raw * 1e6) / 1e6;
+  });
 
   // Adjustments list & detail state (Issue #183)
   let selectedAdjustmentWarehouseId = $state('');
@@ -308,9 +355,14 @@
       if (!selectedTransferId && (!appState.stockTransfers || appState.stockTransfers.length === 0)) {
         loadTransfers();
       }
+    } else if (route.includes('/warehouses/conversions')) {
+      activeSubTab = 'conversions';
+      if (!selectedConversionId && (!appState.unitConversions || appState.unitConversions.length === 0)) {
+        loadConversions();
+      }
     } else if (route.startsWith('/app/warehouses')) {
       // Default to inventory view if just /app/warehouses
-      if (activeSubTab !== 'warehouses' && activeSubTab !== 'adjustments' && activeSubTab !== 'stocktakes' && activeSubTab !== 'transfers') {
+      if (activeSubTab !== 'warehouses' && activeSubTab !== 'adjustments' && activeSubTab !== 'stocktakes' && activeSubTab !== 'transfers' && activeSubTab !== 'conversions') {
         activeSubTab = 'inventory';
       }
     }
@@ -354,6 +406,8 @@
             const variantName = variantMap.get(u.variant_id) || '標準';
             uList.push({
               unit_id: u.id,
+              variant_id: u.variant_id,
+              conversion_ratio: u.conversion_ratio ?? 1,
               product_id: prod.id,
               product_name: prod.name,
               variant_name: variantName,
@@ -398,6 +452,10 @@
       navigate('/app/warehouses/transfers');
       handleSelectTransfer(null);
       loadTransfers();
+    } else if (tab === 'conversions') {
+      navigate('/app/warehouses/conversions');
+      selectUnitConversion(null);
+      loadConversions();
     }
   }
 
@@ -1170,6 +1228,192 @@
     await handleSelectTransfer(trfId);
   }
 
+  // ==========================================
+  // Unit Conversions Handlers (Issue #230)
+  // ==========================================
+
+  async function loadConversions() {
+    if (conversionLoading) return;
+    conversionLoading = true;
+    conversionError = '';
+    try {
+      await fetchUnitConversions(
+        selectedConversionStatusFilter === 'all' ? null : selectedConversionStatusFilter,
+        selectedConversionWhFilter || null
+      );
+    } catch (err) {
+      conversionError = err.message || '載入單位轉換單失敗';
+    } finally {
+      conversionLoading = false;
+    }
+  }
+
+  async function handleSelectConversion(ucvId) {
+    conversionError = '';
+    try {
+      await selectUnitConversion(ucvId);
+    } catch (err) {
+      conversionError = err.message || '載入單位轉換單明細失敗';
+    }
+  }
+
+  async function handleNavigateToConversion(ucvId) {
+    if (!ucvId) return;
+    activeSubTab = 'conversions';
+    navigate('/app/warehouses/conversions');
+    await handleSelectConversion(ucvId);
+  }
+
+  function applySuggestedConversionQty(fromUnitId, toUnitId, fromQtyStr) {
+    if (newConversionToQtyTouched) return;
+    const fObj = availableUnits.find(u => u.unit_id === fromUnitId);
+    const tObj = availableUnits.find(u => u.unit_id === toUnitId);
+    const fQty = parseFloat(fromQtyStr);
+    if (!fObj || !tObj || isNaN(fQty) || fQty <= 0) {
+      newConversionToQty = '';
+      return;
+    }
+    const fromRatio = Number(fObj.conversion_ratio) || 1;
+    const toRatio = Number(tObj.conversion_ratio) || 1;
+    if (toRatio <= 0) return;
+    const suggested = Math.round(fQty * (fromRatio / toRatio) * 1e6) / 1e6;
+    newConversionToQty = String(suggested);
+  }
+
+  function handleOpenCreateConversionModal() {
+    conversionModalError = '';
+    const defaultWh = activeWarehouses.find(w => w.is_default) || activeWarehouses[0];
+    newConversionWarehouseId = defaultWh ? defaultWh.id : '';
+    newConversionFromUnitId = '';
+    newConversionFromQty = '1';
+    newConversionToUnitId = '';
+    newConversionToQty = '';
+    newConversionNote = '';
+    newConversionToQtyTouched = false;
+    showCreateConversionModal = true;
+  }
+
+  function handleConversionFromUnitChange() {
+    newConversionToQtyTouched = false;
+    const fromObj = availableUnits.find(u => u.unit_id === newConversionFromUnitId);
+    if (fromObj) {
+      const candidates = availableUnits.filter(
+        u => u.variant_id === fromObj.variant_id && u.unit_id !== fromObj.unit_id
+      );
+      if (candidates.length > 0 && !candidates.some(c => c.unit_id === newConversionToUnitId)) {
+        newConversionToUnitId = candidates[0].unit_id;
+      } else if (candidates.length === 0) {
+        newConversionToUnitId = '';
+      }
+      applySuggestedConversionQty(newConversionFromUnitId, newConversionToUnitId, newConversionFromQty);
+    } else {
+      newConversionToUnitId = '';
+      newConversionToQty = '';
+    }
+  }
+
+  function handleConversionToUnitChange() {
+    newConversionToQtyTouched = false;
+    applySuggestedConversionQty(newConversionFromUnitId, newConversionToUnitId, newConversionFromQty);
+  }
+
+  function handleConversionFromQtyChange() {
+    applySuggestedConversionQty(newConversionFromUnitId, newConversionToUnitId, newConversionFromQty);
+  }
+
+  async function handleCreateUnitConversion(postImmediately = false) {
+    if (conversionModalLoading) return;
+    conversionModalError = '';
+    if (!newConversionWarehouseId) {
+      conversionModalError = '請選擇倉庫';
+      return;
+    }
+    if (!newConversionFromUnitId) {
+      conversionModalError = '請選擇來源單位';
+      return;
+    }
+    if (!newConversionToUnitId) {
+      conversionModalError = '請選擇目標單位';
+      return;
+    }
+    const fQty = parseFloat(newConversionFromQty);
+    const tQty = parseFloat(newConversionToQty);
+    if (isNaN(fQty) || fQty <= 0) {
+      conversionModalError = '來源數量必須大於 0';
+      return;
+    }
+    if (isNaN(tQty) || tQty <= 0) {
+      conversionModalError = '目標數量必須大於 0';
+      return;
+    }
+
+    conversionModalLoading = true;
+    try {
+      const created = await createUnitConversionAction({
+        warehouseId: newConversionWarehouseId,
+        fromUnitId: newConversionFromUnitId,
+        fromQuantity: fQty,
+        toUnitId: newConversionToUnitId,
+        toQuantity: tQty,
+        note: newConversionNote.trim() || null
+      });
+      if (postImmediately && created?.id) {
+        await postUnitConversionAction(created.id);
+        await fetchInventoryLevels(selectedWarehouseId || null);
+      }
+      showCreateConversionModal = false;
+    } catch (err) {
+      conversionModalError = err.message || '建立單位轉換單失敗';
+    } finally {
+      conversionModalLoading = false;
+    }
+  }
+
+  async function handlePostUnitConversion(ucvId) {
+    if (conversionLoading) return;
+    conversionLoading = true;
+    conversionError = '';
+    try {
+      await postUnitConversionAction(ucvId);
+      await fetchInventoryLevels(selectedWarehouseId || null);
+    } catch (err) {
+      conversionError = err.message || '過帳單位轉換單失敗';
+    } finally {
+      conversionLoading = false;
+    }
+  }
+
+  async function handleCancelUnitConversion(ucvId) {
+    if (conversionLoading) return;
+    conversionLoading = true;
+    conversionError = '';
+    try {
+      await cancelUnitConversionAction(ucvId);
+    } catch (err) {
+      conversionError = err.message || '取消單位轉換單失敗';
+    } finally {
+      conversionLoading = false;
+    }
+  }
+
+  function formatConversionStatus(status) {
+    switch (status) {
+      case 'draft': return '草稿';
+      case 'posted': return '已過帳';
+      case 'cancelled': return '已取消';
+      default: return status || '-';
+    }
+  }
+
+  function getConversionStatusBadgeClass(status) {
+    switch (status) {
+      case 'draft': return 'badge-gray';
+      case 'posted': return 'badge-emerald';
+      case 'cancelled': return 'badge-red';
+      default: return 'badge-gray';
+    }
+  }
+
   function formatTransferStatus(status) {
     switch (status) {
       case 'draft':
@@ -1665,6 +1909,20 @@
           </svg>
           調撥單
         </button>
+
+        <button
+          class="subtab-btn {activeSubTab === 'conversions' ? 'active' : ''}"
+          onclick={() => handleTabSwitch('conversions')}
+          id="tab-btn-conversions"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 3h5v5"></path>
+            <path d="M8 3H3v5"></path>
+            <path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"></path>
+            <path d="m15 9 6-6"></path>
+          </svg>
+          單位轉換
+        </button>
       </nav>
 
       <!-- Action Group -->
@@ -1913,6 +2171,15 @@
                                               id="link-trf-{mov.reference_id}"
                                             >
                                               調撥單 #{mov.reference_id.slice(-6)}
+                                            </button>
+                                          {:else if mov.reference_type === 'unit_conversion' || mov.reason === 'unit_conversion_out' || mov.reason === 'unit_conversion_in' || mov.reference_id.startsWith('ucv_')}
+                                            <button
+                                              class="link-po-ref link-trf-ref"
+                                              onclick={() => handleNavigateToConversion(mov.reference_id)}
+                                              title="點擊前往此單位轉換單明細"
+                                              id="link-ucv-{mov.reference_id}"
+                                            >
+                                              單位轉換 #{mov.reference_id.slice(-6)}
                                             </button>
                                           {:else}
                                             <span class="badge badge-slate" style="font-family: monospace;">#{mov.reference_id.slice(-6)}</span>
@@ -3435,6 +3702,213 @@
           {/if}
         </div>
       {/if}
+    {:else if activeSubTab === 'conversions'}
+      <!-- Unit Conversions View (Issue #230) -->
+      {#if selectedConversionId && currentConversion}
+        <div class="detail-view">
+          <div class="detail-header-bar" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; gap: 12px;">
+              <button class="secondary-btn" onclick={() => handleSelectConversion(null)} id="btn-back-to-conversions">
+                ← 返回列表
+              </button>
+              <h3 style="margin: 0; font-size: 1.15rem; font-family: monospace;">
+                {currentConversion.conversion_number}
+              </h3>
+              <span class="badge {getConversionStatusBadgeClass(currentConversion.status)}">
+                {formatConversionStatus(currentConversion.status)}
+              </span>
+            </div>
+
+            {#if currentConversion.status === 'draft'}
+              <div style="display: flex; gap: 8px;">
+                <button
+                  class="primary-btn"
+                  id="btn-post-conversion"
+                  disabled={conversionLoading}
+                  onclick={() => handlePostUnitConversion(currentConversion.id)}
+                >
+                  {conversionLoading ? '處理中...' : '過帳轉換'}
+                </button>
+                <button
+                  class="secondary-btn text-red"
+                  id="btn-cancel-conversion"
+                  disabled={conversionLoading}
+                  onclick={() => handleCancelUnitConversion(currentConversion.id)}
+                >
+                  取消單據
+                </button>
+              </div>
+            {/if}
+          </div>
+
+          {#if conversionError}
+            <div class="alert alert-danger" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444;">
+              {conversionError}
+            </div>
+          {/if}
+
+          <div class="card" style="padding: 20px; margin-bottom: 16px;">
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px;">
+              <div>
+                <div class="text-muted" style="font-size: 0.8rem;">倉庫</div>
+                <div style="font-weight: 500; margin-top: 4px;">🏢 {getWarehouseName(currentConversion.warehouse_id)}</div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.8rem;">商品／規格</div>
+                <div style="font-weight: 500; margin-top: 4px;">
+                  {currentConversion.product_name_snapshot} ({currentConversion.variant_name_snapshot})
+                </div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.8rem;">來源單位（扣帳）</div>
+                <div style="font-weight: 600; margin-top: 4px; color: #ef4444;">
+                  -{currentConversion.from_quantity} {currentConversion.from_unit_name_snapshot}
+                </div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.8rem;">目標單位（進帳）</div>
+                <div style="font-weight: 600; margin-top: 4px; color: #10b981;">
+                  +{currentConversion.to_quantity} {currentConversion.to_unit_name_snapshot}
+                </div>
+              </div>
+              <div>
+                <div class="text-muted" style="font-size: 0.8rem;">建立時間</div>
+                <div style="margin-top: 4px;">{formatTime(currentConversion.created_at)}</div>
+              </div>
+              {#if currentConversion.posted_at}
+                <div>
+                  <div class="text-muted" style="font-size: 0.8rem;">過帳時間</div>
+                  <div style="margin-top: 4px;">{formatTime(currentConversion.posted_at)}</div>
+                </div>
+              {/if}
+              {#if currentConversion.cancelled_at}
+                <div>
+                  <div class="text-muted" style="font-size: 0.8rem;">取消時間</div>
+                  <div style="margin-top: 4px;">{formatTime(currentConversion.cancelled_at)}</div>
+                </div>
+              {/if}
+            </div>
+            {#if currentConversion.note}
+              <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--color-border);">
+                <div class="text-muted" style="font-size: 0.8rem;">備註</div>
+                <div style="margin-top: 4px;">{currentConversion.note}</div>
+              </div>
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <div class="list-view">
+          <div class="toolbar" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+              <div class="filter-group">
+                <select
+                  class="form-select form-select-sm"
+                  id="filter-conversion-status"
+                  bind:value={selectedConversionStatusFilter}
+                  onchange={loadConversions}
+                >
+                  <option value="all">全部狀態</option>
+                  <option value="draft">草稿 (draft)</option>
+                  <option value="posted">已過帳 (posted)</option>
+                  <option value="cancelled">已取消 (cancelled)</option>
+                </select>
+              </div>
+
+              <div class="filter-group">
+                <select
+                  class="form-select form-select-sm"
+                  id="filter-conversion-wh"
+                  bind:value={selectedConversionWhFilter}
+                  onchange={loadConversions}
+                >
+                  <option value="">全部倉庫</option>
+                  {#each activeWarehouses as wh}
+                    <option value={wh.id}>{wh.name} ({wh.code})</option>
+                  {/each}
+                </select>
+              </div>
+            </div>
+
+            <button
+              class="primary-btn"
+              id="btn-open-create-conversion"
+              onclick={() => handleOpenCreateConversionModal()}
+              style="padding: 6px 16px; font-weight: 500;"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+              新增單位轉換
+            </button>
+          </div>
+
+          {#if conversionError}
+            <div class="alert alert-danger" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444;">
+              {conversionError}
+            </div>
+          {/if}
+
+          {#if conversionLoading}
+            <div style="text-align: center; padding: 40px; color: var(--color-text-muted);">載入中...</div>
+          {:else if !appState.unitConversions || appState.unitConversions.length === 0}
+            <div class="empty-state" style="text-align: center; padding: 48px 24px; color: var(--color-text-muted);">
+              <p style="margin-bottom: 12px;">尚無單位轉換單</p>
+              <button class="primary-btn" onclick={() => handleOpenCreateConversionModal()}>
+                建立第一筆單位轉換單
+              </button>
+            </div>
+          {:else}
+            <div class="table-container">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>單號</th>
+                    <th>倉庫</th>
+                    <th>商品／規格</th>
+                    <th>來源單位（扣帳）</th>
+                    <th>目標單位（進帳）</th>
+                    <th>狀態</th>
+                    <th>備註</th>
+                    <th>建立時間</th>
+                    <th style="text-align: center;">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each appState.unitConversions as ucv}
+                    <tr class="clickable-row" onclick={() => handleSelectConversion(ucv.id)}>
+                      <td style="font-family: monospace; font-weight: 600;">{ucv.conversion_number}</td>
+                      <td>🏢 {getWarehouseName(ucv.warehouse_id)}</td>
+                      <td>{ucv.product_name_snapshot} ({ucv.variant_name_snapshot})</td>
+                      <td style="color: #ef4444; font-weight: 500;">-{ucv.from_quantity} {ucv.from_unit_name_snapshot}</td>
+                      <td style="color: #10b981; font-weight: 500;">+{ucv.to_quantity} {ucv.to_unit_name_snapshot}</td>
+                      <td>
+                        <span class="badge {getConversionStatusBadgeClass(ucv.status)}">
+                          {formatConversionStatus(ucv.status)}
+                        </span>
+                      </td>
+                      <td class="text-muted" style="max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                        {ucv.note || '-'}
+                      </td>
+                      <td class="text-muted" style="font-size: 0.82rem;">{formatTime(ucv.created_at)}</td>
+                      <td style="text-align: center;" onclick={(e) => e.stopPropagation()}>
+                        <button
+                          class="action-btn-sm"
+                          id="btn-view-conversion-{ucv.id}"
+                          onclick={() => handleSelectConversion(ucv.id)}
+                          style="font-size: 0.8rem; padding: 3px 10px;"
+                        >
+                          {ucv.status === 'draft' ? '編輯' : '檢視'}
+                        </button>
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+        </div>
+      {/if}
     {/if}
   </div>
 </div>
@@ -4354,6 +4828,136 @@
           style="background: #10b981; color: white;"
         >
           {postTransferLoading ? '過帳處理中...' : '確認過帳'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Create Unit Conversion Modal (Issue #230) -->
+{#if showCreateConversionModal}
+  <div class="modal-backdrop" onclick={() => !conversionModalLoading && (showCreateConversionModal = false)}>
+    <div class="modal-content" onclick={(e) => e.stopPropagation()} style="max-width: 540px;">
+      <div class="modal-header">
+        <h3>新增單位轉換單</h3>
+        <button class="modal-close" onclick={() => !conversionModalLoading && (showCreateConversionModal = false)}>✕</button>
+      </div>
+      <div class="modal-body" style="display: flex; flex-direction: column; gap: 14px;">
+        {#if conversionModalError}
+          <div class="alert alert-danger" style="padding: 8px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); color: #ef4444; font-size: 0.9rem;">
+            {conversionModalError}
+          </div>
+        {/if}
+
+        <div class="form-group">
+          <label class="form-label" for="ucv-warehouse">倉庫 *</label>
+          <select id="ucv-warehouse" class="form-select" bind:value={newConversionWarehouseId}>
+            <option value="">請選擇倉庫</option>
+            {#each activeWarehouses as wh}
+              <option value={wh.id}>{wh.name} ({wh.code})</option>
+            {/each}
+          </select>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 120px; gap: 12px;">
+          <div class="form-group">
+            <label class="form-label" for="ucv-from-unit">來源單位（扣帳）*</label>
+            <select
+              id="ucv-from-unit"
+              class="form-select"
+              bind:value={newConversionFromUnitId}
+              onchange={handleConversionFromUnitChange}
+            >
+              <option value="">請選擇來源商品單位</option>
+              {#each availableUnits as u}
+                <option value={u.unit_id}>{u.label}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="ucv-from-qty">來源數量 *</label>
+            <input
+              id="ucv-from-qty"
+              type="number"
+              min="0.000001"
+              step="any"
+              class="form-input"
+              bind:value={newConversionFromQty}
+              oninput={handleConversionFromQtyChange}
+            />
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 120px; gap: 12px;">
+          <div class="form-group">
+            <label class="form-label" for="ucv-to-unit">目標單位（進帳，限同規格）*</label>
+            <select
+              id="ucv-to-unit"
+              class="form-select"
+              bind:value={newConversionToUnitId}
+              onchange={handleConversionToUnitChange}
+              disabled={!newConversionFromUnitId}
+            >
+              <option value="">{newConversionFromUnitId ? '請選擇目標單位' : '請先選擇來源單位'}</option>
+              {#each filteredConversionToUnits as u}
+                <option value={u.unit_id}>{u.unit_name} (換算比 {u.conversion_ratio})</option>
+              {/each}
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="ucv-to-qty">目標數量 *</label>
+            <input
+              id="ucv-to-qty"
+              type="number"
+              min="0.000001"
+              step="any"
+              class="form-input"
+              bind:value={newConversionToQty}
+              oninput={() => { newConversionToQtyTouched = true; }}
+            />
+          </div>
+        </div>
+
+        {#if suggestedConversionToQty !== null}
+          <div class="text-muted" style="font-size: 0.82rem;">
+            依單位換算比例建議數量：{suggestedConversionToQty}（可依實際數量自由修改，後端不強制驗證）
+          </div>
+        {/if}
+
+        <div class="form-group">
+          <label class="form-label" for="ucv-note">備註</label>
+          <input
+            id="ucv-note"
+            type="text"
+            class="form-input"
+            placeholder="例：整盒拆零上架"
+            bind:value={newConversionNote}
+          />
+        </div>
+      </div>
+      <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button
+          class="secondary-btn"
+          disabled={conversionModalLoading}
+          onclick={() => (showCreateConversionModal = false)}
+        >
+          取消
+        </button>
+        <button
+          class="secondary-btn"
+          id="btn-submit-conversion-draft"
+          disabled={conversionModalLoading}
+          onclick={() => handleCreateUnitConversion(false)}
+        >
+          {conversionModalLoading ? '處理中...' : '建立草稿'}
+        </button>
+        <button
+          class="primary-btn"
+          id="btn-submit-conversion-post"
+          disabled={conversionModalLoading}
+          onclick={() => handleCreateUnitConversion(true)}
+        >
+          {conversionModalLoading ? '處理中...' : '建立並過帳'}
         </button>
       </div>
     </div>

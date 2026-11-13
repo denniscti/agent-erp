@@ -21,6 +21,7 @@ pub mod stock_transfers;
 pub mod stocktakes;
 pub mod tasks;
 pub mod tps2_types;
+pub mod unit_conversions;
 pub mod vendor_bills;
 pub mod vendor_payments;
 pub mod warehouses;
@@ -59,6 +60,7 @@ where
         "purchase_orders",
         "sales_orders",
         "stock_transfers",
+        "unit_conversions",
         "accounts_payable",
         "vendor_bills",
         "opening_payables",
@@ -248,6 +250,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     stock_transfers::create_stock_transfers_tables(&conn)
         .map_err(|e| format!("Failed to create stock transfers tables: {}", e))?;
+
+    unit_conversions::create_unit_conversions_tables(&conn)
+        .map_err(|e| format!("Failed to create unit conversions tables: {}", e))?;
 
     accounts_payable::create_accounts_payable_tables(&conn)
         .map_err(|e| format!("Failed to create accounts payable tables: {}", e))?;
@@ -583,6 +588,11 @@ pub fn run() {
             stock_transfers::cancel_stock_transfer,
             stock_transfers::get_stock_transfer,
             stock_transfers::list_stock_transfers,
+            unit_conversions::create_unit_conversion,
+            unit_conversions::post_unit_conversion,
+            unit_conversions::cancel_unit_conversion,
+            unit_conversions::get_unit_conversion,
+            unit_conversions::list_unit_conversions,
             accounts_payable::get_account_payable,
             accounts_payable::list_accounts_payable,
             accounts_payable::get_payables_aging,

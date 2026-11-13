@@ -185,6 +185,14 @@ export const appState = $state({
   /** @type {string | null} */
   selectedStocktakeId: null,
 
+  // Unit Conversions cache (Issue #230)
+  /** @type {any[]} */
+  unitConversions: [],
+  /** @type {any | null} */
+  currentUnitConversion: null,
+  /** @type {string | null} */
+  selectedUnitConversionId: null,
+
   // Stock Transfers cache (Issue #185)
   /** @type {any[]} */
   stockTransfers: [],
@@ -374,6 +382,10 @@ export function formatMovementReason(reason) {
       return '調撥出庫';
     case 'transfer_in':
       return '調撥入庫';
+    case 'unit_conversion_out':
+      return '單位轉換出庫';
+    case 'unit_conversion_in':
+      return '單位轉換入庫';
     default:
       return reason || '-';
   }
@@ -3229,6 +3241,149 @@ export async function cancelInventoryAdjustmentAction(adjustmentId) {
     return detail.adjustment;
   } catch (err) {
     console.error("Failed to cancel inventory adjustment:", err);
+    throw err;
+  }
+}
+
+// ==========================================
+// Unit Conversions Actions (Issue #230)
+// ==========================================
+
+/**
+ * Fetch unit conversions list with optional filters
+ * @param {string | null} [status]
+ * @param {string | null} [warehouseId]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchUnitConversions(status = null, warehouseId = null) {
+  try {
+    const payload = {};
+    if (status && status !== 'all') {
+      payload.status = status;
+    }
+    if (warehouseId && String(warehouseId).trim() !== '') {
+      payload.warehouseId = String(warehouseId).trim();
+    }
+    const list = await invoke('list_unit_conversions', payload);
+    appState.unitConversions = list || [];
+    return appState.unitConversions;
+  } catch (err) {
+    console.error("Failed to fetch unit conversions:", err);
+    return [];
+  }
+}
+
+/**
+ * Fetch unit conversion detail by ID
+ * @param {string} conversionId
+ * @returns {Promise<any>}
+ */
+export async function fetchUnitConversionDetail(conversionId) {
+  if (!conversionId) return null;
+  try {
+    const detail = await invoke('get_unit_conversion', { conversionId });
+    appState.currentUnitConversion = detail;
+    return detail;
+  } catch (err) {
+    console.error("Failed to fetch unit conversion detail:", err);
+    throw err;
+  }
+}
+
+/**
+ * Select active unit conversion and load detail
+ * @param {string | null} conversionId
+ */
+export async function selectUnitConversion(conversionId) {
+  appState.selectedUnitConversionId = conversionId;
+  if (conversionId) {
+    return await fetchUnitConversionDetail(conversionId);
+  } else {
+    appState.currentUnitConversion = null;
+    return null;
+  }
+}
+
+/**
+ * Create a new unit conversion (draft)
+ * @param {object} input
+ * @returns {Promise<any>}
+ */
+export async function createUnitConversionAction({
+  warehouse_id,
+  warehouseId,
+  from_unit_id,
+  fromUnitId,
+  from_quantity,
+  fromQuantity,
+  to_unit_id,
+  toUnitId,
+  to_quantity,
+  toQuantity,
+  note = null,
+  task_id = null,
+  taskId = null
+}) {
+  try {
+    const targetWh = warehouse_id !== undefined ? warehouse_id : warehouseId;
+    const targetFromUnit = from_unit_id !== undefined ? from_unit_id : fromUnitId;
+    const targetFromQty = from_quantity !== undefined ? from_quantity : fromQuantity;
+    const targetToUnit = to_unit_id !== undefined ? to_unit_id : toUnitId;
+    const targetToQty = to_quantity !== undefined ? to_quantity : toQuantity;
+    const targetTask = task_id !== undefined ? task_id : taskId;
+
+    const ucv = await invoke('create_unit_conversion', {
+      warehouseId: targetWh,
+      fromUnitId: targetFromUnit,
+      fromQuantity: Number(targetFromQty),
+      toUnitId: targetToUnit,
+      toQuantity: Number(targetToQty),
+      note: note || null,
+      taskId: targetTask || null
+    });
+    appState.currentUnitConversion = ucv;
+    appState.selectedUnitConversionId = ucv.id;
+    await fetchUnitConversions();
+    showToast(`已建立單位轉換單「${ucv.conversion_number}」！`);
+    return ucv;
+  } catch (err) {
+    console.error("Failed to create unit conversion:", err);
+    throw err;
+  }
+}
+
+/**
+ * Post a draft unit conversion (deducts from_unit, adds to_unit)
+ * @param {string} conversionId
+ * @returns {Promise<any>}
+ */
+export async function postUnitConversionAction(conversionId) {
+  try {
+    const ucv = await invoke('post_unit_conversion', { conversionId });
+    appState.currentUnitConversion = ucv;
+    await fetchUnitConversions();
+    showToast(`已過帳單位轉換單「${ucv.conversion_number}」！`);
+    return ucv;
+  } catch (err) {
+    console.error("Failed to post unit conversion:", err);
+    throw err;
+  }
+}
+
+/**
+ * Cancel a draft unit conversion
+ * @param {string} conversionId
+ * @returns {Promise<any>}
+ */
+export async function cancelUnitConversionAction(conversionId) {
+  try {
+    const ucv = await invoke('cancel_unit_conversion', { conversionId });
+    appState.currentUnitConversion = ucv;
+    await fetchUnitConversions();
+    showToast(`已取消單位轉換單「${ucv.conversion_number}」！`);
+    return ucv;
+  } catch (err) {
+    console.error("Failed to cancel unit conversion:", err);
     throw err;
   }
 }
