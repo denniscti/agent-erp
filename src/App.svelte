@@ -60,8 +60,8 @@
   import PurchaseOrdersWorkspace from './lib/purchaseOrders/Workspace.svelte';
   import AccountsPayableWorkspace from './lib/components/AccountsPayableWorkspace.svelte';
   import VendorBillsWorkspace from './lib/components/VendorBillsWorkspace.svelte';
-  import WarehouseWorkspace from './lib/components/WarehouseWorkspace.svelte';
-  import CreateWarehouseModal from './lib/components/CreateWarehouseModal.svelte';
+  import WarehouseWorkspace from './lib/warehouses/Workspace.svelte';
+  import CreateWarehouseModal from './lib/warehouses/CreateWarehouseModal.svelte';
   import QuotesWorkspace from './lib/components/QuotesWorkspace.svelte';
   import SalesOrdersWorkspace from './lib/components/SalesOrdersWorkspace.svelte';
 

@@ -8,11 +8,22 @@
  * @typedef {import('./bindings').LogoutResponse} LogoutResponse
  */
 
-import { invoke, check, relaunch, isStocktakeLineCounted } from './tauri.js';
+import { invoke, check, relaunch } from './tauri.js';
 import { executeConfirmation, executeCancellation } from './workflow/harness.js';
 import { getDeclaredSkills, getSkillsByDomain, KNOWN_DOMAINS } from './workflow/index.js';
 
 export {
+  navigationStalenessListeners,
+  registerNavigationStalenessListener,
+  invalidateNavigationStaleness
+} from './navigationStaleness.js';
+
+import {
+  registerNavigationStalenessListener,
+  invalidateNavigationStaleness
+} from './navigationStaleness.js';
+
+export {
   fetchDepartments,
   createDepartmentAction,
   filterDeclaredSkills,
@@ -59,6 +70,74 @@ export {
   cancelPurchaseOrderAction
 } from './purchaseOrders/store.js';
 
+export {
+  fetchWarehouses,
+  createWarehouseAction,
+  updateWarehouseAction,
+  setDefaultWarehouseAction,
+  deactivateWarehouseAction,
+  reactivateWarehouseAction
+} from './warehouses/store.js';
+
+export {
+  formatAdjustmentReason,
+  formatAdjustmentStatus,
+  fetchInventoryAdjustments,
+  fetchInventoryAdjustmentDetail,
+  selectInventoryAdjustment,
+  createInventoryAdjustmentAction,
+  updateInventoryAdjustmentHeaderAction,
+  addInventoryAdjustmentLineAction,
+  updateInventoryAdjustmentLineAction,
+  removeInventoryAdjustmentLineAction,
+  postInventoryAdjustmentAction,
+  cancelInventoryAdjustmentAction
+} from './inventoryAdjustments/store.js';
+
+export {
+  isStocktakeLineCounted,
+  STOCKTAKE_STATUS_META,
+  getStocktakeStatusBadgeClass,
+  isStocktakeMovementConflictError,
+  formatStocktakeStatus,
+  formatStocktakeProgress,
+  fetchStocktakes,
+  fetchStocktakeDetail,
+  resetStocktakeDetailSequences,
+  selectStocktake,
+  normalizeStocktakeInput,
+  createStocktakeAction,
+  updateStocktakeHeaderAction,
+  addStocktakeLinesAction,
+  addStocktakeLinesFromStockAction,
+  removeStocktakeLineAction,
+  startStocktakeCountingAction,
+  patchStocktakeInList,
+  STOCKTAKE_VARIANCE_EPSILON,
+  classifyStocktakeLineVariance,
+  calculateStocktakePostSummary,
+  formatStocktakeConflictLineLabel,
+  parseStocktakeConflictLines,
+  getLineUpdateSeqsSize,
+  setStocktakeCountedQuantityAction,
+  refreshStocktakeSystemQuantityAction,
+  postStocktakeAction,
+  cancelStocktakeAction
+} from './stocktakes/store.js';
+
+export {
+  patchStockTransferInList,
+  fetchStockTransfers,
+  fetchStockTransferDetail,
+  createStockTransferAction,
+  updateStockTransferHeaderAction,
+  addStockTransferLineAction,
+  updateStockTransferLineAction,
+  removeStockTransferLineAction,
+  postStockTransferAction,
+  cancelStockTransferAction
+} from './stockTransfers/store.js';
+
 import {
   fetchDepartments,
   createDepartmentAction,
@@ -105,6 +184,74 @@ import {
   confirmPurchaseOrderReceivedAction,
   cancelPurchaseOrderAction
 } from './purchaseOrders/store.js';
+
+import {
+  fetchWarehouses,
+  createWarehouseAction,
+  updateWarehouseAction,
+  setDefaultWarehouseAction,
+  deactivateWarehouseAction,
+  reactivateWarehouseAction
+} from './warehouses/store.js';
+
+import {
+  formatAdjustmentReason,
+  formatAdjustmentStatus,
+  fetchInventoryAdjustments,
+  fetchInventoryAdjustmentDetail,
+  selectInventoryAdjustment,
+  createInventoryAdjustmentAction,
+  updateInventoryAdjustmentHeaderAction,
+  addInventoryAdjustmentLineAction,
+  updateInventoryAdjustmentLineAction,
+  removeInventoryAdjustmentLineAction,
+  postInventoryAdjustmentAction,
+  cancelInventoryAdjustmentAction
+} from './inventoryAdjustments/store.js';
+
+import {
+  isStocktakeLineCounted,
+  STOCKTAKE_STATUS_META,
+  getStocktakeStatusBadgeClass,
+  isStocktakeMovementConflictError,
+  formatStocktakeStatus,
+  formatStocktakeProgress,
+  fetchStocktakes,
+  fetchStocktakeDetail,
+  resetStocktakeDetailSequences,
+  selectStocktake,
+  normalizeStocktakeInput,
+  createStocktakeAction,
+  updateStocktakeHeaderAction,
+  addStocktakeLinesAction,
+  addStocktakeLinesFromStockAction,
+  removeStocktakeLineAction,
+  startStocktakeCountingAction,
+  patchStocktakeInList,
+  STOCKTAKE_VARIANCE_EPSILON,
+  classifyStocktakeLineVariance,
+  calculateStocktakePostSummary,
+  formatStocktakeConflictLineLabel,
+  parseStocktakeConflictLines,
+  getLineUpdateSeqsSize,
+  setStocktakeCountedQuantityAction,
+  refreshStocktakeSystemQuantityAction,
+  postStocktakeAction,
+  cancelStocktakeAction
+} from './stocktakes/store.js';
+
+import {
+  patchStockTransferInList,
+  fetchStockTransfers,
+  fetchStockTransferDetail,
+  createStockTransferAction,
+  updateStockTransferHeaderAction,
+  addStockTransferLineAction,
+  updateStockTransferLineAction,
+  removeStockTransferLineAction,
+  postStockTransferAction,
+  cancelStockTransferAction
+} from './stockTransfers/store.js';
 
 function loadTaskPanelCollapsed() {
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -363,36 +510,6 @@ export function showToast(message) {
       appState.toastMessage = null;
       toastTimer = null;
     }, 3500);
-  }
-}
-
-// Generic request-staleness and in-flight detail sequence management
-const navigationStalenessListeners = new Set();
-
-/**
- * Register a callback to be executed whenever route navigation occurs,
- * allowing detail flows (e.g. stocktakes, purchase orders, inventory adjustments)
- * to invalidate in-flight asynchronous requests and prevent race conditions.
- * @param {() => void} listener
- * @returns {() => void} Unsubscribe function
- */
-export function registerNavigationStalenessListener(listener) {
-  navigationStalenessListeners.add(listener);
-  return () => {
-    navigationStalenessListeners.delete(listener);
-  };
-}
-
-/**
- * Invalidate in-flight detail requests across all registered domain flows
- */
-export function invalidateNavigationStaleness() {
-  for (const listener of navigationStalenessListeners) {
-    try {
-      listener();
-    } catch (e) {
-      console.warn("Error in navigation staleness listener:", e);
-    }
   }
 }
 
@@ -1587,450 +1704,6 @@ export async function recordOpeningInventoryBalanceAction({
   }
 }
 
-/**
- * Fetch warehouses from SQLite / Mock
- * @param {boolean} [includeInactive=true]
- * @returns {Promise<any[]>}
- */
-export async function fetchWarehouses(includeInactive = true) {
-  try {
-    const payload = {};
-    if (includeInactive !== null && includeInactive !== undefined) {
-      payload.include_inactive = Boolean(includeInactive);
-      payload.includeInactive = Boolean(includeInactive);
-    }
-    const list = await invoke('list_warehouses', payload);
-    appState.warehouses = list || [];
-    return appState.warehouses;
-  } catch (err) {
-    console.error("Failed to fetch warehouses:", err);
-    return [];
-  }
-}
-
-/**
- * Create a warehouse
- * @param {string | object} codeOrObj
- * @param {string} [maybeName]
- * @returns {Promise<any>}
- */
-export async function createWarehouseAction(codeOrObj, maybeName) {
-  let rawCode = codeOrObj;
-  let rawName = maybeName;
-  if (codeOrObj && typeof codeOrObj === 'object') {
-    rawCode = codeOrObj.code;
-    rawName = codeOrObj.name;
-  }
-  const trimmedCode = (rawCode || '').trim();
-  const trimmedName = (rawName || '').trim();
-  if (!trimmedCode) throw new Error('倉庫代碼為必填項目');
-  if (!trimmedName) throw new Error('倉庫名稱為必填項目');
-  try {
-    const wh = await invoke('create_warehouse', {
-      code: trimmedCode,
-      name: trimmedName
-    });
-    await fetchWarehouses();
-    showToast(`倉庫「${wh.name} (${wh.code})」建立成功！`);
-    if (typeof appState.createWarehouseSuccessCallback === 'function') {
-      /** @type {any} */
-      const cb = appState.createWarehouseSuccessCallback;
-      appState.createWarehouseSuccessCallback = null;
-      try {
-        await cb(wh);
-      } catch (cbErr) {
-        console.error("Callback error after warehouse creation:", cbErr);
-      }
-    }
-    return wh;
-  } catch (err) {
-    console.error("Failed to create warehouse:", err);
-    throw err;
-  }
-}
-
-/**
- * Update warehouse
- * @param {string} id
- * @param {string} code
- * @param {string} name
- * @returns {Promise<any>}
- */
-export async function updateWarehouseAction(id, code, name) {
-  const trimmedCode = (code || '').trim();
-  const trimmedName = (name || '').trim();
-  if (!trimmedCode) throw new Error('倉庫代碼為必填項目');
-  if (!trimmedName) throw new Error('倉庫名稱為必填項目');
-  try {
-    const wh = await invoke('update_warehouse', {
-      id,
-      code: trimmedCode,
-      name: trimmedName
-    });
-    await fetchWarehouses();
-    showToast(`倉庫「${wh.name}」已更新！`);
-    return wh;
-  } catch (err) {
-    console.error("Failed to update warehouse:", err);
-    throw err;
-  }
-}
-
-/**
- * Set default warehouse
- * @param {string} id
- * @returns {Promise<any>}
- */
-export async function setDefaultWarehouseAction(id) {
-  try {
-    const wh = await invoke('set_default_warehouse', { id });
-    await fetchWarehouses();
-    showToast(`已將「${wh.name}」設為預設倉！`);
-    return wh;
-  } catch (err) {
-    console.error("Failed to set default warehouse:", err);
-    throw err;
-  }
-}
-
-/**
- * Deactivate warehouse
- * @param {string} id
- * @returns {Promise<any>}
- */
-export async function deactivateWarehouseAction(id) {
-  try {
-    const wh = await invoke('deactivate_warehouse', { id });
-    await fetchWarehouses();
-    showToast(`已停用倉庫「${wh.name}」！`);
-    return wh;
-  } catch (err) {
-    console.error("Failed to deactivate warehouse:", err);
-    throw err;
-  }
-}
-
-/**
- * Reactivate warehouse
- * @param {string} id
- * @returns {Promise<any>}
- */
-export async function reactivateWarehouseAction(id) {
-  try {
-    const wh = await invoke('reactivate_warehouse', { id });
-    await fetchWarehouses();
-    showToast(`已重新啟用倉庫「${wh.name}」！`);
-    return wh;
-  } catch (err) {
-    console.error("Failed to reactivate warehouse:", err);
-    throw err;
-  }
-}
-
-// ==========================================
-// Inventory Adjustments (Issue #180, #183)
-// ==========================================
-
-/**
- * Format inventory adjustment reason code to Traditional Chinese
- * @param {string} reason
- * @returns {string}
- */
-export function formatAdjustmentReason(reason) {
-  switch (reason) {
-    case 'damage':
-      return '報廢／損壞';
-    case 'loss':
-      return '盤虧／遺失';
-    case 'found':
-      return '盤盈／尋獲';
-    case 'opening_correction':
-      return '期初更正';
-    case 'other':
-      return '其他';
-    default:
-      return reason || '-';
-  }
-}
-
-/**
- * Format inventory adjustment status to badge label
- * @param {string} status
- * @returns {string}
- */
-export function formatAdjustmentStatus(status) {
-  switch (status) {
-    case 'draft':
-      return '草稿 (draft)';
-    case 'posted':
-      return '已過帳 (posted)';
-    case 'cancelled':
-      return '已取消 (cancelled)';
-    default:
-      return status || '-';
-  }
-}
-
-/**
- * Fetch inventory adjustments list from SQLite / Mock
- * @param {any} [arg1=null]
- * @param {any} [arg2=null]
- * @returns {Promise<any[]>}
- */
-export async function fetchInventoryAdjustments(arg1 = null, arg2 = null) {
-  let status = null;
-  let warehouseId = null;
-
-  if (typeof arg1 === 'object' && arg1 !== null) {
-    status = arg1.status || null;
-    warehouseId = arg1.warehouse_id || arg1.warehouseId || null;
-  } else if (arg1 === 'draft' || arg1 === 'posted' || arg1 === 'cancelled') {
-    status = arg1;
-    warehouseId = arg2;
-  } else if (arg2 === 'draft' || arg2 === 'posted' || arg2 === 'cancelled') {
-    warehouseId = arg1;
-    status = arg2;
-  } else if (arg1 && typeof arg1 === 'string' && (arg1.startsWith('wh_') || !arg2)) {
-    // If only one param or starts with wh_, treat as warehouseId unless it's a status
-    warehouseId = arg1;
-    status = arg2;
-  } else {
-    status = arg1;
-    warehouseId = arg2;
-  }
-
-  try {
-    const payload = {};
-    if (status && status !== 'all') {
-      payload.status = status;
-    }
-    if (warehouseId && String(warehouseId).trim() !== '') {
-      payload.warehouseId = String(warehouseId).trim();
-    }
-    const list = await invoke('list_inventory_adjustments', payload);
-    appState.inventoryAdjustments = list || [];
-    return appState.inventoryAdjustments;
-  } catch (err) {
-    console.error("Failed to fetch inventory adjustments:", err);
-    return [];
-  }
-}
-
-/**
- * Fetch inventory adjustment detail by ID
- * @param {string} adjustmentId
- * @returns {Promise<any>}
- */
-export async function fetchInventoryAdjustmentDetail(adjustmentId) {
-  if (!adjustmentId) return null;
-  try {
-    const detail = await invoke('get_inventory_adjustment', {
-      adjustmentId
-    });
-    appState.currentInventoryAdjustmentDetail = detail;
-    return detail;
-  } catch (err) {
-    console.error("Failed to fetch inventory adjustment detail:", err);
-    throw err;
-  }
-}
-
-/**
- * Select active inventory adjustment and load detail
- * @param {string | null} adjustmentId
- */
-export async function selectInventoryAdjustment(adjustmentId) {
-  appState.selectedInventoryAdjustmentId = adjustmentId;
-  if (adjustmentId) {
-    const detail = await fetchInventoryAdjustmentDetail(adjustmentId);
-    return detail;
-  } else {
-    appState.currentInventoryAdjustmentDetail = null;
-    return null;
-  }
-}
-
-/**
- * Create a new inventory adjustment (draft)
- * @param {object} input
- * @returns {Promise<any>}
- */
-export async function createInventoryAdjustmentAction({
-  warehouse_id,
-  warehouseId,
-  reason_code,
-  reasonCode,
-  note = null,
-  task_id = null,
-  taskId = null,
-  initial_lines,
-  initialLines
-} = {}) {
-  const targetWhId = String(warehouse_id !== undefined ? warehouse_id : (warehouseId !== undefined ? warehouseId : '')).trim();
-  const targetReason = String(reason_code !== undefined ? reason_code : (reasonCode !== undefined ? reasonCode : '')).trim();
-  const lines = initial_lines !== undefined ? initial_lines : initialLines;
-
-  const payload = {
-    warehouseId: targetWhId,
-    reasonCode: targetReason,
-    note: note ? String(note).trim() : null,
-    taskId: task_id || taskId || null
-  };
-  if (lines && Array.isArray(lines)) {
-    payload.initialLines = lines;
-  }
-
-  try {
-    const detail = await invoke('create_inventory_adjustment', payload);
-    appState.currentInventoryAdjustmentDetail = detail;
-    appState.selectedInventoryAdjustmentId = detail.adjustment.id;
-    await fetchInventoryAdjustments();
-    showToast(`已建立調整單「${detail.adjustment.adjustment_number}」！`);
-    return detail.adjustment;
-  } catch (err) {
-    console.error("Failed to create inventory adjustment:", err);
-    throw err;
-  }
-}
-
-/**
- * Update inventory adjustment header
- * @param {string} adjustmentId
- * @param {object} updates
- * @returns {Promise<any>}
- */
-export async function updateInventoryAdjustmentHeaderAction(adjustmentId, {
-  warehouse_id,
-  warehouseId,
-  reason_code,
-  reasonCode,
-  note
-} = {}) {
-  const targetWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
-  const targetReason = reason_code !== undefined ? reason_code : reasonCode;
-
-  try {
-    const detail = await invoke('update_inventory_adjustment_header', {
-      adjustmentId,
-      warehouseId: targetWhId || null,
-      reasonCode: targetReason || null,
-      note: note !== undefined ? note : null
-    });
-    appState.currentInventoryAdjustmentDetail = detail;
-    await fetchInventoryAdjustments();
-    showToast(`已更新調整單表頭！`);
-    return detail;
-  } catch (err) {
-    console.error("Failed to update inventory adjustment header:", err);
-    throw err;
-  }
-}
-
-/**
- * Add a line to inventory adjustment
- * @param {string} adjustmentId
- * @param {string} unitId
- * @param {number} quantityDelta
- * @returns {Promise<any>}
- */
-export async function addInventoryAdjustmentLineAction(adjustmentId, unitId, quantityDelta) {
-  try {
-    const detail = await invoke('add_inventory_adjustment_line', {
-      adjustmentId,
-      unitId,
-      quantityDelta: Number(quantityDelta)
-    });
-    appState.currentInventoryAdjustmentDetail = detail;
-    return detail;
-  } catch (err) {
-    console.error("Failed to add inventory adjustment line:", err);
-    throw err;
-  }
-}
-
-/**
- * Update quantity delta of an adjustment line
- * @param {string} lineId
- * @param {number} quantityDelta
- * @returns {Promise<any>}
- */
-export async function updateInventoryAdjustmentLineAction(lineId, quantityDelta) {
-  try {
-    const detail = await invoke('update_inventory_adjustment_line', {
-      lineId,
-      quantityDelta: Number(quantityDelta)
-    });
-    appState.currentInventoryAdjustmentDetail = detail;
-    return detail;
-  } catch (err) {
-    console.error("Failed to update inventory adjustment line:", err);
-    throw err;
-  }
-}
-
-/**
- * Remove an adjustment line
- * @param {string} arg1
- * @param {string | null} [arg2=null]
- * @returns {Promise<any>}
- */
-export async function removeInventoryAdjustmentLineAction(arg1, arg2 = null) {
-  const targetLineId = arg2 ? String(arg2).trim() : String(arg1).trim();
-  try {
-    const detail = await invoke('remove_inventory_adjustment_line', {
-      lineId: targetLineId
-    });
-    appState.currentInventoryAdjustmentDetail = detail;
-    return detail;
-  } catch (err) {
-    console.error("Failed to remove inventory adjustment line:", err);
-    throw err;
-  }
-}
-
-/**
- * Post inventory adjustment to ledger
- * @param {string} adjustmentId
- * @returns {Promise<any>}
- */
-export async function postInventoryAdjustmentAction(adjustmentId) {
-  try {
-    const detail = await invoke('post_inventory_adjustment', {
-      adjustmentId
-    });
-    appState.currentInventoryAdjustmentDetail = detail;
-    await Promise.all([
-      fetchInventoryAdjustments(),
-      fetchInventoryLevels()
-    ]);
-    showToast(`調整單「${detail.adjustment.adjustment_number}」已過帳，庫存已同步更新！`);
-    return detail.adjustment;
-  } catch (err) {
-    console.error("Failed to post inventory adjustment:", err);
-    throw err;
-  }
-}
-
-/**
- * Cancel a draft inventory adjustment
- * @param {string} adjustmentId
- * @returns {Promise<any>}
- */
-export async function cancelInventoryAdjustmentAction(adjustmentId) {
-  try {
-    const detail = await invoke('cancel_inventory_adjustment', {
-      adjustmentId
-    });
-    appState.currentInventoryAdjustmentDetail = detail;
-    await fetchInventoryAdjustments();
-    showToast(`已取消調整單「${detail.adjustment.adjustment_number}」！`);
-    return detail.adjustment;
-  } catch (err) {
-    console.error("Failed to cancel inventory adjustment:", err);
-    throw err;
-  }
-}
-
 // ==========================================
 // Unit Conversions Actions (Issue #230)
 // ==========================================
@@ -2170,743 +1843,6 @@ export async function cancelUnitConversionAction(conversionId) {
     return ucv;
   } catch (err) {
     console.error("Failed to cancel unit conversion:", err);
-    throw err;
-  }
-}
-
-export const STOCKTAKE_STATUS_META = {
-  draft: { label: '草稿 (draft)', badgeClass: 'badge-gray', progressBadgeClass: null },
-  counting: { label: '盤點中 (counting)', badgeClass: 'badge-sky', progressBadgeClass: 'badge-sky' },
-  posted: { label: '已過帳 (posted)', badgeClass: 'badge-emerald', progressBadgeClass: 'badge-emerald' },
-  cancelled: { label: '已取消 (cancelled)', badgeClass: 'badge-red', progressBadgeClass: null }
-};
-
-/**
- * Get CSS badge class for stocktake status
- * @param {string} status
- * @returns {string}
- */
-export function getStocktakeStatusBadgeClass(status) {
-  return STOCKTAKE_STATUS_META[status]?.badgeClass || 'badge-gray';
-}
-
-/**
- * Check if error is an S-07 concurrent inventory movement error
- * @param {any} err
- * @returns {boolean}
- */
-export function isStocktakeMovementConflictError(err) {
-  if (!err) return false;
-  return err.code === 'MOVEMENTS_DETECTED_DURING_COUNTING';
-}
-
-/**
- * Format stocktake status to badge label
- * @param {string} status
- * @returns {string}
- */
-export function formatStocktakeStatus(status) {
-  return STOCKTAKE_STATUS_META[status]?.label || (status || '-');
-}
-
-/**
- * Format stocktake progress badge and label
- * @param {object} stk
- * @returns {{ type: 'badge' | 'text', badgeClass?: string, label: string }}
- */
-export function formatStocktakeProgress(stk) {
-  if (!stk) return { type: 'text', label: '-' };
-  if (stk.status === 'draft') return { type: 'text', label: '-' };
-  if (stk.status === 'counting') {
-    return {
-      type: 'badge',
-      badgeClass: STOCKTAKE_STATUS_META.counting.progressBadgeClass || 'badge-sky',
-      label: `${stk.counted_count ?? 0} / ${stk.lines_count ?? 0}`
-    };
-  }
-  if (stk.status === 'posted') {
-    return {
-      type: 'badge',
-      badgeClass: STOCKTAKE_STATUS_META.posted.progressBadgeClass || 'badge-emerald',
-      label: `已完成 (${stk.counted_count ?? 0}/${stk.lines_count ?? 0})`
-    };
-  }
-  return { type: 'text', label: '已取消' };
-}
-
-/**
- * Fetch stocktakes with optional filters
- * @param {object | string} [filters={}] - Filter object { status, warehouseId } or legacy status
- * @param {string | null} [legacyWhId=null] - warehouseId if filters is string status
- * @returns {Promise<any[]>}
- */
-export async function fetchStocktakes(filters = {}, legacyWhId = null) {
-  let status = null;
-  let warehouseId = null;
-
-  if (typeof filters === 'object' && filters !== null) {
-    status = filters.status || null;
-    warehouseId = filters.warehouseId || filters.warehouse_id || null;
-  } else if (typeof filters === 'string') {
-    status = filters;
-    warehouseId = legacyWhId;
-  }
-
-  try {
-    const payload = {};
-    if (status && status !== 'all') {
-      payload.status = status;
-    }
-    if (warehouseId && String(warehouseId).trim() !== '' && warehouseId !== 'all') {
-      payload.warehouseId = String(warehouseId).trim();
-    }
-    const list = await invoke('list_stocktakes', payload);
-    appState.stocktakes = list || [];
-    return appState.stocktakes;
-  } catch (err) {
-    console.error("Failed to fetch stocktakes:", err);
-    throw err;
-  }
-}
-
-/**
- * Fetch stocktake detail by ID
- * @param {string} stocktakeId
- * @returns {Promise<any>}
- */
-export async function fetchStocktakeDetail(stocktakeId) {
-  if (!stocktakeId) return null;
-  try {
-    const detail = await invoke('get_stocktake', { stocktakeId });
-    appState.currentStocktakeDetail = detail;
-    return detail;
-  } catch (err) {
-    console.error("Failed to fetch stocktake detail:", err);
-    throw err;
-  }
-}
-
-/**
- * Select active stocktake and load detail
- * @param {string | null} stocktakeId
- */
-export async function selectStocktake(stocktakeId) {
-  resetStocktakeDetailSequences();
-  appState.selectedStocktakeId = stocktakeId;
-  if (stocktakeId) {
-    const detail = await fetchStocktakeDetail(stocktakeId);
-    return detail;
-  } else {
-    appState.currentStocktakeDetail = null;
-    return null;
-  }
-}
-
-/**
- * Normalize dual snake_case / camelCase fields for stocktake inputs.
- * @param {object} [input={}]
- * @returns {{ warehouseId?: string|null, note?: string|null, taskId?: string|null, initialUnitIds?: string[] }}
- */
-export function normalizeStocktakeInput(input = {}) {
-  if (!input || typeof input !== 'object') return {};
-  const res = {};
-  const wh = input.warehouse_id !== undefined ? input.warehouse_id : input.warehouseId;
-  if (wh !== undefined) {
-    res.warehouseId = wh !== null ? String(wh).trim() : null;
-  }
-  if (input.note !== undefined) {
-    res.note = input.note !== null ? String(input.note).trim() : null;
-  }
-  const task = input.task_id !== undefined ? input.task_id : input.taskId;
-  if (task !== undefined) {
-    res.taskId = task ? String(task).trim() : null;
-  }
-  const units = input.initial_unit_ids !== undefined ? input.initial_unit_ids : input.initialUnitIds;
-  if (units !== undefined) {
-    res.initialUnitIds = Array.isArray(units) ? units : [units];
-  }
-  return res;
-}
-
-/**
- * Create a new stocktake (draft)
- * @param {object} input
- * @returns {Promise<any>}
- */
-export async function createStocktakeAction(input = {}) {
-  const norm = normalizeStocktakeInput(input);
-
-  const payload = {
-    warehouseId: norm.warehouseId || '',
-    note: norm.note || null,
-    taskId: norm.taskId || null
-  };
-  if (norm.initialUnitIds) {
-    payload.initialUnitIds = norm.initialUnitIds;
-  }
-
-  try {
-    const detail = await invoke('create_stocktake', payload);
-    appState.currentStocktakeDetail = detail;
-    appState.selectedStocktakeId = detail.stocktake.id;
-    await fetchStocktakes();
-    showToast(`已建立盤點單「${detail.stocktake.stocktake_number}」！`);
-    return detail.stocktake;
-  } catch (err) {
-    console.error("Failed to create stocktake:", err);
-    throw err;
-  }
-}
-
-/**
- * Update stocktake header
- * @param {string} stocktakeId
- * @param {object} updates
- * @returns {Promise<any>}
- */
-export async function updateStocktakeHeaderAction(stocktakeId, updates = {}) {
-  const norm = normalizeStocktakeInput(updates);
-
-  try {
-    const payload = { stocktakeId };
-    if (norm.warehouseId !== undefined) {
-      payload.warehouseId = norm.warehouseId || null;
-    }
-    if (norm.note !== undefined) {
-      payload.note = norm.note;
-    }
-    const detail = await invoke('update_stocktake_header', { payload });
-    appState.currentStocktakeDetail = detail;
-    patchStocktakeInList(detail.stocktake);
-    showToast(`已更新盤點單表頭！`);
-    return detail;
-  } catch (err) {
-    console.error("Failed to update stocktake header:", err);
-    throw err;
-  }
-}
-
-/**
- * Add product units to a draft stocktake
- * @param {string} stocktakeId
- * @param {string[]} unitIds
- * @returns {Promise<any>}
- */
-export async function addStocktakeLinesAction(stocktakeId, unitIds) {
-  const list = Array.isArray(unitIds) ? unitIds : [unitIds];
-  try {
-    const detail = await invoke('add_stocktake_lines', {
-      stocktakeId,
-      unitIds: list
-    });
-    appState.currentStocktakeDetail = detail;
-    return detail;
-  } catch (err) {
-    console.error("Failed to add stocktake lines:", err);
-    throw err;
-  }
-}
-
-/**
- * Add all active inventory items from warehouse into draft stocktake (S-04)
- * @param {string} stocktakeId
- * @returns {Promise<any>}
- */
-export async function addStocktakeLinesFromStockAction(stocktakeId) {
-  try {
-    const detail = await invoke('add_stocktake_lines_from_stock', {
-      stocktakeId
-    });
-    appState.currentStocktakeDetail = detail;
-    showToast(`已帶入此倉現有庫存品項！`);
-    return detail;
-  } catch (err) {
-    console.error("Failed to add stocktake lines from stock:", err);
-    throw err;
-  }
-}
-
-/**
- * Remove a stocktake line
- * @param {string} lineId
- * @returns {Promise<any>}
- */
-export async function removeStocktakeLineAction(lineId) {
-  try {
-    const detail = await invoke('remove_stocktake_line', {
-      lineId
-    });
-    appState.currentStocktakeDetail = detail;
-    return detail;
-  } catch (err) {
-    console.error("Failed to remove stocktake line:", err);
-    throw err;
-  }
-}
-
-/**
- * Start counting for a draft stocktake (transitions to counting, snapshots balances)
- * @param {string} stocktakeId
- * @returns {Promise<any>}
- */
-export async function startStocktakeCountingAction(stocktakeId) {
-  try {
-    const detail = await invoke('start_stocktake_counting', {
-      stocktakeId
-    });
-    appState.currentStocktakeDetail = detail;
-    patchStocktakeInList(detail.stocktake);
-    showToast(`盤點單「${detail.stocktake.stocktake_number}」已開始盤點！`);
-    return detail;
-  } catch (err) {
-    console.error("Failed to start stocktake counting:", err);
-    throw err;
-  }
-}
-
-/**
- * Update a single stocktake item in appState.stocktakes in-place
- * @param {any} updatedStocktake
- */
-export function patchStocktakeInList(updatedStocktake) {
-  if (!updatedStocktake || !Array.isArray(appState.stocktakes)) return;
-  const idx = appState.stocktakes.findIndex(s => s.id === updatedStocktake.id);
-  if (idx !== -1) {
-    appState.stocktakes[idx] = { ...appState.stocktakes[idx], ...updatedStocktake };
-  }
-}
-
-// Re-export single source of truth from tauri.js
-export { isStocktakeLineCounted };
-
-export const STOCKTAKE_VARIANCE_EPSILON = 1e-6;
-
-/**
- * Classify variance delta for a single stocktake line
- * @param {number|null|undefined} countedQuantity
- * @param {number|null|undefined} systemQuantity
- * @returns {'missing' | 'surplus' | 'shortage' | 'matched'}
- */
-export function classifyStocktakeLineVariance(countedQuantity, systemQuantity) {
-  if (!isStocktakeLineCounted(countedQuantity)) {
-    return 'missing';
-  }
-  const delta = Number(countedQuantity) - (Number(systemQuantity) || 0);
-  if (delta > STOCKTAKE_VARIANCE_EPSILON) {
-    return 'surplus';
-  }
-  if (delta < -STOCKTAKE_VARIANCE_EPSILON) {
-    return 'shortage';
-  }
-  return 'matched';
-}
-
-/**
- * Calculate post summary metrics for a list of stocktake lines
- * @param {Array<any>} lines
- * @returns {{ surplus: number, shortage: number, matched: number, missing: number }}
- */
-export function calculateStocktakePostSummary(lines = []) {
-  const summary = { surplus: 0, shortage: 0, matched: 0, missing: 0 };
-  for (const line of (lines || [])) {
-    const status = classifyStocktakeLineVariance(line.counted_quantity, line.system_quantity);
-    summary[status]++;
-  }
-  return summary;
-}
-
-/**
- * Format a bracketed conflict line snapshot label for S-07 conflict reporting and matching.
- * @param {any} line
- * @returns {string}
- */
-export function formatStocktakeConflictLineLabel(line) {
-  return `〔${line?.product_name_snapshot ?? ''}／${line?.variant_name_snapshot ?? ''}／${line?.unit_name_snapshot ?? ''}〕`;
-}
-
-/**
- * Extract affected line IDs from S-07 concurrency conflict error or message.
- * Prioritizes structured `affected_line_ids` / `affectedLineIds` from backend payload.
- * @param {any} errOrMsg
- * @param {Array<any>} lines
- * @returns {string[]} matchedLineIds
- */
-export function parseStocktakeConflictLines(errOrMsg, lines = []) {
-  if (!errOrMsg || !Array.isArray(lines) || lines.length === 0) {
-    return [];
-  }
-  if (typeof errOrMsg === 'object') {
-    const structuredIds = Array.isArray(errOrMsg.affected_line_ids)
-      ? errOrMsg.affected_line_ids
-      : (Array.isArray(errOrMsg.affectedLineIds) ? errOrMsg.affectedLineIds : null);
-    if (structuredIds) {
-      const idSet = new Set(structuredIds);
-      return lines.filter(l => l && idSet.has(l.id)).map(l => l.id);
-    }
-  }
-  return [];
-}
-
-let stocktakeDetailSeq = 0;
-const lineUpdateSeqs = new Map();
-
-/**
- * Reset and invalidate stocktake in-flight detail requests and line updates.
- */
-export function resetStocktakeDetailSequences() {
-  ++stocktakeDetailSeq;
-  lineUpdateSeqs.clear();
-}
-
-// Automatically subscribe stocktake detail flow to route navigation invalidation
-registerNavigationStalenessListener(resetStocktakeDetailSequences);
-
-/**
- * Return current number of tracked in-flight/active line sequence entries (for diagnostics/testing)
- * @returns {number}
- */
-export function getLineUpdateSeqsSize() {
-  return lineUpdateSeqs.size;
-}
-
-/**
- * Set counted quantity for a specific stocktake line
- * @param {string} lineId
- * @param {number | string | null} [countedQuantity=null]
- * @returns {Promise<any>}
- */
-export async function setStocktakeCountedQuantityAction(lineId, countedQuantity) {
-  const currentSeq = ++stocktakeDetailSeq;
-  lineUpdateSeqs.set(lineId, currentSeq);
-  try {
-    const payload = { lineId };
-    if (countedQuantity !== undefined) {
-      payload.countedQuantity = (countedQuantity === null || countedQuantity === '')
-        ? null
-        : Number(countedQuantity);
-    }
-    const updatedLine = await invoke('set_stocktake_counted_quantity', { payload });
-
-    // Guard against navigation / stocktake switching during in-flight request
-    const activeStocktake = appState.currentStocktakeDetail?.stocktake;
-    const isMatchingStocktake = activeStocktake && (
-      !updatedLine?.stocktake_id || updatedLine.stocktake_id === activeStocktake.id
-    );
-
-    if (isMatchingStocktake) {
-      const isLatestForLine = lineUpdateSeqs.get(lineId) === currentSeq;
-      if (isLatestForLine) {
-        // Targeted in-place per-line patch!
-        // Does NOT reassign appState.currentStocktakeDetail, preventing unblurred input loss on sibling rows
-        if (Array.isArray(appState.currentStocktakeDetail.lines)) {
-          const line = appState.currentStocktakeDetail.lines.find(l => l.id === lineId);
-          if (line) {
-            line.counted_quantity = updatedLine?.counted_quantity !== undefined ? updatedLine.counted_quantity : (payload.countedQuantity ?? null);
-          }
-        }
-      }
-    }
-
-    return updatedLine;
-  } catch (err) {
-    console.error("Failed to set stocktake counted quantity:", err);
-    throw err;
-  }
-}
-
-/**
- * Refresh system quantity snapshots for affected lines (S-08)
- * @param {string} stocktakeId
- * @param {string[]} lineIds
- * @returns {Promise<any>}
- */
-export async function refreshStocktakeSystemQuantityAction(stocktakeId, lineIds) {
-  const list = Array.isArray(lineIds) ? lineIds : [lineIds];
-  try {
-    const detail = await invoke('refresh_stocktake_system_quantity', {
-      stocktakeId,
-      lineIds: list
-    });
-    appState.currentStocktakeDetail = detail;
-    showToast(`已重新取得系統量快照，相關品項實盤量已清空，請重新清點！`);
-    return detail;
-  } catch (err) {
-    console.error("Failed to refresh stocktake system quantity:", err);
-    throw err;
-  }
-}
-
-/**
- * Post stocktake to ledger (transitions to posted, creates movement ledger rows)
- * @param {string} stocktakeId
- * @returns {Promise<any>}
- */
-export async function postStocktakeAction(stocktakeId) {
-  try {
-    const detail = await invoke('post_stocktake', {
-      stocktakeId
-    });
-    appState.currentStocktakeDetail = detail;
-    await Promise.all([
-      fetchStocktakes(),
-      fetchInventoryLevels()
-    ]);
-    showToast(`盤點單「${detail.stocktake.stocktake_number}」已過帳，庫存已同步更新！`);
-    return detail.stocktake;
-  } catch (err) {
-    console.error("Failed to post stocktake:", err);
-    const rawErr = /** @type {any} */ (err);
-    if (rawErr && typeof rawErr === 'object' && !(rawErr instanceof Error) && rawErr.message) {
-      const wrapped = /** @type {any} */ (new Error(rawErr.message));
-      if (rawErr.code) wrapped.code = rawErr.code;
-      if (Array.isArray(rawErr.affected_line_ids)) wrapped.affected_line_ids = rawErr.affected_line_ids;
-      if (Array.isArray(rawErr.affectedLineIds)) wrapped.affectedLineIds = rawErr.affectedLineIds;
-      throw wrapped;
-    }
-    throw err;
-  }
-}
-
-/**
- * Cancel a stocktake (from draft or counting)
- * @param {string} stocktakeId
- * @returns {Promise<any>}
- */
-export async function cancelStocktakeAction(stocktakeId) {
-  try {
-    const detail = await invoke('cancel_stocktake', {
-      stocktakeId
-    });
-    appState.currentStocktakeDetail = detail;
-    patchStocktakeInList(detail.stocktake);
-    showToast(`已取消盤點單「${detail.stocktake.stocktake_number}」！`);
-    return detail.stocktake;
-  } catch (err) {
-    console.error("Failed to cancel stocktake:", err);
-    throw err;
-  }
-}
-
-// ==========================================
-// Stock Transfers (Issue #185)
-// ==========================================
-
-/**
- * Patch a transfer in appState.stockTransfers in-place
- * @param {any} updatedTransfer
- */
-export function patchStockTransferInList(updatedTransfer) {
-  if (!updatedTransfer || !Array.isArray(appState.stockTransfers)) return;
-  const idx = appState.stockTransfers.findIndex(t => t.id === updatedTransfer.id);
-  if (idx !== -1) {
-    appState.stockTransfers[idx] = { ...appState.stockTransfers[idx], ...updatedTransfer };
-  }
-}
-
-/**
- * Fetch list of stock transfers with optional filters
- * @param {{ status?: string, fromWarehouseId?: string, toWarehouseId?: string }} [filters]
- * @returns {Promise<any[]>}
- */
-export async function fetchStockTransfers(filters = {}) {
-  try {
-    const payload = {};
-    if (filters.status && String(filters.status).trim()) {
-      payload.status = String(filters.status).trim();
-    }
-    if (filters.fromWarehouseId && String(filters.fromWarehouseId).trim()) {
-      payload.fromWarehouseId = String(filters.fromWarehouseId).trim();
-    }
-    if (filters.toWarehouseId && String(filters.toWarehouseId).trim()) {
-      payload.toWarehouseId = String(filters.toWarehouseId).trim();
-    }
-    const list = await invoke('list_stock_transfers', payload);
-    appState.stockTransfers = list || [];
-    return appState.stockTransfers;
-  } catch (err) {
-    console.error("Failed to fetch stock transfers:", err);
-    throw err;
-  }
-}
-
-/**
- * Fetch detail of a single stock transfer
- * @param {string} transferId
- * @returns {Promise<any>}
- */
-export async function fetchStockTransferDetail(transferId) {
-  try {
-    const detail = await invoke('get_stock_transfer', { transferId });
-    appState.currentStockTransferDetail = detail;
-    appState.selectedStockTransferId = detail.transfer.id;
-    patchStockTransferInList(detail.transfer);
-    return detail;
-  } catch (err) {
-    console.error("Failed to fetch stock transfer detail:", err);
-    throw err;
-  }
-}
-
-/**
- * Create a new stock transfer
- * @param {{ fromWarehouseId: string, toWarehouseId: string, note?: string | null, taskId?: string | null, initialLines?: any[] }} params
- * @returns {Promise<any>}
- */
-export async function createStockTransferAction({
-  fromWarehouseId,
-  toWarehouseId,
-  note = null,
-  taskId = null,
-  initialLines = []
-}) {
-  try {
-    const payload = {
-      fromWarehouseId,
-      toWarehouseId,
-      note: note || null,
-      taskId: taskId || null,
-      initialLines: Array.isArray(initialLines) && initialLines.length > 0 ? initialLines : null
-    };
-    const detail = await invoke('create_stock_transfer', payload);
-    appState.currentStockTransferDetail = detail;
-    appState.selectedStockTransferId = detail.transfer.id;
-    appState.stockTransfers = [detail.transfer, ...appState.stockTransfers.filter(t => t.id !== detail.transfer.id)];
-    showToast(`調撥單「${detail.transfer.transfer_number}」建立成功！`);
-    return detail;
-  } catch (err) {
-    console.error("Failed to create stock transfer:", err);
-    throw err;
-  }
-}
-
-/**
- * Update stock transfer header
- * @param {{ transferId: string, fromWarehouseId?: string, toWarehouseId?: string, note?: string|null }} params
- * @returns {Promise<any>}
- */
-export async function updateStockTransferHeaderAction({
-  transferId,
-  fromWarehouseId,
-  toWarehouseId,
-  note
-}) {
-  try {
-    const payload = {
-      transferId,
-      fromWarehouseId: fromWarehouseId !== undefined ? fromWarehouseId : null,
-      toWarehouseId: toWarehouseId !== undefined ? toWarehouseId : null,
-      note: note !== undefined ? note : null
-    };
-    const detail = await invoke('update_stock_transfer_header', payload);
-    appState.currentStockTransferDetail = detail;
-    patchStockTransferInList(detail.transfer);
-    showToast("調撥單表頭更新成功！");
-    return detail;
-  } catch (err) {
-    console.error("Failed to update stock transfer header:", err);
-    throw err;
-  }
-}
-
-/**
- * Add a line to a draft stock transfer
- * @param {string} transferId
- * @param {string} unitId
- * @param {number} quantity
- * @returns {Promise<any>}
- */
-export async function addStockTransferLineAction(transferId, unitId, quantity) {
-  try {
-    const detail = await invoke('add_stock_transfer_line', {
-      transferId,
-      unitId,
-      quantity: Number(quantity)
-    });
-    appState.currentStockTransferDetail = detail;
-    patchStockTransferInList(detail.transfer);
-    showToast("新增調撥明細成功！");
-    return detail;
-  } catch (err) {
-    console.error("Failed to add stock transfer line:", err);
-    throw err;
-  }
-}
-
-/**
- * Update quantity of a line in a draft stock transfer
- * @param {string} lineId
- * @param {number} quantity
- * @returns {Promise<any>}
- */
-export async function updateStockTransferLineAction(lineId, quantity) {
-  try {
-    const detail = await invoke('update_stock_transfer_line', {
-      lineId,
-      quantity: Number(quantity)
-    });
-    appState.currentStockTransferDetail = detail;
-    patchStockTransferInList(detail.transfer);
-    showToast("調撥數量更新成功！");
-    return detail;
-  } catch (err) {
-    console.error("Failed to update stock transfer line:", err);
-    throw err;
-  }
-}
-
-/**
- * Remove a line from a draft stock transfer
- * @param {string} lineId
- * @returns {Promise<any>}
- */
-export async function removeStockTransferLineAction(lineId) {
-  try {
-    const detail = await invoke('remove_stock_transfer_line', { lineId });
-    appState.currentStockTransferDetail = detail;
-    patchStockTransferInList(detail.transfer);
-    showToast("已移除調撥明細！");
-    return detail;
-  } catch (err) {
-    console.error("Failed to remove stock transfer line:", err);
-    throw err;
-  }
-}
-
-/**
- * Post a stock transfer
- * @param {string} transferId
- * @returns {Promise<any>}
- */
-export async function postStockTransferAction(transferId) {
-  try {
-    const detail = await invoke('post_stock_transfer', { transferId });
-    appState.currentStockTransferDetail = detail;
-    patchStockTransferInList(detail.transfer);
-    showToast(`調撥單「${detail.transfer.transfer_number}」已成功過帳！`);
-    // Refresh inventory levels and movements
-    fetchInventoryLevels().catch(() => {});
-    fetchInventoryMovements().catch(() => {});
-    return detail;
-  } catch (err) {
-    console.error("Failed to post stock transfer:", err);
-    throw err;
-  }
-}
-
-/**
- * Cancel a stock transfer
- * @param {string} transferId
- * @returns {Promise<any>}
- */
-export async function cancelStockTransferAction(transferId) {
-  try {
-    const detail = await invoke('cancel_stock_transfer', { transferId });
-    appState.currentStockTransferDetail = detail;
-    patchStockTransferInList(detail.transfer);
-    showToast(`已取消調撥單「${detail.transfer.transfer_number}」！`);
-    return detail;
-  } catch (err) {
-    console.error("Failed to cancel stock transfer:", err);
     throw err;
   }
 }
