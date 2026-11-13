@@ -25,6 +25,7 @@
  * | TC-ISO-B-04 | 夥伴名稱為純空白 `"   "` | Boundary – whitespace | 拋出驗證錯誤 | 邊界防禦 |
  * | TC-ISO-B-05 | 查詢未知/未註冊租戶之部門與夥伴資料 | Boundary – 未知租戶 | 依 Session active tenant 安全回傳，不拋出未捕獲崩潰 | 隔離安全防禦 |
  * | TC-ISO-B-06 | 查詢時租戶 ID 為 NULL 或純空白參數 | Boundary – NULL / empty | 依 Session fallback 安全處理，不洩漏任何跨租戶資料 | 邊界防禦 |
+ * | TC-ISO-CREATE-01 | 建立新租戶（create-tenant）後 resolveMockActiveTenantId 立即指向新租戶並同步 storage | Equivalence – 建立租戶狀態連動 | resolveMockActiveTenantId 回傳新租戶，storage 與預設部門皆歸屬新租戶 | 修復 create-tenant saveStorage 回歸 |
  */
 
 import test from 'node:test';
@@ -38,10 +39,11 @@ if (typeof globalThis.$state === 'undefined') {
 const {
   appState,
   login,
-  selectTenantAction
+  selectTenantAction,
+  createTenantAction
 } = await import('../src/lib/store.svelte.js');
 
-const { invoke } = await import('../src/lib/tauri.js');
+const { invoke, resolveMockActiveTenantId, loadStorage } = await import('../src/lib/tauri.js');
 
 // Helper to ensure authenticated state in test suite
 async function ensureAuthenticated() {
@@ -553,4 +555,51 @@ test('TC-ISO-PROD-03: Cross-tenant variant mutation is blocked (Horizontal Privi
     },
     /Product not found/
   );
+});
+
+test('TC-ISO-CREATE-01: Create tenant updates mock storage and active tenant resolution immediately', async () => {
+  // Given: Authenticated user with existing tenant
+  await ensureAuthenticated();
+  const initialTenant = resolveMockActiveTenantId();
+  assert.equal(initialTenant, 'tnt_mock_1');
+
+  // Simulate browser environment with window.localStorage
+  const storageMap = new Map();
+  const originalWindow = globalThis.window;
+  globalThis.window = {
+    localStorage: {
+      getItem: (key) => (storageMap.has(key) ? storageMap.get(key) : null),
+      setItem: (key, val) => storageMap.set(key, String(val)),
+      removeItem: (key) => storageMap.delete(key),
+      clear: () => storageMap.clear()
+    }
+  };
+
+  try {
+    const uniqueCode = `tnt_code_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+    // When: Creating a new tenant via createTenantAction
+    await createTenantAction('新創科技股份有限公司', '新創科技', uniqueCode, '12345678');
+
+    // Then: 1. resolveMockActiveTenantId immediately resolves to the new tenant ID
+    const newTenantId = resolveMockActiveTenantId();
+    assert.ok(newTenantId.startsWith('tnt_'), `Expected tenant ID prefix tnt_, got: ${newTenantId}`);
+    assert.notEqual(newTenantId, 'tnt_mock_1');
+
+    // Then: 2. localStorage has agent_erp_mock_session synced with the new tenant ID
+    const savedSessionRaw = globalThis.window.localStorage.getItem('agent_erp_mock_session');
+    assert.ok(savedSessionRaw, 'agent_erp_mock_session should be saved to localStorage');
+    const savedSession = JSON.parse(savedSessionRaw);
+    assert.equal(savedSession.active_tenant_id, newTenantId);
+
+    // Then: 3. Department listing for active tenant returns newly seeded default departments belonging to newTenantId
+    const depts = await invoke('list_departments');
+    assert.ok(Array.isArray(depts));
+    assert.ok(depts.length > 0, 'New tenant should have seeded default departments');
+    assert.ok(depts.every(d => d.tenant_id === newTenantId), 'All departments must belong to newTenantId');
+  } finally {
+    // Cleanup: restore original window state and reset tenant to tnt_mock_1
+    globalThis.window = originalWindow;
+    await selectTenantAction('tnt_mock_1');
+  }
 });

@@ -3,20 +3,20 @@
  * @description Task-Driven Workflow Registry and exports.
  */
 
-import { departmentAgentProfile } from './departments.js';
+import { departmentAgentProfile } from '../departments/workflow.js';
 import {
   customerCreateBasicProfileAgentProfile,
   vendorCreateBasicProfileAgentProfile
-} from './partners.js';
-import { productManagementAgentProfile } from './products.js';
+} from '../partners/workflow.js';
+import { productManagementAgentProfile } from '../products/workflow.js';
 import { purchaseOrderAgentProfile } from './purchaseOrders.js';
 import { isKnownDomain } from './domains.js';
 
 export * from './types.js';
 export * from './harness.js';
-export * from './departments.js';
-export * from './partners.js';
-export * from './products.js';
+export * from '../departments/workflow.js';
+export * from '../partners/workflow.js';
+export * from '../products/workflow.js';
 export * from './purchaseOrders.js';
 export * from './domains.js';
 
