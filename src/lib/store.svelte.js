@@ -593,15 +593,18 @@ export function navigate(path) {
 }
 
 export function getWorkspaceLabel(workspace) {
-  if (workspace === 'agent') return 'AI 助理對話';
-  if (workspace === 'settings') return '系統設定';
-  if (workspace === 'purchase-orders') return '採購單';
-  if (workspace === 'inventory') return '庫存查詢';
-  if (workspace === 'warehouses' || workspace === 'warehouse') return '倉庫管理';
-  if (workspace === 'accounts-payable') return '應付帳款';
-  if (workspace === 'vendor-bills' || workspace === 'bills') return '請款單';
-  if (workspace === 'quotes' || workspace === 'quote') return '報價單';
-  if (workspace === 'sales-orders' || workspace === 'sales-order') return '銷售單';
+  const ws = (typeof workspace === 'string' && workspace.startsWith('/app/'))
+    ? workspace.slice(5)
+    : workspace;
+  if (ws === 'agent') return 'AI 助理對話';
+  if (ws === 'settings') return '系統設定';
+  if (ws === 'purchase-orders') return '採購單';
+  if (ws === 'inventory') return '庫存查詢';
+  if (ws === 'warehouses' || ws === 'warehouse') return '倉庫管理';
+  if (ws === 'accounts-payable') return '應付帳款';
+  if (ws === 'vendor-bills' || ws === 'bills') return '請款單';
+  if (ws === 'quotes' || ws === 'quote') return '報價單';
+  if (ws === 'sales-orders' || ws === 'sales-order') return '銷售單';
   return '業務工作區';
 }
 

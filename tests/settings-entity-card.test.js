@@ -37,7 +37,8 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
 const componentPath = path.join(rootDir, 'src/lib/components/SettingsEntityCard.svelte');
-const appPath = path.join(rootDir, 'src/App.svelte');
+const settingsWorkspacePath = path.join(rootDir, 'src/lib/settings/Workspace.svelte');
+const appPath = fs.existsSync(settingsWorkspacePath) ? settingsWorkspacePath : path.join(rootDir, 'src/App.svelte');
 
 test('TC-SEC-N-01: SettingsEntityCard file exists and defines core props contract', () => {
   // Given: Preconditions - SettingsEntityCard component file in src/lib/components
@@ -188,7 +189,7 @@ test('TC-INT-MEM-01: Integration - App.svelte Member Management card uses Settin
 
   // When:  Operation to execute - Inspect Member Management card in App.svelte
   // Then:  Expected result - Uses SettingsEntityCard with title, onRefresh, emptyMessage, and snippet form
-  assert.match(appContent, /import SettingsEntityCard from '\.\/lib\/components\/SettingsEntityCard\.svelte';/, 'SettingsEntityCard must be imported in App.svelte');
+  assert.match(appContent, /import SettingsEntityCard from ['"](\.\/lib|\.\.)\/components\/SettingsEntityCard\.svelte['"];/, 'SettingsEntityCard must be imported');
   assert.match(appContent, /<SettingsEntityCard\s+title="成員與角色管理 \(Member & Role Management\)"/, 'Member card must use SettingsEntityCard');
   assert.match(appContent, /onRefresh=\{fetchMembers\}/, 'Member card must bind onRefresh to fetchMembers');
   assert.match(appContent, /refreshLabel="重新整理成員"/, 'Member card must set refreshLabel to 重新整理成員');
