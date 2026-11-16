@@ -62,8 +62,8 @@
   import VendorBillsWorkspace from './lib/components/VendorBillsWorkspace.svelte';
   import WarehouseWorkspace from './lib/warehouses/Workspace.svelte';
   import CreateWarehouseModal from './lib/warehouses/CreateWarehouseModal.svelte';
-  import QuotesWorkspace from './lib/components/QuotesWorkspace.svelte';
-  import SalesOrdersWorkspace from './lib/components/SalesOrdersWorkspace.svelte';
+  import QuotesWorkspace from './lib/quotes/Workspace.svelte';
+  import SalesOrdersWorkspace from './lib/salesOrders/Workspace.svelte';
 
   let activeTab = $derived(appState.activeWorkspace);
   let isNotificationOpen = $state(false);
