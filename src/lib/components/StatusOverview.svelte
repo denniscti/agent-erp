@@ -1,5 +1,5 @@
 <script>
-  import { appState, setTaskPanelCollapsed } from '../store.svelte.js';
+  import { appState, setTaskPanelCollapsed, navigate } from '../store.svelte.js';
 
   let pendingTasksCount = $derived(
     appState.tasks.filter(t => t.status === 'pending' || t.status === 'in_progress').length
@@ -14,11 +14,12 @@
     if (appState.notifications.length > 0) {
       return appState.notifications.map(n => ({
         id: n.id,
-        level: n.level || 'alert',
-        dot: n.level === 'warning' ? '🟡' : '🔴',
+        level: n.level || n.type || 'alert',
+        dot: (n.level === 'warning' || n.type === 'warning') ? '🟡' : ((n.level === 'info' || n.type === 'info') ? '🔵' : '🔴'),
         title: n.title,
         message: n.message,
-        time: n.time || '剛剛'
+        time: n.time || '剛剛',
+        action: n.action || null
       }));
     }
     return [];
@@ -73,6 +74,22 @@
               <p class="notif-card-desc">
                 {notif.message}{notif.time ? ` · ${notif.time}` : ''}
               </p>
+              {#if notif.action}
+                <div style="margin-top: 6px;">
+                  <button
+                    type="button"
+                    class="btn btn-xs"
+                    onclick={() => {
+                      if (notif.action.target) {
+                        navigate(notif.action.target.startsWith('/app/') ? notif.action.target : `/app/${notif.action.target}`);
+                      }
+                    }}
+                    style="padding: 2px 8px; font-size: 0.72rem; border-radius: 4px; border: 1px solid rgba(0, 240, 255, 0.4); background: rgba(0, 240, 255, 0.08); color: var(--accent-cyan); cursor: pointer;"
+                  >
+                    {notif.action.label || '前往處理'} ↗
+                  </button>
+                </div>
+              {/if}
             </div>
           {/each}
         </div>

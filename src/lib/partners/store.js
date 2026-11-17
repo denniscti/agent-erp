@@ -31,7 +31,7 @@ export async function fetchPartners(filter = {}) {
 
 /**
  * Create a partner / customer
- * @param {string | { name: string, tax_id?: string, taxId?: string, is_customer?: boolean, isCustomer?: boolean, is_vendor?: boolean, isVendor?: boolean, payment_terms_type?: string | null, paymentTermsType?: string | null, payment_terms_days?: number | string | null, paymentTermsDays?: number | string | null }} input
+ * @param {string | { name: string, tax_id?: string, taxId?: string, is_customer?: boolean, isCustomer?: boolean, is_vendor?: boolean, isVendor?: boolean, payment_terms_type?: string | null, paymentTermsType?: string | null, payment_terms_days?: number | string | null, paymentTermsDays?: number | string | null, collection_terms_type?: string | null, collectionTermsType?: string | null, collection_terms_days?: number | string | null, collectionTermsDays?: number | string | null, requested_collection_terms_note?: string | null, requestedCollectionTermsNote?: string | null, invoice_issuance_mode?: string | null, invoiceIssuanceMode?: string | null }} input
  * @param {string | null} [taxId]
  * @returns {Promise<any>}
  */
@@ -83,6 +83,20 @@ export async function createPartnerAction(input, taxId = null) {
     ? (input.payment_terms_days !== undefined ? input.payment_terms_days : input.paymentTermsDays)
     : undefined;
 
+  const rawColType = typeof input === 'object' && input !== null
+    ? (input.collection_terms_type !== undefined ? input.collection_terms_type : input.collectionTermsType)
+    : undefined;
+  const rawColDays = typeof input === 'object' && input !== null
+    ? (input.collection_terms_days !== undefined ? input.collection_terms_days : input.collectionTermsDays)
+    : undefined;
+
+  const rawNote = typeof input === 'object' && input !== null
+    ? (input.requested_collection_terms_note !== undefined ? input.requested_collection_terms_note : input.requestedCollectionTermsNote)
+    : undefined;
+  const rawInvoiceMode = typeof input === 'object' && input !== null
+    ? (input.invoice_issuance_mode !== undefined ? input.invoice_issuance_mode : input.invoiceIssuanceMode)
+    : undefined;
+
   try {
     const partner = await invoke('create_partner', {
       name,
@@ -95,7 +109,15 @@ export async function createPartnerAction(input, taxId = null) {
       payment_terms_type: rawTermsType,
       paymentTermsType: rawTermsType,
       payment_terms_days: rawTermsDays !== undefined && rawTermsDays !== null && rawTermsDays !== '' ? Number(rawTermsDays) : undefined,
-      paymentTermsDays: rawTermsDays !== undefined && rawTermsDays !== null && rawTermsDays !== '' ? Number(rawTermsDays) : undefined
+      paymentTermsDays: rawTermsDays !== undefined && rawTermsDays !== null && rawTermsDays !== '' ? Number(rawTermsDays) : undefined,
+      collection_terms_type: rawColType,
+      collectionTermsType: rawColType,
+      collection_terms_days: rawColDays !== undefined && rawColDays !== null && rawColDays !== '' ? Number(rawColDays) : undefined,
+      collectionTermsDays: rawColDays !== undefined && rawColDays !== null && rawColDays !== '' ? Number(rawColDays) : undefined,
+      requested_collection_terms_note: rawNote,
+      requestedCollectionTermsNote: rawNote,
+      invoice_issuance_mode: rawInvoiceMode,
+      invoiceIssuanceMode: rawInvoiceMode
     });
     await fetchPartners();
     if (is_vendor && !is_customer) {
@@ -144,7 +166,7 @@ export async function fetchVendors() {
 
 /**
  * Update an existing partner's name, tax_id, and/or payment terms
- * @param {{ id: string, name?: string, taxId?: string, tax_id?: string, payment_terms_type?: string | null, paymentTermsType?: string | null, payment_terms_days?: number | string | null, paymentTermsDays?: number | string | null, clear_payment_terms?: boolean, clearPaymentTerms?: boolean }} input
+ * @param {{ id: string, name?: string, taxId?: string, tax_id?: string, payment_terms_type?: string | null, paymentTermsType?: string | null, payment_terms_days?: number | string | null, paymentTermsDays?: number | string | null, clear_payment_terms?: boolean, clearPaymentTerms?: boolean, collection_terms_type?: string | null, collectionTermsType?: string | null, collection_terms_days?: number | string | null, collectionTermsDays?: number | string | null, clear_collection_terms?: boolean, clearCollectionTerms?: boolean, requested_collection_terms_note?: string | null, requestedCollectionTermsNote?: string | null, clear_requested_collection_terms_note?: boolean, clearRequestedCollectionTermsNote?: boolean, invoice_issuance_mode?: string | null, invoiceIssuanceMode?: string | null }} input
  * @returns {Promise<any>}
  */
 export async function updatePartnerAction(input) {
@@ -193,6 +215,37 @@ export async function updatePartnerAction(input) {
   if (input.clear_payment_terms !== undefined || input.clearPaymentTerms !== undefined) {
     payload.clear_payment_terms = input.clear_payment_terms !== undefined ? input.clear_payment_terms : input.clearPaymentTerms;
     payload.clearPaymentTerms = payload.clear_payment_terms;
+  }
+
+  const rawColType = input.collection_terms_type !== undefined ? input.collection_terms_type : input.collectionTermsType;
+  if (rawColType !== undefined) {
+    payload.collection_terms_type = rawColType;
+    payload.collectionTermsType = rawColType;
+  }
+  const rawColDays = input.collection_terms_days !== undefined ? input.collection_terms_days : input.collectionTermsDays;
+  if (rawColDays !== undefined) {
+    payload.collection_terms_days = rawColDays !== null && rawColDays !== '' ? Number(rawColDays) : null;
+    payload.collectionTermsDays = payload.collection_terms_days;
+  }
+  if (input.clear_collection_terms !== undefined || input.clearCollectionTerms !== undefined) {
+    payload.clear_collection_terms = input.clear_collection_terms !== undefined ? input.clear_collection_terms : input.clearCollectionTerms;
+    payload.clearCollectionTerms = payload.clear_collection_terms;
+  }
+
+  const rawNote = input.requested_collection_terms_note !== undefined ? input.requested_collection_terms_note : input.requestedCollectionTermsNote;
+  if (rawNote !== undefined) {
+    payload.requested_collection_terms_note = rawNote !== null ? String(rawNote) : null;
+    payload.requestedCollectionTermsNote = payload.requested_collection_terms_note;
+  }
+  if (input.clear_requested_collection_terms_note !== undefined || input.clearRequestedCollectionTermsNote !== undefined) {
+    payload.clear_requested_collection_terms_note = input.clear_requested_collection_terms_note !== undefined ? input.clear_requested_collection_terms_note : input.clearRequestedCollectionTermsNote;
+    payload.clearRequestedCollectionTermsNote = payload.clear_requested_collection_terms_note;
+  }
+
+  const rawInvMode = input.invoice_issuance_mode !== undefined ? input.invoice_issuance_mode : input.invoiceIssuanceMode;
+  if (rawInvMode !== undefined) {
+    payload.invoice_issuance_mode = rawInvMode;
+    payload.invoiceIssuanceMode = rawInvMode;
   }
 
   try {

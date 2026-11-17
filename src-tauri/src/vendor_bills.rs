@@ -98,29 +98,8 @@ pub fn calculate_due_date(
     payment_terms_type: Option<&str>,
     payment_terms_days: Option<i64>,
 ) -> Result<String, VendorBillError> {
-    let (year, month, day) = parse_date(bill_date)?;
-    let terms_type = match payment_terms_type {
-        Some(t) => t.trim(),
-        None => return Ok(bill_date.trim().to_string()),
-    };
-    if terms_type.is_empty() {
-        return Ok(bill_date.trim().to_string());
-    }
-
-    let days = payment_terms_days.unwrap_or(0).max(0) as u32;
-
-    match terms_type {
-        "net" => {
-            let (y, m, d) = add_days(year, month, day, days);
-            Ok(format_date(y, m, d))
-        }
-        "month_end" => {
-            let end_day = get_days_in_month(year, month);
-            let (y, m, d) = add_days(year, month, end_day, days);
-            Ok(format_date(y, m, d))
-        }
-        _ => Ok(bill_date.trim().to_string()),
-    }
+    crate::terms::calculate_due_date(bill_date, payment_terms_type, payment_terms_days)
+        .map_err(VendorBillError::InvalidDateFormat)
 }
 
 pub fn get_today_local(conn: &Connection) -> Result<String, rusqlite::Error> {

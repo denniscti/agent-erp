@@ -2,8 +2,36 @@
 import { loadStorage, saveStorage, resolveMockActiveTenantId, nextMockUid } from '../mockStorage.js';
 
 export const defaultMockPartners = [
-  { id: "part_mock_1", tenant_id: "tnt_mock_1", name: "A 公司 (Customer A)", is_customer: true, is_vendor: false, tax_id: null, payment_terms_type: null, payment_terms_days: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 5 },
-  { id: "part_mock_2", tenant_id: "tnt_mock_1", name: "台積電 (TSMC)", is_customer: true, is_vendor: false, tax_id: "22099131", payment_terms_type: null, payment_terms_days: null, created_at: Math.floor(Date.now() / 1000) - 86400 * 2 }
+  {
+    id: "part_mock_1",
+    tenant_id: "tnt_mock_1",
+    name: "A 公司 (Customer A)",
+    is_customer: true,
+    is_vendor: false,
+    tax_id: null,
+    payment_terms_type: null,
+    payment_terms_days: null,
+    collection_terms_type: null,
+    collection_terms_days: null,
+    requested_collection_terms_note: null,
+    invoice_issuance_mode: 'per_order',
+    created_at: Math.floor(Date.now() / 1000) - 86400 * 5
+  },
+  {
+    id: "part_mock_2",
+    tenant_id: "tnt_mock_1",
+    name: "台積電 (TSMC)",
+    is_customer: true,
+    is_vendor: false,
+    tax_id: "22099131",
+    payment_terms_type: null,
+    payment_terms_days: null,
+    collection_terms_type: null,
+    collection_terms_days: null,
+    requested_collection_terms_note: null,
+    invoice_issuance_mode: 'per_order',
+    created_at: Math.floor(Date.now() / 1000) - 86400 * 2
+  }
 ];
 
 export let mockPartners = loadStorage('agent_erp_mock_partners', defaultMockPartners);
@@ -15,6 +43,10 @@ if (!mockPartners || !Array.isArray(mockPartners)) {
   mockPartners.forEach(p => {
     if (!p.tenant_id) {
       p.tenant_id = 'tnt_mock_1';
+      migrated = true;
+    }
+    if (p.is_customer && !p.invoice_issuance_mode) {
+      p.invoice_issuance_mode = 'per_order';
       migrated = true;
     }
   });
@@ -35,6 +67,14 @@ export const partnerMocks = {
       paymentTermsType,
       payment_terms_days,
       paymentTermsDays,
+      collection_terms_type,
+      collectionTermsType,
+      collection_terms_days,
+      collectionTermsDays,
+      requested_collection_terms_note,
+      requestedCollectionTermsNote,
+      invoice_issuance_mode,
+      invoiceIssuanceMode,
       is_active,
       isActive
     } = args || {};
@@ -81,6 +121,52 @@ export const partnerMocks = {
       }
     }
 
+    // Validate collection terms (CT-01, CT-02, CT-03, CT-04)
+    const rawColType = collection_terms_type !== undefined ? collection_terms_type : collectionTermsType;
+    const rawColDays = collection_terms_days !== undefined ? collection_terms_days : collectionTermsDays;
+    const normColType = rawColType !== undefined && rawColType !== null ? String(rawColType).trim() : null;
+    const hasColType = normColType !== null && normColType.length > 0;
+    const hasColDays = rawColDays !== undefined && rawColDays !== null && rawColDays !== '';
+
+    if ((hasColType && !hasColDays) || (!hasColType && hasColDays)) {
+      throw new Error('收款條件類型與天數需同時設定');
+    }
+
+    if (hasColType) {
+      if (!custFlag) {
+        throw new Error('僅客戶可設定收款條件');
+      }
+      if (normColType !== 'net' && normColType !== 'month_end') {
+        throw new Error('收款條件類型需為 net 或 month_end');
+      }
+      const d = Number(rawColDays);
+      if (!Number.isInteger(d) || d < 0 || d > 365) {
+        throw new Error('收款天數需為 0～365 的整數');
+      }
+    }
+
+    // Validate invoice issuance mode (CT-05, CT-06)
+    const rawInvMode = invoice_issuance_mode !== undefined ? invoice_issuance_mode : invoiceIssuanceMode;
+    const normInvMode = rawInvMode !== undefined && rawInvMode !== null ? String(rawInvMode).trim() : null;
+    let finalInvMode = null;
+    if (custFlag) {
+      if (!normInvMode) {
+        finalInvMode = 'per_order';
+      } else {
+        if (normInvMode !== 'per_order' && normInvMode !== 'monthly_consolidated') {
+          throw new Error('開票模式需為 per_order 或 monthly_consolidated');
+        }
+        finalInvMode = normInvMode;
+      }
+    } else {
+      if (normInvMode) {
+        throw new Error('僅客戶可設定開票模式');
+      }
+    }
+
+    const rawNote = requested_collection_terms_note !== undefined ? requested_collection_terms_note : requestedCollectionTermsNote;
+    const finalNote = rawNote !== undefined && rawNote !== null ? String(rawNote).trim() : null;
+
     const existingIndex = mockPartners.findIndex(p =>
       (p.tenant_id || 'tnt_mock_1') === targetTenantId &&
       p.name.trim().toLowerCase() === trimmedName.toLowerCase()
@@ -109,6 +195,16 @@ export const partnerMocks = {
         if (hasType) {
           existing.payment_terms_type = normType;
           existing.payment_terms_days = Number(rawDays);
+        }
+        if (hasColType) {
+          existing.collection_terms_type = normColType;
+          existing.collection_terms_days = Number(rawColDays);
+        }
+        if (finalNote) {
+          existing.requested_collection_terms_note = finalNote;
+        }
+        if (finalInvMode) {
+          existing.invoice_issuance_mode = finalInvMode;
         }
         saveStorage('agent_erp_mock_partners', mockPartners);
         return { ...existing };
@@ -139,6 +235,10 @@ export const partnerMocks = {
       tax_id: normalizedTaxId,
       payment_terms_type: hasType ? normType : null,
       payment_terms_days: hasType ? Number(rawDays) : null,
+      collection_terms_type: hasColType ? normColType : null,
+      collection_terms_days: hasColType ? Number(rawColDays) : null,
+      requested_collection_terms_note: finalNote || null,
+      invoice_issuance_mode: finalInvMode,
       created_at: now
     };
     mockPartners.push(newPartner);
@@ -158,6 +258,18 @@ export const partnerMocks = {
       paymentTermsDays,
       clear_payment_terms,
       clearPaymentTerms,
+      collection_terms_type,
+      collectionTermsType,
+      collection_terms_days,
+      collectionTermsDays,
+      clear_collection_terms,
+      clearCollectionTerms,
+      requested_collection_terms_note,
+      requestedCollectionTermsNote,
+      clear_requested_collection_terms_note,
+      clearRequestedCollectionTermsNote,
+      invoice_issuance_mode,
+      invoiceIssuanceMode,
       is_active,
       isActive
     } = args || {};
@@ -260,6 +372,80 @@ export const partnerMocks = {
       }
     }
 
+    // Handle collection terms update and clearing (CT-01, CT-02, CT-03, CT-04)
+    const shouldClearCol = clear_collection_terms === true || clearCollectionTerms === true ||
+      (collection_terms_type === '' && (collection_terms_days === null || collection_terms_days === undefined));
+
+    if (shouldClearCol) {
+      partner.collection_terms_type = null;
+      partner.collection_terms_days = null;
+    } else if (
+      collection_terms_type !== undefined ||
+      collectionTermsType !== undefined ||
+      collection_terms_days !== undefined ||
+      collectionTermsDays !== undefined
+    ) {
+      const rawColType = collection_terms_type !== undefined ? collection_terms_type : collectionTermsType;
+      const rawColDays = collection_terms_days !== undefined ? collection_terms_days : collectionTermsDays;
+      const normColType = rawColType !== undefined && rawColType !== null ? String(rawColType).trim() : null;
+      const hasColType = normColType !== null && normColType.length > 0;
+      const hasColDays = rawColDays !== undefined && rawColDays !== null && rawColDays !== '';
+
+      if ((hasColType && !hasColDays) || (!hasColType && hasColDays)) {
+        throw new Error('收款條件類型與天數需同時設定');
+      }
+
+      if (hasColType) {
+        if (!partner.is_customer) {
+          throw new Error('僅客戶可設定收款條件');
+        }
+        if (normColType !== 'net' && normColType !== 'month_end') {
+          throw new Error('收款條件類型需為 net 或 month_end');
+        }
+        const d = Number(rawColDays);
+        if (!Number.isInteger(d) || d < 0 || d > 365) {
+          throw new Error('收款天數需為 0～365 的整數');
+        }
+        partner.collection_terms_type = normColType;
+        partner.collection_terms_days = d;
+      }
+    }
+
+    // Handle requested_collection_terms_note
+    const rawNote = requested_collection_terms_note !== undefined ? requested_collection_terms_note : requestedCollectionTermsNote;
+    const shouldClearNote = clear_requested_collection_terms_note === true || clearRequestedCollectionTermsNote === true;
+    if (shouldClearNote) {
+      partner.requested_collection_terms_note = null;
+    } else if (rawNote !== undefined) {
+      if (rawNote === null) {
+        partner.requested_collection_terms_note = null;
+      } else {
+        const trimmed = String(rawNote).trim();
+        partner.requested_collection_terms_note = trimmed.length > 0 ? trimmed : null;
+      }
+    }
+
+    // Handle invoice_issuance_mode (CT-05, CT-06)
+    const rawInvMode = invoice_issuance_mode !== undefined ? invoice_issuance_mode : invoiceIssuanceMode;
+    if (rawInvMode !== undefined) {
+      if (!partner.is_customer) {
+        throw new Error('僅客戶可設定開票模式');
+      }
+      if (rawInvMode === null) {
+        partner.invoice_issuance_mode = 'per_order';
+      } else {
+        const s = String(rawInvMode).trim();
+        if (s.length === 0) {
+          partner.invoice_issuance_mode = 'per_order';
+        } else {
+          if (s !== 'per_order' && s !== 'monthly_consolidated') {
+            throw new Error('開票模式需為 per_order 或 monthly_consolidated');
+          }
+          partner.invoice_issuance_mode = s;
+        }
+      }
+    }
+
     saveStorage('agent_erp_mock_partners', mockPartners);
     return { ...partner };
   },
@@ -279,4 +465,3 @@ export const partnerMocks = {
     return list;
   }
 };
-

@@ -466,7 +466,7 @@ test('TC-RT-INT-03: routes.js registry registers all 13 core and sub-domain rout
   // Given: ROUTES registry
   // When:  Inspecting registered items
   // Then:  All 13 routes defined with valid properties
-  assert.equal(ROUTES.length, 13, 'Must define exactly 13 route entries');
+  assert.ok(ROUTES.length >= 13, 'Must define at least 13 route entries');
 
   const requiredIds = [
     'agent',

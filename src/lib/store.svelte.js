@@ -616,6 +616,67 @@ export function showToast(message) {
   }
 }
 
+/**
+ * Dispatch an in-app notification to appState.notifications and trigger toast feedback
+ * @param {{
+ *   type?: 'success' | 'info' | 'warning' | 'error' | 'alert' | 'critical',
+ *   level?: string,
+ *   title: string,
+ *   message: string,
+ *   sourceModule?: string,
+ *   action?: { label: string, target: string } | null,
+ *   persistent?: boolean,
+ *   timestamp?: number,
+ *   id?: string
+ * }} payload
+ * @returns {string} notification ID
+ */
+export function dispatchNotification(payload) {
+  if (!payload || !payload.message) {
+    return '';
+  }
+  const id = payload.id || `notif-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const item = {
+    id,
+    type: payload.type || payload.level || 'alert',
+    level: payload.level || payload.type || 'alert',
+    title: payload.title || '系統通知',
+    message: payload.message,
+    sourceModule: payload.sourceModule || 'system',
+    action: payload.action || null,
+    persistent: payload.persistent !== undefined ? payload.persistent : true,
+    timestamp: payload.timestamp || Date.now(),
+    time: '剛剛'
+  };
+
+  appState.notifications = [item, ...appState.notifications];
+
+  // Also trigger toast so user sees immediate feedback
+  showToast(`${item.title}：${item.message}`);
+
+  return id;
+}
+
+/**
+ * Dismiss a notification by ID
+ * @param {string} id
+ */
+export function dismissNotification(id) {
+  appState.notifications = appState.notifications.filter(n => n.id !== id);
+}
+
+// Initialize window.__SHELL__ global notification API adhering to docs/system_design/notification_system.md
+if (typeof window !== 'undefined') {
+  const win = /** @type {any} */ (window);
+  win.__SHELL__ = win.__SHELL__ || {};
+  win.__SHELL__.notify = function(payload) {
+    return dispatchNotification(payload);
+  };
+  win.__SHELL__.dismiss = function(id) {
+    return dismissNotification(id);
+  };
+}
+
 export function navigate(path) {
   invalidateNavigationStaleness();
   if (typeof window !== 'undefined' && window.location) {
@@ -637,6 +698,7 @@ export function getWorkspaceLabel(workspace) {
   if (ws === 'vendor-bills' || ws === 'bills') return '請款單';
   if (ws === 'quotes' || ws === 'quote') return '報價單';
   if (ws === 'sales-orders' || ws === 'sales-order') return '銷售單';
+  if (ws === 'customer-credit' || ws === 'customer-credits') return '客戶信用';
   return '業務工作區';
 }
 

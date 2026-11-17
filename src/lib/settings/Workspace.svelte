@@ -3,6 +3,8 @@
   import { isTauri } from '../tauri.js';
   import {
     appState,
+    navigate,
+    dispatchNotification,
     fetchAuditLogs,
     formatAuditDecision,
     logoutAction,
@@ -78,6 +80,7 @@
   let editingPartnerTaxId = $state('');
   let editingPartnerPaymentTermsType = $state('');
   let editingPartnerPaymentTermsDays = $state(0);
+  let editingPartnerRequestedCollectionTermsNote = $state('');
   let isUpdatingPartner = $state(false);
   let editPartnerError = $state('');
 
@@ -393,6 +396,7 @@
     editingPartnerTaxId = partner.tax_id || '';
     editingPartnerPaymentTermsType = partner.payment_terms_type || '';
     editingPartnerPaymentTermsDays = partner.payment_terms_days !== null && partner.payment_terms_days !== undefined ? partner.payment_terms_days : 0;
+    editingPartnerRequestedCollectionTermsNote = partner.requested_collection_terms_note || '';
     editPartnerError = '';
   }
 
@@ -402,6 +406,7 @@
     editingPartnerTaxId = '';
     editingPartnerPaymentTermsType = '';
     editingPartnerPaymentTermsDays = 0;
+    editingPartnerRequestedCollectionTermsNote = '';
     editPartnerError = '';
   }
 
@@ -438,10 +443,35 @@
       }
     }
 
+    const noteTrimmed = editingPartnerRequestedCollectionTermsNote.trim();
+    if (currentPartner && currentPartner.is_customer) {
+      payload.requested_collection_terms_note = noteTrimmed;
+    }
+
     isUpdatingPartner = true;
     editPartnerError = '';
     try {
       await updatePartnerAction(payload);
+      if (currentPartner && currentPartner.is_customer) {
+        const oldNote = (currentPartner.requested_collection_terms_note || '').trim();
+        if (noteTrimmed && noteTrimmed !== oldNote) {
+          const notifPayload = {
+            type: 'alert',
+            title: '客戶收款條件申請',
+            message: `${payload.name || currentPartner.name} 有新的收款條件申請備註`,
+            sourceModule: 'partners',
+            action: {
+              label: '查看客戶信用',
+              target: 'customer-credit'
+            }
+          };
+          if (typeof window !== 'undefined' && window.__SHELL__?.notify) {
+            window.__SHELL__.notify(notifPayload);
+          } else {
+            dispatchNotification(notifPayload);
+          }
+        }
+      }
       cancelEditPartner();
     } catch (err) {
       editPartnerError = err?.message || '更新夥伴失敗';
@@ -1662,6 +1692,31 @@
                             {/if}
                           </div>
                         {/if}
+                        {#if partner.is_customer}
+                          <div style="display: flex; flex-direction: column; gap: 4px; padding-top: 6px; border-top: 1px dashed rgba(255, 255, 255, 0.08);">
+                            <label for="edit-partner-requested-note-{partner.id}" style="display: block; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 2px;">
+                              客戶要求的收款條件（申請備註，存檔後將發出通知轉交財務評估）
+                            </label>
+                            <textarea
+                              id="edit-partner-requested-note-{partner.id}"
+                              class="form-input"
+                              rows="2"
+                              placeholder="例：客戶希望爭取月結 30 天，轉交財務評估信用狀況"
+                              bind:value={editingPartnerRequestedCollectionTermsNote}
+                              style="width: 100%; padding: 6px 10px; font-size: 0.85rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary); resize: vertical;"
+                            ></textarea>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px;">
+                              💡 此欄位供業務填寫客戶提出之需求備註。財務人員設定正式生效的收款條件與開票模式，請前往
+                              <button
+                                type="button"
+                                onclick={() => navigate('/app/customer-credit')}
+                                style="background: none; border: none; padding: 0; color: var(--accent-cyan); text-decoration: underline; cursor: pointer; font-size: inherit;"
+                              >
+                                「客戶信用」工作區 ↗
+                              </button>
+                            </div>
+                          </div>
+                        {/if}
                         {#if editPartnerError}
                           <div class="field-error-msg" style="color: var(--status-error); font-size: 0.75rem; margin-top: 2px;">
                             ⚠️ {editPartnerError}
@@ -1702,6 +1757,20 @@
                                 <span class="badge badge-emerald" style="font-size: 0.7rem;">
                                   客戶
                                 </span>
+                                {#if partner.collection_terms_type}
+                                  <span class="badge" style="font-size: 0.7rem; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3);">
+                                    收款條件：{partner.collection_terms_type === 'net' ? '貨到 ' : '月結 '}{partner.collection_terms_days} 天
+                                  </span>
+                                {:else}
+                                  <span class="badge" style="font-size: 0.7rem; color: var(--text-muted); border: 1px dashed var(--border-color);" title="此客戶未設定正式收款條件">
+                                    收款條件：未設定
+                                  </span>
+                                {/if}
+                                {#if partner.requested_collection_terms_note}
+                                  <span class="badge" style="font-size: 0.7rem; background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3);" title="業務申請備註">
+                                    申請條件：{partner.requested_collection_terms_note}
+                                  </span>
+                                {/if}
                               {/if}
                               {#if partner.is_vendor}
                                 <span class="badge badge-amber" style="font-size: 0.7rem;">
@@ -1721,10 +1790,21 @@
                             <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; font-family: monospace;">{partner.id}</div>
                           </div>
                         </div>
-                        <div style="display: flex; align-items: center; gap: 10px;">
+                        <div style="display: flex; align-items: center; gap: 8px;">
                           <div style="font-size: 0.75rem; color: var(--text-muted);">
                             {new Date(partner.created_at * 1000).toLocaleString()}
                           </div>
+                          {#if partner.is_customer}
+                            <button
+                              type="button"
+                              class="btn btn-outline btn-xs"
+                              onclick={() => navigate('/app/customer-credit')}
+                              style="padding: 3px 8px; font-size: 0.72rem; border-radius: 4px; border: 1px solid rgba(59, 130, 246, 0.4); background: rgba(59, 130, 246, 0.08); color: #60a5fa; cursor: pointer;"
+                              title="前往客戶信用工作區設定正式收款條件與開票模式"
+                            >
+                              客戶信用 ↗
+                            </button>
+                          {/if}
                           <button
                             type="button"
                             class="btn btn-outline btn-xs"

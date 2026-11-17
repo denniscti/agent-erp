@@ -20,6 +20,7 @@ pub mod sales_orders;
 pub mod stock_transfers;
 pub mod stocktakes;
 pub mod tasks;
+pub mod terms;
 pub mod tps2_types;
 pub mod unit_conversions;
 pub mod vendor_bills;

@@ -18,6 +18,7 @@ import StocktakesWorkspace from './stocktakes/Workspace.svelte';
 import StockTransfersWorkspace from './stockTransfers/Workspace.svelte';
 import OpeningPayablesWorkspace from './openingPayables/Workspace.svelte';
 import VendorPaymentsWorkspace from './vendorPayments/Workspace.svelte';
+import CustomerCreditWorkspace from './customerCredits/Workspace.svelte';
 
 /**
  * @typedef {Object} RouteDefinition
@@ -123,6 +124,13 @@ export const ROUTES = [
     component: VendorPaymentsWorkspace,
     label: '付款單',
     aliases: ['vendor-payments', 'vendorPayments', 'payments', '/app/vendorPayments', '/app/payments']
+  },
+  {
+    id: 'customer-credit',
+    path: '/app/customer-credit',
+    component: CustomerCreditWorkspace,
+    label: '客戶信用',
+    aliases: ['customer-credit', 'customer-credits', '/app/customer-credits', 'accounts-receivable', '/app/accounts-receivable']
   }
 ];
 

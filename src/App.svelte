@@ -117,6 +117,7 @@
     else if (ws === 'accounts-payable') navigate('/app/accounts-payable');
     else if (ws === 'quotes' || ws === 'quote') navigate('/app/quotes');
     else if (ws === 'sales-orders' || ws === 'sales-order') navigate('/app/sales-orders');
+    else if (ws === 'customer-credit' || ws === 'customer-credits') navigate('/app/customer-credit');
     else if (ws === 'inventory') navigate('/app/inventory');
     else navigate(`/app/${ws}`);
   }
@@ -248,6 +249,20 @@
                 <polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon>
                 <circle cx="5.5" cy="18.5" r="2.5"></circle>
                 <circle cx="18.5" cy="18.5" r="2.5"></circle>
+              </svg>
+            </button>
+
+            <!-- 客戶信用 (Issue #219 / M14 應收工作區) -->
+            <button
+              class="rail-nav-btn {activeTab === 'customer-credit' || activeTab === 'customer-credits' ? 'active' : ''}"
+              onclick={() => selectWorkspace('customer-credit')}
+              title="客戶信用"
+              aria-label="客戶信用"
+              id="rail-nav-customer-credit"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                <path d="m9 12 2 2 4-4"></path>
               </svg>
             </button>
 

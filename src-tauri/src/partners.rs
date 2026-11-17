@@ -16,6 +16,10 @@ pub struct Partner {
     pub tax_id: Option<String>,
     pub payment_terms_type: Option<String>,
     pub payment_terms_days: Option<i64>,
+    pub collection_terms_type: Option<String>,
+    pub collection_terms_days: Option<i64>,
+    pub requested_collection_terms_note: Option<String>,
+    pub invoice_issuance_mode: Option<String>,
     pub created_at: i64,
 }
 
@@ -38,6 +42,10 @@ pub fn create_partners_table(conn: &rusqlite::Connection) -> Result<(), rusqlite
             tax_id TEXT,
             payment_terms_type TEXT,
             payment_terms_days INTEGER,
+            collection_terms_type TEXT,
+            collection_terms_days INTEGER,
+            requested_collection_terms_note TEXT,
+            invoice_issuance_mode TEXT,
             created_at INTEGER NOT NULL
         )",
         [],
@@ -60,6 +68,26 @@ pub fn create_partners_table(conn: &rusqlite::Connection) -> Result<(), rusqlite
 
     let _ = conn.execute(
         "ALTER TABLE partners ADD COLUMN payment_terms_days INTEGER",
+        [],
+    );
+
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN collection_terms_type TEXT",
+        [],
+    );
+
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN collection_terms_days INTEGER",
+        [],
+    );
+
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN requested_collection_terms_note TEXT",
+        [],
+    );
+
+    let _ = conn.execute(
+        "ALTER TABLE partners ADD COLUMN invoice_issuance_mode TEXT",
         [],
     );
 
@@ -152,6 +180,63 @@ pub fn validate_payment_terms(
     }
 }
 
+// Helper: validate_collection_terms (CT-01, CT-02, CT-03, CT-04)
+pub fn validate_collection_terms(
+    is_customer: bool,
+    collection_terms_type: Option<String>,
+    collection_terms_days: Option<i64>,
+) -> Result<(Option<String>, Option<i64>), String> {
+    let normalized_type = collection_terms_type
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    match (normalized_type, collection_terms_days) {
+        (None, None) => Ok((None, None)),
+        (Some(_), None) | (None, Some(_)) => Err("收款條件類型與天數需同時設定".to_string()),
+        (Some(t), Some(d)) => {
+            if !is_customer {
+                return Err("僅客戶可設定收款條件".to_string());
+            }
+            if t != "net" && t != "month_end" {
+                return Err("收款條件類型需為 net 或 month_end".to_string());
+            }
+            if !(0..=365).contains(&d) {
+                return Err("收款天數需為 0～365 的整數".to_string());
+            }
+            Ok((Some(t), Some(d)))
+        }
+    }
+}
+
+// Helper: validate_invoice_issuance_mode (CT-05, CT-06)
+pub fn validate_invoice_issuance_mode(
+    is_customer: bool,
+    invoice_issuance_mode: Option<String>,
+) -> Result<Option<String>, String> {
+    let normalized_mode = invoice_issuance_mode
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    match normalized_mode {
+        None => {
+            if is_customer {
+                Ok(Some("per_order".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(m) => {
+            if !is_customer {
+                return Err("僅客戶可設定開票模式".to_string());
+            }
+            if m != "per_order" && m != "monthly_consolidated" {
+                return Err("開票模式需為 per_order 或 monthly_consolidated".to_string());
+            }
+            Ok(Some(m))
+        }
+    }
+}
+
 // Usecase: create_partner
 pub fn create_partner_impl(
     conn: &rusqlite::Connection,
@@ -161,13 +246,17 @@ pub fn create_partner_impl(
     is_vendor: Option<bool>,
     tax_id: Option<String>,
 ) -> Result<Partner, String> {
-    create_partner_with_terms_impl(
+    create_partner_with_all_terms_impl(
         conn,
         tenant_id,
         name,
         is_customer,
         is_vendor,
         tax_id,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
     )
@@ -183,6 +272,37 @@ pub fn create_partner_with_terms_impl(
     tax_id: Option<String>,
     payment_terms_type: Option<String>,
     payment_terms_days: Option<i64>,
+) -> Result<Partner, String> {
+    create_partner_with_all_terms_impl(
+        conn,
+        tenant_id,
+        name,
+        is_customer,
+        is_vendor,
+        tax_id,
+        payment_terms_type,
+        payment_terms_days,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_partner_with_all_terms_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    name: String,
+    is_customer: Option<bool>,
+    is_vendor: Option<bool>,
+    tax_id: Option<String>,
+    payment_terms_type: Option<String>,
+    payment_terms_days: Option<i64>,
+    collection_terms_type: Option<String>,
+    collection_terms_days: Option<i64>,
+    requested_collection_terms_note: Option<String>,
+    invoice_issuance_mode: Option<String>,
 ) -> Result<Partner, String> {
     let trimmed_tenant_id = tenant_id.trim();
     if trimmed_tenant_id.is_empty() {
@@ -200,7 +320,7 @@ pub fn create_partner_with_terms_impl(
     let target_is_cust = is_customer.unwrap_or(!target_is_vend);
 
     let mut check_stmt = conn
-        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at FROM partners WHERE tenant_id = ?1 AND LOWER(TRIM(name)) = LOWER(?2) LIMIT 1")
+        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, collection_terms_type, collection_terms_days, requested_collection_terms_note, invoice_issuance_mode, created_at FROM partners WHERE tenant_id = ?1 AND LOWER(TRIM(name)) = LOWER(?2) LIMIT 1")
         .map_err(|e| format!("Failed to prepare duplicate check query: {}", e))?;
 
     let mut existing_rows = check_stmt
@@ -216,7 +336,11 @@ pub fn create_partner_with_terms_impl(
                 tax_id: row.get(5)?,
                 payment_terms_type: row.get(6)?,
                 payment_terms_days: row.get(7)?,
-                created_at: row.get(8)?,
+                collection_terms_type: row.get(8)?,
+                collection_terms_days: row.get(9)?,
+                requested_collection_terms_note: row.get(10)?,
+                invoice_issuance_mode: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })
         .map_err(|e| format!("Failed to check for duplicate partner: {}", e))?;
@@ -254,14 +378,47 @@ pub fn create_partner_with_terms_impl(
                     (existing.payment_terms_type, existing.payment_terms_days)
                 };
 
+            let (final_col_type, final_col_days) =
+                if collection_terms_type.is_some() || collection_terms_days.is_some() {
+                    validate_collection_terms(
+                        merged_is_cust,
+                        collection_terms_type,
+                        collection_terms_days,
+                    )?
+                } else {
+                    (
+                        existing.collection_terms_type,
+                        existing.collection_terms_days,
+                    )
+                };
+
+            let final_note = requested_collection_terms_note
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or(existing.requested_collection_terms_note);
+
+            let final_invoice_mode = if invoice_issuance_mode.is_some() {
+                validate_invoice_issuance_mode(merged_is_cust, invoice_issuance_mode)?
+            } else {
+                existing.invoice_issuance_mode.or(if merged_is_cust {
+                    Some("per_order".to_string())
+                } else {
+                    None
+                })
+            };
+
             conn.execute(
-                "UPDATE partners SET is_customer = ?1, is_vendor = ?2, tax_id = ?3, payment_terms_type = ?4, payment_terms_days = ?5 WHERE id = ?6",
+                "UPDATE partners SET is_customer = ?1, is_vendor = ?2, tax_id = ?3, payment_terms_type = ?4, payment_terms_days = ?5, collection_terms_type = ?6, collection_terms_days = ?7, requested_collection_terms_note = ?8, invoice_issuance_mode = ?9 WHERE id = ?10",
                 params![
                     if merged_is_cust { 1 } else { 0 },
                     if merged_is_vend { 1 } else { 0 },
                     merged_tax_id,
                     final_terms_type,
                     final_terms_days,
+                    final_col_type,
+                    final_col_days,
+                    final_note,
+                    final_invoice_mode,
                     existing.id
                 ],
             )
@@ -276,6 +433,10 @@ pub fn create_partner_with_terms_impl(
                 tax_id: merged_tax_id,
                 payment_terms_type: final_terms_type,
                 payment_terms_days: final_terms_days,
+                collection_terms_type: final_col_type,
+                collection_terms_days: final_col_days,
+                requested_collection_terms_note: final_note,
+                invoice_issuance_mode: final_invoice_mode,
                 created_at: existing.created_at,
             });
         }
@@ -308,6 +469,15 @@ pub fn create_partner_with_terms_impl(
     let (final_terms_type, final_terms_days) =
         validate_payment_terms(target_is_vend, payment_terms_type, payment_terms_days)?;
 
+    let (final_col_type, final_col_days) =
+        validate_collection_terms(target_is_cust, collection_terms_type, collection_terms_days)?;
+
+    let final_note = requested_collection_terms_note
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let final_invoice_mode = validate_invoice_issuance_mode(target_is_cust, invoice_issuance_mode)?;
+
     let now = current_timestamp();
     let id = format!(
         "part_{}_{}",
@@ -316,8 +486,8 @@ pub fn create_partner_with_terms_impl(
     );
 
     conn.execute(
-        "INSERT INTO partners (id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO partners (id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, collection_terms_type, collection_terms_days, requested_collection_terms_note, invoice_issuance_mode, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             trimmed_tenant_id,
@@ -327,6 +497,10 @@ pub fn create_partner_with_terms_impl(
             trimmed_tax_id,
             final_terms_type,
             final_terms_days,
+            final_col_type,
+            final_col_days,
+            final_note,
+            final_invoice_mode,
             now
         ],
     )
@@ -341,6 +515,10 @@ pub fn create_partner_with_terms_impl(
         tax_id: trimmed_tax_id,
         payment_terms_type: final_terms_type,
         payment_terms_days: final_terms_days,
+        collection_terms_type: final_col_type,
+        collection_terms_days: final_col_days,
+        requested_collection_terms_note: final_note,
+        invoice_issuance_mode: final_invoice_mode,
         created_at: now,
     })
 }
@@ -353,7 +531,9 @@ pub fn update_partner_impl(
     name: Option<String>,
     tax_id: Option<String>,
 ) -> Result<Partner, String> {
-    update_partner_with_terms_impl(conn, tenant_id, id, name, tax_id, None, None, None)
+    update_partner_with_all_terms_impl(
+        conn, tenant_id, id, name, tax_id, None, None, None, None, None, None, None, None, None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,6 +547,41 @@ pub fn update_partner_with_terms_impl(
     payment_terms_days: Option<i64>,
     clear_payment_terms: Option<bool>,
 ) -> Result<Partner, String> {
+    update_partner_with_all_terms_impl(
+        conn,
+        tenant_id,
+        id,
+        name,
+        tax_id,
+        payment_terms_type,
+        payment_terms_days,
+        clear_payment_terms,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_partner_with_all_terms_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    id: String,
+    name: Option<String>,
+    tax_id: Option<String>,
+    payment_terms_type: Option<String>,
+    payment_terms_days: Option<i64>,
+    clear_payment_terms: Option<bool>,
+    collection_terms_type: Option<String>,
+    collection_terms_days: Option<i64>,
+    clear_collection_terms: Option<bool>,
+    requested_collection_terms_note: Option<String>,
+    clear_requested_collection_terms_note: Option<bool>,
+    invoice_issuance_mode: Option<String>,
+) -> Result<Partner, String> {
     let trimmed_tenant_id = tenant_id.trim();
     if trimmed_tenant_id.is_empty() {
         return Err("Tenant ID cannot be empty".to_string());
@@ -379,7 +594,7 @@ pub fn update_partner_with_terms_impl(
 
     // Tenant isolation: fetch existing partner strictly within active tenant
     let mut stmt = conn
-        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at FROM partners WHERE id = ?1 AND tenant_id = ?2 LIMIT 1")
+        .prepare("SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, collection_terms_type, collection_terms_days, requested_collection_terms_note, invoice_issuance_mode, created_at FROM partners WHERE id = ?1 AND tenant_id = ?2 LIMIT 1")
         .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
     let existing = stmt
@@ -395,7 +610,11 @@ pub fn update_partner_with_terms_impl(
                 tax_id: row.get(5)?,
                 payment_terms_type: row.get(6)?,
                 payment_terms_days: row.get(7)?,
-                created_at: row.get(8)?,
+                collection_terms_type: row.get(8)?,
+                collection_terms_days: row.get(9)?,
+                requested_collection_terms_note: row.get(10)?,
+                invoice_issuance_mode: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })
         .map_err(|_| "Partner not found".to_string())?;
@@ -461,9 +680,56 @@ pub fn update_partner_with_terms_impl(
         (existing.payment_terms_type, existing.payment_terms_days)
     };
 
+    // Handle collection terms update, clearing, and validation (CT-01, CT-02, CT-03, CT-04)
+    let (new_col_type, new_col_days) = if clear_collection_terms == Some(true) {
+        (None, None)
+    } else if collection_terms_type.is_some() || collection_terms_days.is_some() {
+        if collection_terms_type.as_deref().map(str::trim) == Some("")
+            && collection_terms_days.is_none()
+        {
+            (None, None)
+        } else {
+            validate_collection_terms(
+                existing.is_customer,
+                collection_terms_type,
+                collection_terms_days,
+            )?
+        }
+    } else {
+        (
+            existing.collection_terms_type,
+            existing.collection_terms_days,
+        )
+    };
+
+    // Handle requested_collection_terms_note
+    let new_note = if clear_requested_collection_terms_note == Some(true) {
+        None
+    } else if let Some(ref note) = requested_collection_terms_note {
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    } else {
+        existing.requested_collection_terms_note
+    };
+
+    // Handle invoice_issuance_mode (CT-05, CT-06)
+    let new_invoice_mode = if let Some(ref mode) = invoice_issuance_mode {
+        validate_invoice_issuance_mode(existing.is_customer, Some(mode.clone()))?
+    } else {
+        existing.invoice_issuance_mode.or(if existing.is_customer {
+            Some("per_order".to_string())
+        } else {
+            None
+        })
+    };
+
     conn.execute(
-        "UPDATE partners SET name = ?1, tax_id = ?2, payment_terms_type = ?3, payment_terms_days = ?4 WHERE id = ?5 AND tenant_id = ?6",
-        params![new_name, new_tax_id, new_terms_type, new_terms_days, trimmed_id, trimmed_tenant_id],
+        "UPDATE partners SET name = ?1, tax_id = ?2, payment_terms_type = ?3, payment_terms_days = ?4, collection_terms_type = ?5, collection_terms_days = ?6, requested_collection_terms_note = ?7, invoice_issuance_mode = ?8 WHERE id = ?9 AND tenant_id = ?10",
+        params![new_name, new_tax_id, new_terms_type, new_terms_days, new_col_type, new_col_days, new_note, new_invoice_mode, trimmed_id, trimmed_tenant_id],
     )
     .map_err(|e| format!("Failed to update partner: {}", e))?;
 
@@ -476,6 +742,10 @@ pub fn update_partner_with_terms_impl(
         tax_id: new_tax_id,
         payment_terms_type: new_terms_type,
         payment_terms_days: new_terms_days,
+        collection_terms_type: new_col_type,
+        collection_terms_days: new_col_days,
+        requested_collection_terms_note: new_note,
+        invoice_issuance_mode: new_invoice_mode,
         created_at: existing.created_at,
     })
 }
@@ -493,7 +763,7 @@ pub fn list_partners_impl(
     }
 
     let mut query =
-        "SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, created_at FROM partners WHERE tenant_id = ?1".to_string();
+        "SELECT id, tenant_id, name, is_customer, is_vendor, tax_id, payment_terms_type, payment_terms_days, collection_terms_type, collection_terms_days, requested_collection_terms_note, invoice_issuance_mode, created_at FROM partners WHERE tenant_id = ?1".to_string();
     let mut conditions = Vec::new();
 
     if let Some(true) = filter_customer {
@@ -526,7 +796,11 @@ pub fn list_partners_impl(
                 tax_id: row.get(5)?,
                 payment_terms_type: row.get(6)?,
                 payment_terms_days: row.get(7)?,
-                created_at: row.get(8)?,
+                collection_terms_type: row.get(8)?,
+                collection_terms_days: row.get(9)?,
+                requested_collection_terms_note: row.get(10)?,
+                invoice_issuance_mode: row.get(11)?,
+                created_at: row.get(12)?,
             })
         })
         .map_err(|e| format!("Failed to query partners: {}", e))?;
@@ -540,6 +814,7 @@ pub fn list_partners_impl(
 }
 
 // Delivery layer: Tauri Commands
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 #[specta::specta]
 pub async fn create_partner<R: tauri::Runtime>(
@@ -550,12 +825,16 @@ pub async fn create_partner<R: tauri::Runtime>(
     tax_id: Option<String>,
     payment_terms_type: Option<String>,
     payment_terms_days: Option<i64>,
+    collection_terms_type: Option<String>,
+    collection_terms_days: Option<i64>,
+    requested_collection_terms_note: Option<String>,
+    invoice_issuance_mode: Option<String>,
 ) -> Result<Partner, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    create_partner_with_terms_impl(
+    create_partner_with_all_terms_impl(
         &conn,
         &active_tid,
         name,
@@ -564,6 +843,10 @@ pub async fn create_partner<R: tauri::Runtime>(
         tax_id,
         payment_terms_type,
         payment_terms_days,
+        collection_terms_type,
+        collection_terms_days,
+        requested_collection_terms_note,
+        invoice_issuance_mode,
     )
 }
 
@@ -581,6 +864,7 @@ pub async fn list_partners<R: tauri::Runtime>(
     list_partners_impl(&conn, &active_tid, filter_customer, filter_vendor)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 #[specta::specta]
 pub async fn update_partner<R: tauri::Runtime>(
@@ -591,12 +875,18 @@ pub async fn update_partner<R: tauri::Runtime>(
     payment_terms_type: Option<String>,
     payment_terms_days: Option<i64>,
     clear_payment_terms: Option<bool>,
+    collection_terms_type: Option<String>,
+    collection_terms_days: Option<i64>,
+    clear_collection_terms: Option<bool>,
+    requested_collection_terms_note: Option<String>,
+    clear_requested_collection_terms_note: Option<bool>,
+    invoice_issuance_mode: Option<String>,
 ) -> Result<Partner, String> {
     let db_path = get_db_path(&app_handle);
     let conn =
         rusqlite::Connection::open(&db_path).map_err(|e| format!("Failed to open DB: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
-    update_partner_with_terms_impl(
+    update_partner_with_all_terms_impl(
         &conn,
         &active_tid,
         id,
@@ -605,6 +895,12 @@ pub async fn update_partner<R: tauri::Runtime>(
         payment_terms_type,
         payment_terms_days,
         clear_payment_terms,
+        collection_terms_type,
+        collection_terms_days,
+        clear_collection_terms,
+        requested_collection_terms_note,
+        clear_requested_collection_terms_note,
+        invoice_issuance_mode,
     )
 }
 
@@ -2017,5 +2313,400 @@ pub mod tests {
         assert_eq!(partners[0].name, "舊時代廠商");
         assert_eq!(partners[0].payment_terms_type, None);
         assert_eq!(partners[0].payment_terms_days, None);
+    }
+
+    #[test]
+    fn test_tc_ct_n_01_create_customer_collection_terms_and_invoice_mode() {
+        // Given: Test database and valid customer with net 30, requested note, and per_order invoice mode
+        let conn = setup_test_db();
+
+        // When: create_partner_with_all_terms_impl is called
+        let created = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "台積電客戶".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("net".to_string()),
+            Some(30),
+            Some("業務提出月結30天申請".to_string()),
+            Some("per_order".to_string()),
+        )
+        .unwrap();
+
+        // Then: Partner is created with collection terms and invoice mode
+        assert_eq!(created.collection_terms_type, Some("net".to_string()));
+        assert_eq!(created.collection_terms_days, Some(30));
+        assert_eq!(
+            created.requested_collection_terms_note,
+            Some("業務提出月結30天申請".to_string())
+        );
+        assert_eq!(created.invoice_issuance_mode, Some("per_order".to_string()));
+    }
+
+    #[test]
+    fn test_tc_ct_n_02_and_03_collection_terms_boundaries_0_and_365() {
+        // Given: Test database
+        let conn = setup_test_db();
+
+        // When: Creating customer with month_end 0 days (boundary 0)
+        let c1 = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶A".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("month_end".to_string()),
+            Some(0),
+            None,
+            Some("monthly_consolidated".to_string()),
+        )
+        .unwrap();
+
+        // When: Creating customer with net 365 days (boundary 365)
+        let c2 = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶B".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("net".to_string()),
+            Some(365),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Then: Boundaries succeed and values are preserved
+        assert_eq!(c1.collection_terms_type, Some("month_end".to_string()));
+        assert_eq!(c1.collection_terms_days, Some(0));
+        assert_eq!(
+            c1.invoice_issuance_mode,
+            Some("monthly_consolidated".to_string())
+        );
+
+        assert_eq!(c2.collection_terms_type, Some("net".to_string()));
+        assert_eq!(c2.collection_terms_days, Some(365));
+        assert_eq!(c2.invoice_issuance_mode, Some("per_order".to_string())); // CT-06 default
+    }
+
+    #[test]
+    fn test_tc_ct_n_04_default_unconfigured_collection_terms() {
+        // Given: Test database
+        let conn = setup_test_db();
+
+        // When: Creating customer without any terms
+        let cust = create_partner_impl(
+            &conn,
+            TEST_TENANT,
+            "新客戶".to_string(),
+            Some(true),
+            Some(false),
+            None,
+        )
+        .unwrap();
+
+        // Then: Collection terms are None and invoice_issuance_mode defaults to per_order
+        assert_eq!(cust.collection_terms_type, None);
+        assert_eq!(cust.collection_terms_days, None);
+        assert_eq!(cust.requested_collection_terms_note, None);
+        assert_eq!(cust.invoice_issuance_mode, Some("per_order".to_string()));
+    }
+
+    #[test]
+    fn test_tc_ct_n_05_and_06_note_and_clear_collection_terms() {
+        // Given: Customer with collection terms
+        let conn = setup_test_db();
+        let cust = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "測試客戶".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("net".to_string()),
+            Some(60),
+            Some("備註紀錄".to_string()),
+            Some("per_order".to_string()),
+        )
+        .unwrap();
+
+        // When: Clearing collection terms via update
+        let updated = update_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            cust.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(true), // clear_collection_terms
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Then: Terms are cleared to None while note is kept
+        assert_eq!(updated.collection_terms_type, None);
+        assert_eq!(updated.collection_terms_days, None);
+        assert_eq!(
+            updated.requested_collection_terms_note,
+            Some("備註紀錄".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tc_ct_n_07_dual_identity_independent_terms() {
+        // Given: Partner that is both customer and vendor
+        let conn = setup_test_db();
+        let partner = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "雙重夥伴股份有限公司".to_string(),
+            Some(true),
+            Some(true),
+            None,
+            Some("net".to_string()),
+            Some(30), // payment terms (vendor)
+            Some("month_end".to_string()),
+            Some(15), // collection terms (customer)
+            Some("業務備註".to_string()),
+            Some("monthly_consolidated".to_string()),
+        )
+        .unwrap();
+
+        // Then: Both payment and collection terms are set independently
+        assert_eq!(partner.payment_terms_type, Some("net".to_string()));
+        assert_eq!(partner.payment_terms_days, Some(30));
+        assert_eq!(partner.collection_terms_type, Some("month_end".to_string()));
+        assert_eq!(partner.collection_terms_days, Some(15));
+        assert_eq!(
+            partner.requested_collection_terms_note,
+            Some("業務備註".to_string())
+        );
+        assert_eq!(
+            partner.invoice_issuance_mode,
+            Some("monthly_consolidated".to_string())
+        );
+
+        // When: Updating only vendor payment terms
+        let updated = update_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            partner.id.clone(),
+            None,
+            None,
+            Some("month_end".to_string()),
+            Some(45),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Then: Vendor payment terms updated, customer collection terms remain untouched
+        assert_eq!(updated.payment_terms_type, Some("month_end".to_string()));
+        assert_eq!(updated.payment_terms_days, Some(45));
+        assert_eq!(updated.collection_terms_type, Some("month_end".to_string()));
+        assert_eq!(updated.collection_terms_days, Some(15));
+        assert_eq!(
+            updated.requested_collection_terms_note,
+            Some("業務備註".to_string())
+        );
+        assert_eq!(
+            updated.invoice_issuance_mode,
+            Some("monthly_consolidated".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tc_ct_e_01_and_02_ct01_must_set_both_or_neither() {
+        // Given: Test database
+        let conn = setup_test_db();
+
+        // When: Setting type without days
+        let err1 = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶1".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("net".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        // When: Setting days without type
+        let err2 = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶2".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            Some(30),
+            None,
+            None,
+        );
+
+        // Then: CT-01 error
+        assert_eq!(err1.unwrap_err(), "收款條件類型與天數需同時設定");
+        assert_eq!(err2.unwrap_err(), "收款條件類型與天數需同時設定");
+    }
+
+    #[test]
+    fn test_tc_ct_e_03_ct02_non_customer_cannot_set_collection_terms() {
+        // Given: Pure vendor (is_customer = false)
+        let conn = setup_test_db();
+
+        // When: Trying to set collection terms
+        let err = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "純供應商".to_string(),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            Some("net".to_string()),
+            Some(30),
+            None,
+            None,
+        );
+
+        // Then: CT-02 error
+        assert_eq!(err.unwrap_err(), "僅客戶可設定收款條件");
+    }
+
+    #[test]
+    fn test_tc_ct_e_04_to_06_ct03_and_ct04_invalid_type_and_days() {
+        // Given: Test database
+        let conn = setup_test_db();
+
+        // When: Invalid type
+        let err_type = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶_非法類型".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("quarterly".to_string()),
+            Some(30),
+            None,
+            None,
+        );
+        // Then: CT-03 error
+        assert_eq!(err_type.unwrap_err(), "收款條件類型需為 net 或 month_end");
+
+        // When: Negative days (boundary -1)
+        let err_neg = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶_負數天數".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("net".to_string()),
+            Some(-1),
+            None,
+            None,
+        );
+        // Then: CT-04 error
+        assert_eq!(err_neg.unwrap_err(), "收款天數需為 0～365 的整數");
+
+        // When: Exceeding max days (boundary 366)
+        let err_over = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶_超過365天".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some("net".to_string()),
+            Some(366),
+            None,
+            None,
+        );
+        // Then: CT-04 error
+        assert_eq!(err_over.unwrap_err(), "收款天數需為 0～365 的整數");
+    }
+
+    #[test]
+    fn test_tc_ct_e_07_and_08_ct05_invoice_issuance_mode_errors() {
+        // Given: Test database
+        let conn = setup_test_db();
+
+        // When: Pure vendor sets invoice_issuance_mode
+        let err_vnd = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "廠商開票".to_string(),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("per_order".to_string()),
+        );
+        // Then: CT-05 non-customer error
+        assert_eq!(err_vnd.unwrap_err(), "僅客戶可設定開票模式");
+
+        // When: Invalid mode value
+        let err_val = create_partner_with_all_terms_impl(
+            &conn,
+            TEST_TENANT,
+            "客戶開票".to_string(),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("yearly".to_string()),
+        );
+        // Then: CT-05 value error
+        assert_eq!(
+            err_val.unwrap_err(),
+            "開票模式需為 per_order 或 monthly_consolidated"
+        );
     }
 }
