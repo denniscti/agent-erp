@@ -99,6 +99,11 @@ import {
   formatMockAccountPayable
 } from './accountsPayable/mocks.js';
 import {
+  accountReceivableMocks,
+  mockAccountsReceivable,
+  formatMockAccountReceivable
+} from './accountsReceivable/mocks.js';
+import {
   vendorPaymentMocks,
   mockVendorPayments,
   mockVendorPaymentAllocations,
@@ -185,6 +190,9 @@ export {
   accountPayableMocks,
   mockAccountsPayable,
   formatMockAccountPayable,
+  accountReceivableMocks,
+  mockAccountsReceivable,
+  formatMockAccountReceivable,
   vendorPaymentMocks,
   mockVendorPayments,
   mockVendorPaymentAllocations,
@@ -480,6 +488,7 @@ export async function invoke(cmd, args = {}) {
     ...vendorBillMocks,
     ...openingPayableMocks,
     ...accountPayableMocks,
+    ...accountReceivableMocks,
     ...vendorPaymentMocks,
     ...quoteMocks,
     ...salesOrderMocks

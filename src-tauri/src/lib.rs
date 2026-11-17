@@ -6,6 +6,7 @@ use tauri::AppHandle;
 use tauri::Manager;
 
 pub mod accounts_payable;
+pub mod accounts_receivable;
 pub mod auth;
 pub mod departments;
 pub mod inventory_adjustments;
@@ -63,6 +64,7 @@ where
         "stock_transfers",
         "unit_conversions",
         "accounts_payable",
+        "accounts_receivable",
         "vendor_bills",
         "opening_payables",
         "vendor_payments",
@@ -257,6 +259,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     accounts_payable::create_accounts_payable_tables(&conn)
         .map_err(|e| format!("Failed to create accounts payable tables: {}", e))?;
+
+    accounts_receivable::create_accounts_receivable_tables(&conn)
+        .map_err(|e| format!("Failed to create accounts receivable tables: {}", e))?;
 
     vendor_bills::create_vendor_bills_tables(&conn)
         .map_err(|e| format!("Failed to create vendor bills tables: {}", e))?;
@@ -598,6 +603,8 @@ pub fn run() {
             accounts_payable::list_accounts_payable,
             accounts_payable::get_payables_aging,
             accounts_payable::get_vendor_statement,
+            accounts_receivable::get_account_receivable,
+            accounts_receivable::list_accounts_receivable,
             vendor_bills::create_vendor_bill,
             vendor_bills::update_vendor_bill_header,
             vendor_bills::add_vendor_bill_order,
