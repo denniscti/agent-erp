@@ -102,8 +102,6 @@ import {
   vendorPaymentMocks,
   mockVendorPayments,
   mockVendorPaymentAllocations,
-  mockPayments,
-  mockPaymentAllocations,
   formatMockVendorPayment
 } from './vendorPayments/mocks.js';
 import {
@@ -190,8 +188,6 @@ export {
   vendorPaymentMocks,
   mockVendorPayments,
   mockVendorPaymentAllocations,
-  mockPayments,
-  mockPaymentAllocations,
   formatMockVendorPayment,
   quoteMocks,
   mockQuotes,

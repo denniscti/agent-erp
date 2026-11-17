@@ -474,7 +474,7 @@ fn resolve_vendor_snapshot(
 }
 
 /// Helper to get current AP outstanding balance (AP total amount minus sum of allocations in posted payments)
-fn get_ap_info(
+pub fn get_ap_info(
     conn: &Connection,
     tenant_id: &str,
     ap_id: &str,
@@ -506,6 +506,17 @@ fn get_ap_info(
         }
         Err(e) => return Err(VendorPaymentError::DatabaseError(e.to_string())),
     };
+
+    if status == "voided" {
+        return Ok((
+            round_2(total_amount),
+            0.0,
+            source_number,
+            doc_date,
+            status,
+            vnd_id,
+        ));
+    }
 
     // Calculate posted allocations sum
     let mut posted_stmt = conn

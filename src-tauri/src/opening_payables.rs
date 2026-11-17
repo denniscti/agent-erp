@@ -937,6 +937,7 @@ mod tests {
 
         crate::purchase_orders::create_purchase_orders_tables(&conn).unwrap();
         crate::accounts_payable::create_accounts_payable_tables(&conn).unwrap();
+        crate::vendor_payments::create_vendor_payment_tables(&conn).unwrap();
         create_opening_payables_tables(&conn).unwrap();
 
         // Seed tenant, user, session
@@ -1635,13 +1636,13 @@ mod tests {
 
         // Seed a posted payment and allocation
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, status, created_by, created_at, posted_by, posted_at)
-             VALUES ('pay_001', 'tnt_test', 'PAY-00001', 'vnd_001', '2026-01-15', 5000.0, 'posted', 'usr_admin', 1700000000, 'usr_admin', 1700000000)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at, posted_by, posted_at)
+             VALUES ('pay_001', 'tnt_test', 'PAY-00001', 'vnd_001', '測試供應商', '2026-01-15', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 1700000000, 'usr_admin', 1700000000)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
              VALUES ('pa_001', 'tnt_test', 'pay_001', ?1, 5000.0, 1700000000)",
             params![ap_id],
         )

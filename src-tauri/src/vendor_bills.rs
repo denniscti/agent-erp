@@ -1963,6 +1963,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::partners::create_partners_table(&conn).unwrap();
         crate::accounts_payable::create_accounts_payable_tables(&conn).unwrap();
+        crate::vendor_payments::create_vendor_payment_tables(&conn).unwrap();
         crate::purchase_orders::create_purchase_orders_tables(&conn).unwrap();
         create_vendor_bills_tables(&conn).unwrap();
 
@@ -3462,12 +3463,12 @@ mod tests {
 
         // Insert a posted payment and allocation
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, status, created_by, created_at)
-             VALUES ('pay_001', 'tnt_test', 'PAY-00001', 'vnd_001', '2026-01-10', 2100.0, 'posted', 'usr_admin', 1000)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_001', 'tnt_test', 'PAY-00001', 'vnd_001', '測試供應商 A', '2026-01-10', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 1000)",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
              VALUES ('pa_001', 'tnt_test', 'pay_001', ?1, 2100.0, 1000)",
             params![ap_id],
         ).unwrap();

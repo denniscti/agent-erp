@@ -17,9 +17,7 @@ import {
   formatMockAccountPayable
 } from '../accountsPayable/mocks.js';
 import {
-  mockPaymentAllocations,
   mockVendorPaymentAllocations,
-  mockPayments,
   mockVendorPayments
 } from '../vendorPayments/mocks.js';
 import { calculateDueDate } from '../paymentTerms.js';
@@ -506,13 +504,11 @@ export const vendorBillMocks = {
 
     const ap = mockAccountsPayable.find(a => (a.tenant_id || 'tnt_mock_1') === targetTenantId && a.source_type === 'vendor_bill' && a.source_id === bill.id && a.status === 'open');
     if (ap) {
-      const allAllocations = [...(mockPaymentAllocations || []), ...(mockVendorPaymentAllocations || [])];
-      const allPayments = [...(mockPayments || []), ...(mockVendorPayments || [])];
-      const apAllocations = allAllocations
+      const apAllocations = (mockVendorPaymentAllocations || [])
         .filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId)
         .sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
       for (const pa of apAllocations) {
-        const p = allPayments.find(pay => pay.id === pa.payment_id && (pay.tenant_id || 'tnt_mock_1') === targetTenantId && pay.status === 'posted');
+        const p = (mockVendorPayments || []).find(pay => pay.id === pa.payment_id && (pay.tenant_id || 'tnt_mock_1') === targetTenantId && pay.status === 'posted');
         if (p) {
           throw new Error(`此請款單已有付款核銷：${p.payment_number}，請先作廢付款單`);
         }

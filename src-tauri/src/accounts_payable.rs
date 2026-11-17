@@ -477,93 +477,6 @@ pub fn create_accounts_payable_tables(conn: &rusqlite::Connection) -> Result<(),
         [],
     )?;
 
-    // Payments and payment_allocations tables for settlements and AP-04 checks
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS payments (
-            id TEXT PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
-            payment_number TEXT NOT NULL,
-            vendor_partner_id TEXT NOT NULL,
-            payment_date TEXT NOT NULL,
-            amount REAL NOT NULL,
-            currency TEXT NOT NULL DEFAULT 'TWD',
-            status TEXT NOT NULL,
-            created_by TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            posted_by TEXT,
-            posted_at INTEGER,
-            voided_by TEXT,
-            voided_at INTEGER,
-            void_reason TEXT
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_payments_tenant_vendor ON payments (tenant_id, vendor_partner_id)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS payment_allocations (
-            id TEXT PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
-            payment_id TEXT NOT NULL,
-            account_payable_id TEXT NOT NULL,
-            amount REAL NOT NULL,
-            created_at INTEGER NOT NULL
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_pa_ap_id ON payment_allocations (tenant_id, account_payable_id)",
-        [],
-    )?;
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_pa_payment_id ON payment_allocations (tenant_id, payment_id)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS vendor_payments (
-            id TEXT PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
-            payment_number TEXT NOT NULL,
-            vendor_partner_id TEXT NOT NULL,
-            vendor_name_snapshot TEXT NOT NULL,
-            payment_date TEXT NOT NULL,
-            payment_method TEXT NOT NULL,
-            payment_reference TEXT,
-            note TEXT,
-            currency TEXT NOT NULL DEFAULT 'TWD',
-            status TEXT NOT NULL,
-            created_by TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            posted_by TEXT,
-            posted_at INTEGER,
-            cancelled_by TEXT,
-            cancelled_at INTEGER,
-            voided_by TEXT,
-            voided_at INTEGER,
-            void_reason TEXT,
-            task_id TEXT
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS vendor_payment_allocations (
-            id TEXT PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
-            payment_id TEXT NOT NULL,
-            account_payable_id TEXT NOT NULL,
-            amount REAL NOT NULL,
-            created_at INTEGER NOT NULL
-        )",
-        [],
-    )?;
-
     Ok(())
 }
 
@@ -783,16 +696,8 @@ pub fn void_account_payable_in_tx(
     // AP-04: Cannot void if there are any allocations from posted payments
     let posted_payment_res: Result<String, _> = conn.query_row(
         "SELECT p.payment_number
-         FROM (
-             SELECT id, tenant_id, payment_id, account_payable_id, created_at FROM vendor_payment_allocations
-             UNION ALL
-             SELECT id, tenant_id, payment_id, account_payable_id, created_at FROM payment_allocations
-         ) pa
-         JOIN (
-             SELECT id, tenant_id, payment_number, status FROM vendor_payments
-             UNION ALL
-             SELECT id, tenant_id, payment_number, status FROM payments
-         ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+         FROM vendor_payment_allocations pa
+         JOIN vendor_payments p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
          WHERE pa.account_payable_id = ?1 AND pa.tenant_id = ?2 AND p.status = 'posted'
          ORDER BY pa.created_at ASC LIMIT 1",
         params![ap_id_trimmed, tid],
@@ -915,16 +820,8 @@ pub fn get_account_payable_impl(
     // Query allocations
     let mut alloc_stmt = conn.prepare(
         "SELECT pa.id, pa.payment_id, p.payment_number, pa.amount, p.payment_date, p.status, pa.created_at
-         FROM (
-             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM vendor_payment_allocations
-             UNION ALL
-             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM payment_allocations
-         ) pa
-         JOIN (
-             SELECT id, tenant_id, payment_number, payment_date, status FROM vendor_payments
-             UNION ALL
-             SELECT id, tenant_id, payment_number, payment_date, status FROM payments
-         ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+         FROM vendor_payment_allocations pa
+         JOIN vendor_payments p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
          WHERE pa.account_payable_id = ?1 AND pa.tenant_id = ?2
          ORDER BY pa.created_at ASC",
     )?;
@@ -951,7 +848,16 @@ pub fn get_account_payable_impl(
         allocations.push(detail);
     }
 
-    let (paid_amount, outstanding_amount, settlement_status) =
+    // Call unified get_ap_info for outstanding balance
+    let (_tot, outstanding_amount, _, _, _, _) =
+        crate::vendor_payments::get_ap_info(conn, tid, target_id).map_err(|e| match e {
+            crate::vendor_payments::VendorPaymentError::InvalidAllocationAccountPayable => {
+                AccountsPayableError::NotFound
+            }
+            _ => AccountsPayableError::DatabaseError(e.to_string()),
+        })?;
+
+    let (paid_amount, _, settlement_status) =
         calculate_derived_amounts(&ap.status, ap.amount, raw_paid_amount);
 
     Ok(AccountPayableDetail {
@@ -998,16 +904,8 @@ pub fn list_accounts_payable_impl(
             ap.created_by, ap.created_at, ap.voided_by, ap.voided_at, ap.void_reason,
             COALESCE(
                 (SELECT SUM(pa.amount)
-                 FROM (
-                     SELECT tenant_id, payment_id, account_payable_id, amount FROM vendor_payment_allocations
-                     UNION ALL
-                     SELECT tenant_id, payment_id, account_payable_id, amount FROM payment_allocations
-                 ) pa
-                 JOIN (
-                     SELECT id, tenant_id, status FROM vendor_payments
-                     UNION ALL
-                     SELECT id, tenant_id, status FROM payments
-                 ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+                 FROM vendor_payment_allocations pa
+                 JOIN vendor_payments p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
                  WHERE pa.account_payable_id = ap.id
                    AND pa.tenant_id = ap.tenant_id
                    AND p.status = 'posted'),
@@ -1377,18 +1275,8 @@ pub fn get_vendor_statement_impl(
 
     let opening_paid: f64 = conn.query_row(
         "SELECT COALESCE(SUM(pa.amount), 0.0)
-         FROM (
-             SELECT id, tenant_id, payment_id, account_payable_id, amount FROM vendor_payment_allocations
-             UNION ALL
-             SELECT id, tenant_id, payment_id, account_payable_id, amount FROM payment_allocations
-             WHERE id NOT IN (SELECT id FROM vendor_payment_allocations WHERE tenant_id = ?1)
-         ) pa
-         JOIN (
-             SELECT id, tenant_id, payment_date, status, vendor_partner_id FROM vendor_payments
-             UNION ALL
-             SELECT id, tenant_id, payment_date, status, vendor_partner_id FROM payments
-             WHERE id NOT IN (SELECT id FROM vendor_payments WHERE tenant_id = ?1)
-         ) p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
+         FROM vendor_payment_allocations pa
+         JOIN vendor_payments p ON p.id = pa.payment_id AND p.tenant_id = pa.tenant_id
          JOIN accounts_payable ap ON ap.id = pa.account_payable_id AND ap.tenant_id = pa.tenant_id
          WHERE pa.tenant_id = ?1
            AND p.vendor_partner_id = ?2
@@ -1439,14 +1327,7 @@ pub fn get_vendor_statement_impl(
     // 3. Query current period posted payments [start_date, end_date]
     let mut pay_stmt = conn.prepare(
         "SELECT id, payment_number, payment_date, payment_method, payment_reference, note
-         FROM (
-             SELECT id, tenant_id, vendor_partner_id, status, payment_number, payment_date, payment_method, payment_reference, note, created_at
-             FROM vendor_payments
-             UNION ALL
-             SELECT id, tenant_id, vendor_partner_id, status, payment_number, payment_date, 'bank_transfer' as payment_method, NULL as payment_reference, NULL as note, created_at
-             FROM payments
-             WHERE id NOT IN (SELECT id FROM vendor_payments WHERE tenant_id = ?1)
-         )
+         FROM vendor_payments
          WHERE tenant_id = ?1
            AND vendor_partner_id = ?2
            AND status = 'posted'
@@ -1477,12 +1358,7 @@ pub fn get_vendor_statement_impl(
 
     let mut alloc_stmt = conn.prepare(
         "SELECT pa.account_payable_id, ap.source_type, ap.source_id, ap.source_number, pa.amount
-         FROM (
-             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM vendor_payment_allocations
-             UNION ALL
-             SELECT id, tenant_id, payment_id, account_payable_id, amount, created_at FROM payment_allocations
-             WHERE id NOT IN (SELECT id FROM vendor_payment_allocations WHERE tenant_id = ?1)
-         ) pa
+         FROM vendor_payment_allocations pa
          JOIN accounts_payable ap ON ap.id = pa.account_payable_id AND ap.tenant_id = pa.tenant_id
          WHERE pa.tenant_id = ?1
            AND pa.payment_id = ?2
@@ -1580,6 +1456,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::partners::create_partners_table(&conn).unwrap();
         create_accounts_payable_tables(&conn).unwrap();
+        crate::vendor_payments::create_vendor_payment_tables(&conn).unwrap();
 
         // Seed a valid vendor partner
         conn.execute(
@@ -1839,12 +1716,12 @@ mod tests {
 
         // Insert a posted payment and allocation
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
-             VALUES ('pay_001', 'tnt_test', 'PAY-00001', 'vnd_001', '2026-11-05', 1000.0, 'TWD', 'posted', 'usr_admin', 2000)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_001', 'tnt_test', 'PAY-00001', 'vnd_001', '測試供應商股份公司', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000)",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
              VALUES ('pa_001', 'tnt_test', 'pay_001', ?1, 1000.0, 2000)",
             params![ap.id],
         ).unwrap();
@@ -1859,7 +1736,7 @@ mod tests {
 
         // When: Voiding the payment itself
         conn.execute(
-            "UPDATE payments SET status = 'voided' WHERE id = 'pay_001'",
+            "UPDATE vendor_payments SET status = 'voided' WHERE id = 'pay_001'",
             [],
         )
         .unwrap();
@@ -1939,18 +1816,21 @@ mod tests {
         let ap = create_account_payable(&mut conn, "tnt_test", "usr_admin", input).unwrap();
 
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
-             VALUES ('pay_real', 'tnt_test', 'PAY-REAL', 'vnd_001', '2026-11-05', 100.0, 'TWD', 'posted', 'usr_admin', 2000)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_real_1', 'tnt_test', 'PAY-REAL-1', 'vnd_001', '測試供應商股份公司', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000),
+                    ('pay_real_2', 'tnt_test', 'PAY-REAL-2', 'vnd_001', '測試供應商股份公司', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000),
+                    ('pay_real_3', 'tnt_test', 'PAY-REAL-3', 'vnd_001', '測試供應商股份公司', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000),
+                    ('pay_real_4', 'tnt_test', 'PAY-REAL-4', 'vnd_001', '測試供應商股份公司', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000)",
             [],
         ).unwrap();
 
         // Three 33.33 and one 0.01
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at) VALUES
-             ('pa_1', 'tnt_test', 'pay_real', ?1, 33.33, 2001),
-             ('pa_2', 'tnt_test', 'pay_real', ?1, 33.33, 2002),
-             ('pa_3', 'tnt_test', 'pay_real', ?1, 33.33, 2003),
-             ('pa_4', 'tnt_test', 'pay_real', ?1, 0.01, 2004)",
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at) VALUES
+             ('pa_1', 'tnt_test', 'pay_real_1', ?1, 33.33, 2001),
+             ('pa_2', 'tnt_test', 'pay_real_2', ?1, 33.33, 2002),
+             ('pa_3', 'tnt_test', 'pay_real_3', ?1, 33.33, 2003),
+             ('pa_4', 'tnt_test', 'pay_real_4', ?1, 0.01, 2004)",
             params![ap.id],
         ).unwrap();
 
@@ -1988,12 +1868,12 @@ mod tests {
 
         // Case DER-02: Partial allocation (40.00) -> PartiallyPaid
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
-             VALUES ('pay_part', 'tnt_test', 'PAY-PART', 'vnd_001', '2026-11-05', 40.0, 'TWD', 'posted', 'usr_admin', 2000)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_part', 'tnt_test', 'PAY-PART', 'vnd_001', '測試供應商股份公司', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000)",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
              VALUES ('pa_part', 'tnt_test', 'pay_part', ?1, 40.0, 2000)",
             params![ap.id],
         ).unwrap();
@@ -2004,12 +1884,12 @@ mod tests {
 
         // Case DER-03: Full allocation (+60.00) -> Paid
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
-             VALUES ('pay_full', 'tnt_test', 'PAY-FULL', 'vnd_001', '2026-11-06', 60.0, 'TWD', 'posted', 'usr_admin', 2010)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_full', 'tnt_test', 'PAY-FULL', 'vnd_001', '測試供應商股份公司', '2026-11-06', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2010)",
             [],
         ).unwrap();
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
              VALUES ('pa_full', 'tnt_test', 'pay_full', ?1, 60.0, 2010)",
             params![ap.id],
         ).unwrap();
@@ -2020,7 +1900,7 @@ mod tests {
 
         // Case DER-04: Voiding both payments restores outstanding amount and returns to Unpaid
         conn.execute(
-            "UPDATE payments SET status = 'voided' WHERE id IN ('pay_part', 'pay_full')",
+            "UPDATE vendor_payments SET status = 'voided' WHERE id IN ('pay_part', 'pay_full')",
             [],
         )
         .unwrap();
@@ -2442,13 +2322,13 @@ mod tests {
 
         // Simulate partial payment of 4999.99 on ap5
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
-             VALUES ('pay_part', 'tnt_test', 'PAY-PART', 'vnd_001', '2026-02-15', 4999.99, 'TWD', 'posted', 'usr_admin', 1000)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_part', 'tnt_test', 'PAY-PART', 'vnd_001', '測試供應商股份公司', '2026-02-15', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 1000)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
              VALUES ('paya_part', 'tnt_test', 'pay_part', ?1, 4999.99, 1000)",
             params![ap5.id],
         )
@@ -2528,13 +2408,13 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payments (id, tenant_id, payment_number, vendor_partner_id, payment_date, amount, currency, status, created_by, created_at)
-             VALUES ('pay_full', 'tnt_test', 'PAY-FULL', 'vnd_001', '2026-02-01', 800.0, 'TWD', 'posted', 'usr_admin', 1000)",
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_full', 'tnt_test', 'PAY-FULL', 'vnd_001', '測試供應商股份公司', '2026-02-01', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 1000)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
              VALUES ('paya_full', 'tnt_test', 'pay_full', ?1, 800.0, 1000)",
             params![ap_paid.id],
         )
@@ -2988,6 +2868,138 @@ mod tests {
                     - single_stmt.current_payments_total
             ),
             single_stmt.closing_balance
+        );
+    }
+
+    #[test]
+    fn test_tc_pay_conv_old_tables_removed_and_convergence() {
+        // Given: A fresh in-memory database initialized only with create_accounts_payable_tables
+        let conn = Connection::open_in_memory().unwrap();
+        create_accounts_payable_tables(&conn).unwrap();
+
+        // When: Querying sqlite_master for legacy tables "payments" and "payment_allocations"
+        let legacy_tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('payments', 'payment_allocations')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        // Then (TC-PAY-CONV-N02): Neither "payments" nor "payment_allocations" exist
+        assert_eq!(legacy_tables.len(), 0);
+
+        // Given: Database with vendor_payments tables also initialized
+        crate::partners::create_partners_table(&conn).unwrap();
+        crate::vendor_payments::create_vendor_payment_tables(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO partners (id, tenant_id, name, is_vendor, is_customer, created_at)
+             VALUES ('vnd_conv', 'tnt_test', '收斂測試供應商', 1, 0, 1000)",
+            [],
+        )
+        .unwrap();
+
+        let mut mut_conn = conn;
+        let ap = create_account_payable(
+            &mut mut_conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_conv".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_conv_1".to_string(),
+                source_number: "BILL-CONV-1".to_string(),
+                external_reference: None,
+                document_date: "2026-11-01".to_string(),
+                due_date: "2026-11-30".to_string(),
+                amount: 1000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // When (TC-PAY-CONV-N01): Query AP balance before any payment
+        let ap_info_init =
+            crate::vendor_payments::get_ap_info(&mut_conn, "tnt_test", &ap.id).unwrap();
+        let detail_init = get_account_payable_impl(&mut_conn, "tnt_test", &ap.id).unwrap();
+
+        // Then: Outstanding equals total amount (1000.0)
+        assert_eq!(ap_info_init.1, 1000.0);
+        assert_eq!(detail_init.outstanding_amount, 1000.0);
+        assert_eq!(detail_init.paid_amount, 0.0);
+        assert_eq!(detail_init.settlement_status, SettlementStatus::Unpaid);
+
+        // When (TC-PAY-CONV-B02 & B04): Post full payment with allocations in vendor_payments
+        mut_conn.execute(
+            "INSERT INTO vendor_payments (id, tenant_id, payment_number, vendor_partner_id, vendor_name_snapshot, payment_date, payment_method, currency, status, created_by, created_at)
+             VALUES ('pay_conv_1', 'tnt_test', 'PAY-CONV-001', 'vnd_conv', '收斂測試供應商', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000),
+                    ('pay_conv_2', 'tnt_test', 'PAY-CONV-002', 'vnd_conv', '收斂測試供應商', '2026-11-05', 'bank_transfer', 'TWD', 'posted', 'usr_admin', 2000)",
+            [],
+        ).unwrap();
+        mut_conn.execute(
+            "INSERT INTO vendor_payment_allocations (id, tenant_id, payment_id, account_payable_id, amount, created_at)
+             VALUES ('pa_conv_1', 'tnt_test', 'pay_conv_1', ?1, 999.99, 2000),
+                    ('pa_conv_2', 'tnt_test', 'pay_conv_2', ?1, 0.01, 2001)",
+            params![ap.id],
+        ).unwrap();
+
+        let ap_info_paid =
+            crate::vendor_payments::get_ap_info(&mut_conn, "tnt_test", &ap.id).unwrap();
+        let detail_paid = get_account_payable_impl(&mut_conn, "tnt_test", &ap.id).unwrap();
+
+        // Then: Outstanding equals 0.0, settlement_status is Paid
+        assert_eq!(ap_info_paid.1, 0.0);
+        assert_eq!(detail_paid.outstanding_amount, 0.0);
+        assert_eq!(detail_paid.paid_amount, 1000.0);
+        assert_eq!(detail_paid.settlement_status, SettlementStatus::Paid);
+
+        // When (TC-PAY-CONV-N04): Attempt to void AP with posted payment allocation
+        let void_err =
+            void_account_payable(&mut mut_conn, "tnt_test", "usr_admin", &ap.id, "嘗試作廢");
+
+        // Then: Blocked by AP-04
+        assert_eq!(
+            void_err.unwrap_err(),
+            AccountsPayableError::HasPostedPaymentAllocations("PAY-CONV-001".to_string())
+        );
+
+        // When (TC-PAY-CONV-B01): Voiding AP without payments returns outstanding 0.0 in get_ap_info
+        let ap_to_void = create_account_payable(
+            &mut mut_conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_conv".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_conv_void".to_string(),
+                source_number: "BILL-CONV-VOID".to_string(),
+                external_reference: None,
+                document_date: "2026-11-01".to_string(),
+                due_date: "2026-11-30".to_string(),
+                amount: 500.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+        void_account_payable(
+            &mut mut_conn,
+            "tnt_test",
+            "usr_admin",
+            &ap_to_void.id,
+            "測試正常作廢",
+        )
+        .unwrap();
+        let ap_info_voided =
+            crate::vendor_payments::get_ap_info(&mut_conn, "tnt_test", &ap_to_void.id).unwrap();
+        assert_eq!(ap_info_voided.1, 0.0);
+
+        // When & Then (TC-PAY-CONV-E01): Non-existent AP ID
+        let err_not_found =
+            crate::vendor_payments::get_ap_info(&mut_conn, "tnt_test", "non_existent_ap");
+        assert_eq!(
+            err_not_found.unwrap_err(),
+            crate::vendor_payments::VendorPaymentError::InvalidAllocationAccountPayable
         );
     }
 }

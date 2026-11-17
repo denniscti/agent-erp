@@ -6,8 +6,6 @@ import {
 } from '../mockStorage.js';
 import { mockPartners } from '../partners/mocks.js';
 import {
-  mockPayments,
-  mockPaymentAllocations,
   mockVendorPayments,
   mockVendorPaymentAllocations
 } from '../vendorPayments/mocks.js';
@@ -28,15 +26,10 @@ if (!mockAccountsPayable || !Array.isArray(mockAccountsPayable)) {
 
 export function formatMockAccountPayable(ap) {
   const targetTenantId = ap.tenant_id || 'tnt_mock_1';
-  const allAllocations = [
-    ...(mockPaymentAllocations || []),
-    ...(mockVendorPaymentAllocations || []),
-  ];
-  const allocations = allAllocations
+  const allocations = (mockVendorPaymentAllocations || [])
     .filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId)
     .map(pa => {
-      const payment = (mockPayments || []).find(p => p.id === pa.payment_id) ||
-                      (mockVendorPayments || []).find(p => p.id === pa.payment_id) || {};
+      const payment = (mockVendorPayments || []).find(p => p.id === pa.payment_id) || {};
       return {
         id: pa.id,
         payment_id: pa.payment_id,
@@ -408,17 +401,11 @@ export const accountPayableMocks = {
     );
 
     // Gather posted payments
-    const allPayments = [
-      ...(mockVendorPayments || []),
-      ...(mockPayments || []).filter(p => !(mockVendorPayments || []).some(vp => vp.id === p.id))
-    ].filter(
+    const allPayments = (mockVendorPayments || []).filter(
       p => (p.tenant_id || 'tnt_mock_1') === targetTenantId && p.vendor_partner_id === vid && p.status === 'posted'
     );
 
-    const allAllocations = [
-      ...(mockVendorPaymentAllocations || []),
-      ...(mockPaymentAllocations || []).filter(pa => !(mockVendorPaymentAllocations || []).some(vpa => vpa.id === pa.id))
-    ].filter(
+    const allAllocations = (mockVendorPaymentAllocations || []).filter(
       pa => (pa.tenant_id || 'tnt_mock_1') === targetTenantId
     );
 

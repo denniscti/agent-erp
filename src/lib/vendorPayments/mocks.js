@@ -8,19 +8,6 @@ import {
 import { mockPartners } from '../partners/mocks.js';
 import { mockAccountsPayable } from '../accountsPayable/mocks.js';
 
-// Legacy payment tables for #218 tech debt (dual-track payment convergence)
-export let mockPayments = loadStorage('agent_erp_mock_payments', []);
-if (!mockPayments || !Array.isArray(mockPayments)) {
-  mockPayments = [];
-  saveStorage('agent_erp_mock_payments', mockPayments);
-}
-
-export let mockPaymentAllocations = loadStorage('agent_erp_mock_payment_allocations', []);
-if (!mockPaymentAllocations || !Array.isArray(mockPaymentAllocations)) {
-  mockPaymentAllocations = [];
-  saveStorage('agent_erp_mock_payment_allocations', mockPaymentAllocations);
-}
-
 // Current M15 Vendor Payments
 export let mockVendorPayments = loadStorage('agent_erp_mock_vendor_payments', []);
 if (!mockVendorPayments || !Array.isArray(mockVendorPayments)) {
@@ -232,15 +219,12 @@ export const vendorPaymentMocks = {
     }
 
     // Compute outstanding from posted allocations only
-    const allPostedAllocations = [
-      ...(mockPaymentAllocations || []),
-      ...(mockVendorPaymentAllocations || [])
-    ].filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId);
+    const allPostedAllocations = (mockVendorPaymentAllocations || [])
+      .filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId);
 
     let postedSum = 0;
     for (const pa of allPostedAllocations) {
-      const isPosted = (mockPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted') ||
-                       (mockVendorPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted');
+      const isPosted = (mockVendorPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted');
       if (isPosted) {
         postedSum += Number(pa.amount);
       }
@@ -298,15 +282,12 @@ export const vendorPaymentMocks = {
       throw new Error('核銷金額必須大於 0');
     }
 
-    const allPostedAllocations = [
-      ...(mockPaymentAllocations || []),
-      ...(mockVendorPaymentAllocations || [])
-    ].filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId);
+    const allPostedAllocations = (mockVendorPaymentAllocations || [])
+      .filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId);
 
     let postedSum = 0;
     for (const pa of allPostedAllocations) {
-      const isPosted = (mockPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted') ||
-                       (mockVendorPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted');
+      const isPosted = (mockVendorPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted');
       if (isPosted) {
         postedSum += Number(pa.amount);
       }
@@ -382,15 +363,12 @@ export const vendorPaymentMocks = {
         throw new Error(`付款日不可早於〔${ap.source_number}〕的單據日`);
       }
 
-      const allPostedAllocations = [
-        ...(mockPaymentAllocations || []),
-        ...(mockVendorPaymentAllocations || [])
-      ].filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId);
+      const allPostedAllocations = (mockVendorPaymentAllocations || [])
+        .filter(pa => pa.account_payable_id === ap.id && (pa.tenant_id || 'tnt_mock_1') === targetTenantId);
 
       let postedSum = 0;
       for (const pa of allPostedAllocations) {
-        const isPosted = (mockPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted') ||
-                         (mockVendorPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted');
+        const isPosted = (mockVendorPayments || []).some(p => p.id === pa.payment_id && p.status === 'posted');
         if (isPosted) {
           postedSum += Number(pa.amount);
         }
@@ -517,12 +495,28 @@ export const vendorPaymentMocks = {
   inject_mock_payment_allocation: async (args) => {
     const { payment, allocation } = args || {};
     if (payment) {
-      mockPayments.push(payment);
-      saveStorage('agent_erp_mock_payments', mockPayments);
+      const normalizedPayment = {
+        vendor_partner_id: 'vnd_mock_1',
+        vendor_name_snapshot: 'Mock Vendor',
+        payment_date: '2026-01-10',
+        payment_method: 'bank_transfer',
+        payment_reference: null,
+        note: null,
+        currency: 'TWD',
+        created_by: 'usr_mock_1',
+        created_at: Math.floor(Date.now() / 1000),
+        ...payment
+      };
+      mockVendorPayments.push(normalizedPayment);
+      saveStorage('agent_erp_mock_vendor_payments', mockVendorPayments);
     }
     if (allocation) {
-      mockPaymentAllocations.push(allocation);
-      saveStorage('agent_erp_mock_payment_allocations', mockPaymentAllocations);
+      const normalizedAlloc = {
+        created_at: Math.floor(Date.now() / 1000),
+        ...allocation
+      };
+      mockVendorPaymentAllocations.push(normalizedAlloc);
+      saveStorage('agent_erp_mock_vendor_payment_allocations', mockVendorPaymentAllocations);
     }
     return true;
   }
