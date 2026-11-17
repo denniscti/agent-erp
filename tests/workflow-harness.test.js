@@ -16,7 +16,7 @@ import {
   createDepartmentToolHandler,
   listDepartmentsToolHandler,
   departmentAgentProfile
-} from '../src/lib/workflow/departments.js';
+} from '../src/lib/departments/workflow.js';
 
 import {
   getAgentProfileForTask,

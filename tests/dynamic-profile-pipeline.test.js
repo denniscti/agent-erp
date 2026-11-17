@@ -10,16 +10,16 @@ import {
 
 import {
   departmentAgentProfile
-} from '../src/lib/workflow/departments.js';
+} from '../src/lib/departments/workflow.js';
 
 import {
   customerCreateBasicProfileAgentProfile,
   vendorCreateBasicProfileAgentProfile
-} from '../src/lib/workflow/partners.js';
+} from '../src/lib/partners/workflow.js';
 
 import {
   productManagementAgentProfile
-} from '../src/lib/workflow/products.js';
+} from '../src/lib/products/workflow.js';
 
 // ==============================================================================
 // Section 1: Department Regression Suite (13 Test Cases from Issue #163 Spike)

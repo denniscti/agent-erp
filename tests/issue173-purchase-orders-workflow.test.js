@@ -59,7 +59,7 @@ const {
   confirmPurchaseOrderReceivedToolHandler,
   cancelPurchaseOrderToolHandler,
   buildCatalogContext
-} = await import('../src/lib/workflow/purchaseOrders.js');
+} = await import('../src/lib/purchaseOrders/workflow.js');
 
 const {
   getAgentProfileForTask,

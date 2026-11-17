@@ -121,7 +121,7 @@ export const customerCreateBasicProfileAgentProfile = {
 };
 ```
 
-`createPartnerToolHandler`/`listPartnersToolHandler` 的撰寫方式比照既有 [`departments.js`](../../../src/lib/workflow/departments.js) 的 `createDepartmentToolHandler`/`listDepartmentsToolHandler`（`describeConfirmation`/`execute`/`formatResult`/`extractCandidateRegex` 等欄位的實作模式一致）。
+`createPartnerToolHandler`/`listPartnersToolHandler` 的撰寫方式比照既有 [`departments/workflow.js`](../../../src/lib/departments/workflow.js) 的 `createDepartmentToolHandler`/`listDepartmentsToolHandler`（`describeConfirmation`/`execute`/`formatResult`/`extractCandidateRegex` 等欄位的實作模式一致）。
 
 ---
 
