@@ -549,6 +549,35 @@ export const salesOrderMocks = {
   reset_mock_sales_orders: async (args) => {
     const { tenant_id, tenantId } = args || {};
     return resetMockSalesOrders(tenant_id || tenantId);
+  },
+
+  create_mock_sales_order: async (args) => {
+    const { tenant_id, customer_partner_id, so_number, created_at, status } = args || {};
+    const order = {
+      id: nextMockUid('so'),
+      tenant_id: tenant_id || resolveMockActiveTenantId(),
+      so_number: so_number || nextMockSoNumber(tenant_id || resolveMockActiveTenantId()),
+      customer_partner_id: customer_partner_id,
+      customer_name_snapshot: 'Mock Customer',
+      customer_reference: null,
+      source_quote_id: nextMockUid('quote'),
+      warehouse_id: 'wh_main',
+      currency: 'TWD',
+      status: status || 'confirmed',
+      expected_ship_date: null,
+      ship_date: null,
+      note: null,
+      created_by: resolveMockActiveUserId(),
+      created_at: created_at || Math.floor(Date.now() / 1000),
+      confirmed_at: created_at || Math.floor(Date.now() / 1000),
+      shipped_by: null,
+      shipped_at: null,
+      cancelled_at: null,
+      task_id: null
+    };
+    mockSalesOrders.push(order);
+    saveStorage('agent_erp_mock_sales_orders', mockSalesOrders);
+    return order;
   }
 };
 

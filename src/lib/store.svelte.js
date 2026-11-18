@@ -176,6 +176,12 @@ export {
 } from './openingPayables/store.js';
 
 export {
+  loadOpeningReceivablesAction,
+  createOpeningReceivableAction,
+  voidOpeningReceivableAction
+} from './openingReceivables/store.js';
+
+export {
   fetchVendorBills,
   fetchVendorBillDetail,
   fetchUnbilledReceivedOrders,
@@ -550,6 +556,12 @@ export const appState = $state({
   openingPayables: [],
   /** @type {any | null} */
   currentOpeningPayableDetail: null,
+
+  // Opening Receivables cache (Issue #224)
+  /** @type {any[]} */
+  openingReceivables: [],
+  /** @type {any | null} */
+  currentOpeningReceivableDetail: null,
 
   // Vendor Bills cache (Issue #202)
   /** @type {any[]} */

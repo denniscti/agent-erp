@@ -43,7 +43,11 @@ export async function createOpeningPayableAction(input) {
  */
 export async function voidOpeningPayableAction(id, void_reason) {
   try {
-    const detail = await invoke('void_opening_payable', { id, void_reason });
+    const detail = await invoke('void_opening_payable', {
+      id,
+      voidReason: void_reason,
+      void_reason: void_reason
+    });
     showToast(`期初應付單「${detail.opening_payable.opening_number}」已作廢！`);
     await loadOpeningPayablesAction();
     return detail;

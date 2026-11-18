@@ -211,7 +211,8 @@ export const openingPayableMocks = {
   },
 
   list_opening_payables: async (args) => {
-    const { vendor_partner_id, vendorPartnerId, status } = args || {};
+    const filterObj = args?.filter || args || {};
+    const { vendor_partner_id, vendorPartnerId, status } = filterObj;
     const targetTenantId = resolveMockActiveTenantId();
     let list = (mockOpeningPayables || []).filter(o => (o.tenant_id || 'tnt_mock_1') === targetTenantId);
     const vp = vendor_partner_id || vendorPartnerId;

@@ -14,6 +14,7 @@ pub mod inventory_adjustments;
 pub mod llm;
 pub mod llm_traces;
 pub mod opening_payables;
+pub mod opening_receivables;
 pub mod partners;
 pub mod products;
 pub mod purchase_orders;
@@ -69,6 +70,7 @@ where
         "customer_invoices",
         "vendor_bills",
         "opening_payables",
+        "opening_receivables",
         "vendor_payments",
     ];
     if !ALLOWED_TABLES.contains(&table) {
@@ -273,6 +275,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     opening_payables::create_opening_payables_tables(&conn)
         .map_err(|e| format!("Failed to create opening payables tables: {}", e))?;
+
+    opening_receivables::create_opening_receivables_tables(&conn)
+        .map_err(|e| format!("Failed to create opening receivables tables: {}", e))?;
 
     vendor_payments::create_vendor_payment_tables(&conn)
         .map_err(|e| format!("Failed to create vendor payment tables: {}", e))?;
@@ -637,6 +642,10 @@ pub fn run() {
             opening_payables::create_opening_payable,
             opening_payables::void_opening_payable,
             opening_payables::list_opening_payables,
+            opening_receivables::create_opening_receivable,
+            opening_receivables::void_opening_receivable,
+            opening_receivables::list_opening_receivables,
+            opening_receivables::get_opening_receivable,
             vendor_payments::create_vendor_payment,
             vendor_payments::update_vendor_payment_header,
             vendor_payments::add_vendor_payment_allocation,

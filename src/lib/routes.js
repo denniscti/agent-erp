@@ -17,6 +17,7 @@ import InventoryAdjustmentsWorkspace from './inventoryAdjustments/Workspace.svel
 import StocktakesWorkspace from './stocktakes/Workspace.svelte';
 import StockTransfersWorkspace from './stockTransfers/Workspace.svelte';
 import OpeningPayablesWorkspace from './openingPayables/Workspace.svelte';
+import OpeningReceivablesWorkspace from './openingReceivables/Workspace.svelte';
 import VendorPaymentsWorkspace from './vendorPayments/Workspace.svelte';
 import CustomerCreditWorkspace from './customerCredits/Workspace.svelte';
 
@@ -117,6 +118,13 @@ export const ROUTES = [
     component: OpeningPayablesWorkspace,
     label: '期初應付帳款',
     aliases: ['opening-payables', 'openingPayables', '/app/openingPayables']
+  },
+  {
+    id: 'opening-receivables',
+    path: '/app/opening-receivables',
+    component: OpeningReceivablesWorkspace,
+    label: '期初應收帳款',
+    aliases: ['opening-receivables', 'openingReceivables', '/app/openingReceivables']
   },
   {
     id: 'vendor-payments',
