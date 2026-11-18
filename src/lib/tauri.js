@@ -123,6 +123,10 @@ import {
   formatMockVendorPayment
 } from './vendorPayments/mocks.js';
 import {
+  customerReceiptMocks,
+  formatMockCustomerReceipt
+} from './customerReceipts/mocks.js';
+import {
   quoteMocks,
   mockQuotes,
   mockQuoteLines,
@@ -219,6 +223,8 @@ export {
   mockVendorPayments,
   mockVendorPaymentAllocations,
   formatMockVendorPayment,
+  customerReceiptMocks,
+  formatMockCustomerReceipt,
   quoteMocks,
   mockQuotes,
   mockQuoteLines,
@@ -514,6 +520,7 @@ export async function invoke(cmd, args = {}) {
     ...accountReceivableMocks,
     ...customerInvoiceMocks,
     ...vendorPaymentMocks,
+    ...customerReceiptMocks,
     ...quoteMocks,
     ...salesOrderMocks
   };

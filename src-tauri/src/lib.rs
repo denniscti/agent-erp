@@ -9,6 +9,7 @@ pub mod accounts_payable;
 pub mod accounts_receivable;
 pub mod auth;
 pub mod customer_invoices;
+pub mod customer_receipts;
 pub mod departments;
 pub mod inventory_adjustments;
 pub mod llm;
@@ -72,6 +73,7 @@ where
         "opening_payables",
         "opening_receivables",
         "vendor_payments",
+        "customer_receipts",
     ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
@@ -281,6 +283,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     vendor_payments::create_vendor_payment_tables(&conn)
         .map_err(|e| format!("Failed to create vendor payment tables: {}", e))?;
+
+    customer_receipts::create_customer_receipt_tables(&conn)
+        .map_err(|e| format!("Failed to create customer receipt tables: {}", e))?;
 
     quotes::create_quotes_tables(&conn)
         .map_err(|e| format!("Failed to create quotes tables: {}", e))?;
@@ -656,6 +661,16 @@ pub fn run() {
             vendor_payments::void_vendor_payment,
             vendor_payments::get_vendor_payment,
             vendor_payments::list_vendor_payments,
+            customer_receipts::create_customer_receipt,
+            customer_receipts::update_customer_receipt_header,
+            customer_receipts::add_customer_receipt_allocation,
+            customer_receipts::update_customer_receipt_allocation,
+            customer_receipts::remove_customer_receipt_allocation,
+            customer_receipts::post_customer_receipt,
+            customer_receipts::cancel_customer_receipt,
+            customer_receipts::void_customer_receipt,
+            customer_receipts::get_customer_receipt,
+            customer_receipts::list_customer_receipts,
             quotes::create_quote,
             quotes::update_quote_header,
             quotes::add_quote_line,
