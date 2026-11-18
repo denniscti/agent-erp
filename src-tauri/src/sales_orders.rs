@@ -1,5 +1,5 @@
 use crate::get_db_path;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -441,6 +441,9 @@ pub enum SalesOrderError {
     #[error("出貨日不可晚於今天")]
     ShipDateCannotBeInFuture,
 
+    #[error("銷售單 {0} 已開立發票 {1}，請先作廢或取消發票")]
+    OrderCoveredByInvoice(String, String),
+
     #[error("{0}")]
     DatabaseError(String),
 }
@@ -454,6 +457,15 @@ impl From<rusqlite::Error> for SalesOrderError {
 // ==========================================
 // Helpers
 // ==========================================
+
+fn table_exists(conn: &rusqlite::Connection, table_name: &str) -> bool {
+    let count: Result<i64, _> = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        params![table_name],
+        |r| r.get(0),
+    );
+    count.unwrap_or(0) > 0
+}
 
 fn clean_opt_str(val: Option<String>) -> Option<String> {
     val.and_then(|s| {
@@ -1314,8 +1326,25 @@ pub fn cancel_sales_order_impl(
         });
     }
 
-    // Note (SO-14 / #223): M14 active invoice check will be added here when M14 lands.
-    // Issue #220 intentionally does not read any M14 tables.
+    // SO-14: Active customer invoice check
+    if table_exists(conn, "customer_invoice_orders") && table_exists(conn, "customer_invoices") {
+        let mut check_stmt = conn.prepare(
+            "SELECT ci.invoice_number, so.so_number 
+             FROM customer_invoice_orders cio
+             JOIN customer_invoices ci ON ci.id = cio.customer_invoice_id AND ci.tenant_id = cio.tenant_id
+             JOIN sales_orders so ON so.id = cio.sales_order_id AND so.tenant_id = cio.tenant_id
+             WHERE cio.sales_order_id = ?1 AND cio.tenant_id = ?2 AND ci.status IN ('draft', 'posted')
+             LIMIT 1",
+        )?;
+        let active_inv: Option<(String, String)> = check_stmt
+            .query_row(params![trimmed_order_id, tid], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        if let Some((inv_num, so_num)) = active_inv {
+            return Err(SalesOrderError::OrderCoveredByInvoice(so_num, inv_num));
+        }
+    }
 
     let now = current_timestamp();
     let tx = conn.transaction()?;
@@ -3018,5 +3047,98 @@ mod tests {
                 to: "shipped".to_string()
             }
         );
+    }
+
+    #[test]
+    fn test_tc_so_14_order_covered_by_invoice_cannot_cancel() {
+        // Given: Seeded DB with SO and tables for customer invoices
+        let mut conn = setup_test_db();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS customer_invoices (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                invoice_number TEXT NOT NULL,
+                status TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS customer_invoice_orders (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                customer_invoice_id TEXT NOT NULL,
+                sales_order_id TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        let wh = crate::warehouses::create_warehouse_impl(&mut conn, "tnt_test", "MAIN", "主倉")
+            .unwrap();
+        let cust_id = seed_customer(&conn, "tnt_test", "SO14客戶");
+        let (_, unit_id) = seed_product_unit(&conn, "tnt_test", "SO14商品", 100.0);
+        let so = create_sales_order_from_quote_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateSalesOrderFromQuoteInput {
+                source_quote_id: "quo_so14".to_string(),
+                customer_partner_id: cust_id,
+                customer_name_snapshot: None,
+                customer_reference: None,
+                warehouse_id: Some(wh.id),
+                currency: None,
+                expected_ship_date: None,
+                note: None,
+                task_id: None,
+                lines: vec![sample_line_input(&unit_id, "SO14商品", 1.0, 100.0)],
+            },
+        )
+        .unwrap();
+
+        // Attach to draft invoice
+        conn.execute(
+            "INSERT INTO customer_invoices (id, tenant_id, invoice_number, status) 
+             VALUES ('cinv_test', 'tnt_test', 'SINV-00001', 'draft')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO customer_invoice_orders (id, tenant_id, customer_invoice_id, sales_order_id)
+             VALUES ('cio_test', 'tnt_test', 'cinv_test', ?1)",
+            params![so.order.id],
+        )
+        .unwrap();
+
+        // When / Then: TC-SO-14-E1: cancel sales order fails with OrderCoveredByInvoice
+        let err_cancel =
+            cancel_sales_order_impl(&mut conn, "tnt_test", "usr_admin", &so.order.id).unwrap_err();
+        assert_eq!(
+            err_cancel,
+            SalesOrderError::OrderCoveredByInvoice(
+                so.order.so_number.clone(),
+                "SINV-00001".to_string()
+            )
+        );
+        assert_eq!(
+            err_cancel.to_string(),
+            format!(
+                "銷售單 {} 已開立發票 SINV-00001，請先作廢或取消發票",
+                so.order.so_number
+            )
+        );
+
+        // When / Then: TC-SO-14-N1: Invoice is cancelled, cancel sales order succeeds
+        conn.execute(
+            "UPDATE customer_invoices SET status = 'cancelled' WHERE id = 'cinv_test'",
+            [],
+        )
+        .unwrap();
+
+        let cancelled_so =
+            cancel_sales_order_impl(&mut conn, "tnt_test", "usr_admin", &so.order.id).unwrap();
+        assert_eq!(cancelled_so.order.status, "cancelled");
     }
 }

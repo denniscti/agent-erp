@@ -373,6 +373,19 @@ export const salesOrderMocks = {
       throw new Error(`無效的狀態轉換：不可從 ${order.status} 轉換至 cancelled`);
     }
 
+    // SO-14: Active customer invoice check
+    const storedInvoices = loadStorage('agent_erp_mock_customer_invoices', []);
+    const storedInvoiceOrders = loadStorage('agent_erp_mock_customer_invoice_orders', []);
+    const activeCovered = (storedInvoiceOrders || []).find(cio => {
+      if (cio.sales_order_id !== targetOrderId || (cio.tenant_id || 'tnt_mock_1') !== targetTenantId) return false;
+      const parent = (storedInvoices || []).find(ci => ci.id === cio.customer_invoice_id);
+      return parent && (parent.status === 'draft' || parent.status === 'posted');
+    });
+    if (activeCovered) {
+      const parent = (storedInvoices || []).find(ci => ci.id === activeCovered.customer_invoice_id);
+      throw new Error(`銷售單 ${order.so_number} 已開立發票 ${parent?.invoice_number || ''}，請先作廢或取消發票`);
+    }
+
     const now = Math.floor(Date.now() / 1000);
     order.status = 'cancelled';
     order.cancelled_at = now;
