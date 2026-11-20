@@ -268,3 +268,148 @@ export async function voidCustomerInvoiceAction(input) {
   }
 }
 
+/**
+ * Fetch sales allowances list
+ * @param {any} [filter=null]
+ * @returns {Promise<any[]>}
+ */
+export async function fetchSalesAllowances(filter = null) {
+  try {
+    const list = await invoke('list_sales_allowances', { filter });
+    appState.salesAllowances = list || [];
+    return appState.salesAllowances;
+  } catch (err) {
+    console.error('Failed to fetch sales allowances:', err);
+    throw err;
+  }
+}
+
+/**
+ * Fetch sales allowance detail
+ * @param {string} allowanceId
+ * @returns {Promise<any>}
+ */
+export async function fetchSalesAllowanceDetail(allowanceId) {
+  try {
+    const detail = await invoke('get_sales_allowance', {
+      allowanceId,
+      allowance_id: allowanceId
+    });
+    appState.currentSalesAllowanceDetail = detail;
+    return detail;
+  } catch (err) {
+    console.error('Failed to fetch sales allowance detail:', err);
+    throw err;
+  }
+}
+
+/**
+ * Create a sales allowance
+ * @param {any} input
+ * @returns {Promise<any>}
+ */
+export async function createSalesAllowanceAction(input) {
+  try {
+    const detail = await invoke('create_sales_allowance', { input });
+    showToast(`折讓單「${detail.allowance_number}」已建立`);
+    await fetchSalesAllowances();
+    await fetchPendingAllowanceInvoices();
+    return detail;
+  } catch (err) {
+    console.error('Failed to create sales allowance:', err);
+    throw err;
+  }
+}
+
+/**
+ * Update draft sales allowance
+ * @param {any} input
+ * @returns {Promise<any>}
+ */
+export async function updateSalesAllowanceAction(input) {
+  try {
+    const detail = await invoke('update_sales_allowance', { input });
+    showToast(`折讓單「${detail.allowance_number}」已儲存`);
+    await fetchSalesAllowances();
+    return detail;
+  } catch (err) {
+    console.error('Failed to update sales allowance:', err);
+    throw err;
+  }
+}
+
+/**
+ * Post sales allowance
+ * @param {string} allowanceId
+ * @returns {Promise<any>}
+ */
+export async function postSalesAllowanceAction(allowanceId) {
+  try {
+    const detail = await invoke('post_sales_allowance', {
+      allowanceId,
+      allowance_id: allowanceId
+    });
+    showToast(`折讓單「${detail.allowance_number}」過帳成功！`);
+    await fetchSalesAllowances();
+    await fetchPendingAllowanceInvoices();
+    await fetchCustomerInvoices();
+    if (appState.currentCustomerInvoiceDetail?.invoice?.id === detail.customer_invoice_id) {
+      await fetchCustomerInvoiceDetail(detail.customer_invoice_id);
+    }
+    return detail;
+  } catch (err) {
+    console.error('Failed to post sales allowance:', err);
+    throw err;
+  }
+}
+
+/**
+ * Cancel draft sales allowance
+ * @param {string} allowanceId
+ * @returns {Promise<any>}
+ */
+export async function cancelSalesAllowanceAction(allowanceId) {
+  try {
+    const detail = await invoke('cancel_sales_allowance', {
+      allowanceId,
+      allowance_id: allowanceId
+    });
+    showToast(`折讓單「${detail.allowance_number}」已取消`);
+    await fetchSalesAllowances();
+    await fetchPendingAllowanceInvoices();
+    return detail;
+  } catch (err) {
+    console.error('Failed to cancel sales allowance:', err);
+    throw err;
+  }
+}
+
+/**
+ * Void posted sales allowance
+ * @param {string} allowanceId
+ * @param {string} voidReason
+ * @returns {Promise<any>}
+ */
+export async function voidSalesAllowanceAction(allowanceId, voidReason) {
+  try {
+    const detail = await invoke('void_sales_allowance', {
+      allowanceId,
+      allowance_id: allowanceId,
+      voidReason,
+      void_reason: voidReason
+    });
+    showToast(`折讓單「${detail.allowance_number}」已作廢！`);
+    await fetchSalesAllowances();
+    await fetchPendingAllowanceInvoices();
+    await fetchCustomerInvoices();
+    if (appState.currentCustomerInvoiceDetail?.invoice?.id === detail.customer_invoice_id) {
+      await fetchCustomerInvoiceDetail(detail.customer_invoice_id);
+    }
+    return detail;
+  } catch (err) {
+    console.error('Failed to void sales allowance:', err);
+    throw err;
+  }
+}
+
+

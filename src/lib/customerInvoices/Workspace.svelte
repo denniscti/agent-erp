@@ -7,6 +7,12 @@
     fetchCustomerInvoiceDetail,
     fetchUninvoicedSalesOrders,
     fetchPendingAllowanceInvoices,
+    fetchSalesAllowances,
+    createSalesAllowanceAction,
+    updateSalesAllowanceAction,
+    postSalesAllowanceAction,
+    cancelSalesAllowanceAction,
+    voidSalesAllowanceAction,
     createCustomerInvoiceAction,
     updateCustomerInvoiceHeaderAction,
     postCustomerInvoiceAction,
@@ -41,6 +47,23 @@
   let isVoidModalOpen = $state(false);
   let voidReason = $state('');
   let voidModalError = $state('');
+
+  // Create Allowance Modal state
+  let isCreateAllowanceModalOpen = $state(false);
+  let allowanceInvoice = $state(/** @type {any | null} */ (null));
+  let allowanceDate = $state(getTodayDateString());
+  let allowanceUntaxedAmount = $state('');
+  let allowanceTaxAmount = $state('');
+  let allowanceExternalReference = $state('');
+  let allowanceNote = $state('');
+  let allowanceError = $state('');
+
+  // Void Allowance Modal state
+  let isVoidAllowanceModalOpen = $state(false);
+  let targetAllowanceId = $state('');
+  let targetAllowanceNumber = $state('');
+  let voidAllowanceReason = $state('');
+  let voidAllowanceError = $state('');
 
   // Create Form state
   let createCustomerId = $state('');
@@ -167,8 +190,119 @@
         searchQuery: searchQuery || null
       }),
       fetchUninvoicedSalesOrders(filterCustomerId || null),
-      fetchPendingAllowanceInvoices(filterCustomerId || null)
+      fetchPendingAllowanceInvoices(filterCustomerId || null),
+      fetchSalesAllowances()
     ]);
+  }
+
+  function handleOpenCreateAllowance(inv) {
+    if (!inv) return;
+    allowanceInvoice = inv;
+    allowanceDate = getTodayDateString();
+    allowanceUntaxedAmount = String(inv.shipment_shortfall || '');
+    const untaxedNum = Number(inv.shipment_shortfall || 0);
+    const invUntaxed = Number(inv.untaxed_amount || 0);
+    const invTax = Number(inv.tax_amount || 0);
+    if (invUntaxed > 0) {
+      allowanceTaxAmount = String(Math.round(untaxedNum * invTax / invUntaxed * 100) / 100);
+    } else {
+      allowanceTaxAmount = '0';
+    }
+    allowanceExternalReference = '';
+    allowanceNote = '';
+    allowanceError = '';
+    isCreateAllowanceModalOpen = true;
+  }
+
+  async function handleSubmitCreateAllowance() {
+    if (!allowanceInvoice) return;
+    try {
+      isSubmitting = true;
+      allowanceError = '';
+      const untaxed = parseFloat(allowanceUntaxedAmount);
+      const tax = parseFloat(allowanceTaxAmount || '0');
+      if (isNaN(untaxed) || untaxed <= 0) {
+        allowanceError = '折讓未稅金額需大於 0';
+        return;
+      }
+      await createSalesAllowanceAction({
+        customer_invoice_id: allowanceInvoice.id,
+        allowance_date: allowanceDate,
+        untaxed_amount: untaxed,
+        tax_amount: isNaN(tax) ? 0 : tax,
+        external_reference: allowanceExternalReference.trim() || null,
+        note: allowanceNote.trim() || null,
+        reason_type: 'shipment_shortfall'
+      });
+      isCreateAllowanceModalOpen = false;
+      await refreshAll();
+      if (currentDetail && currentDetail.invoice.id === allowanceInvoice.id) {
+        await handleOpenDetail(allowanceInvoice.id);
+      }
+    } catch (err) {
+      allowanceError = (/** @type {any} */ (err))?.message || String(err);
+    } finally {
+      isSubmitting = false;
+    }
+  }
+
+  async function handlePostAllowance(allowanceId) {
+    try {
+      isSubmitting = true;
+      await postSalesAllowanceAction(allowanceId);
+      await refreshAll();
+      if (currentDetail) {
+        await handleOpenDetail(currentDetail.invoice.id);
+      }
+    } catch (err) {
+      showToast('折讓單過帳失敗：' + ((/** @type {any} */ (err))?.message || String(err)));
+    } finally {
+      isSubmitting = false;
+    }
+  }
+
+  async function handleCancelAllowance(allowanceId) {
+    try {
+      isSubmitting = true;
+      await cancelSalesAllowanceAction(allowanceId);
+      await refreshAll();
+      if (currentDetail) {
+        await handleOpenDetail(currentDetail.invoice.id);
+      }
+    } catch (err) {
+      showToast('取消折讓單失敗：' + ((/** @type {any} */ (err))?.message || String(err)));
+    } finally {
+      isSubmitting = false;
+    }
+  }
+
+  function handleOpenVoidAllowance(alw) {
+    targetAllowanceId = alw.id;
+    targetAllowanceNumber = alw.allowance_number;
+    voidAllowanceReason = '';
+    voidAllowanceError = '';
+    isVoidAllowanceModalOpen = true;
+  }
+
+  async function handleSubmitVoidAllowance() {
+    if (!voidAllowanceReason.trim()) {
+      voidAllowanceError = '作廢原因必填';
+      return;
+    }
+    try {
+      isSubmitting = true;
+      voidAllowanceError = '';
+      await voidSalesAllowanceAction(targetAllowanceId, voidAllowanceReason.trim());
+      isVoidAllowanceModalOpen = false;
+      await refreshAll();
+      if (currentDetail) {
+        await handleOpenDetail(currentDetail.invoice.id);
+      }
+    } catch (err) {
+      voidAllowanceError = (/** @type {any} */ (err))?.message || String(err);
+    } finally {
+      isSubmitting = false;
+    }
   }
 
   async function handleOpenDetail(invoiceId) {
@@ -735,13 +869,66 @@
                   <td>
                     <button
                       class="btn btn-sm btn-danger"
-                      onclick={() => {
-                        showToast(`已導向折讓單開立流程，發票「${inv.invoice_number}」短少 NT$ ${inv.shipment_shortfall}`);
-                        navigate('/app/customer-credit');
-                      }}
+                      onclick={() => handleOpenCreateAllowance(inv)}
                     >
                       開立折讓單
                     </button>
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+
+        <div class="section-header" style="margin-top: 2rem;">
+          <h3>已開立折讓單 ({ (appState.salesAllowances || []).length })</h3>
+          <span class="text-muted">針對出貨短少發票開立之折讓單</span>
+        </div>
+        {#if (appState.salesAllowances || []).length === 0}
+          <div class="empty-panel">目前尚無已開立之折讓單。</div>
+        {:else}
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>折讓單號</th>
+                <th>原發票單號</th>
+                <th>客戶名稱</th>
+                <th>折讓日期</th>
+                <th class="text-right">未稅金額</th>
+                <th class="text-right">稅額</th>
+                <th class="text-right">含稅總額</th>
+                <th>狀態</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each (appState.salesAllowances || []) as alw}
+                <tr>
+                  <td class="font-mono font-bold">{alw.allowance_number}</td>
+                  <td class="font-mono">{alw.invoice_number_snapshot}</td>
+                  <td>{alw.customer_name_snapshot}</td>
+                  <td>{alw.allowance_date}</td>
+                  <td class="text-right font-mono">{formatCurrency(alw.untaxed_amount)}</td>
+                  <td class="text-right font-mono">{formatCurrency(alw.tax_amount)}</td>
+                  <td class="text-right font-mono font-bold">{formatCurrency(alw.total_amount)}</td>
+                  <td>
+                    <span class="badge {getStatusBadge(alw.status).class}">
+                      {getStatusBadge(alw.status).label}
+                    </span>
+                  </td>
+                  <td>
+                    {#if alw.status === 'draft'}
+                      <button class="btn btn-sm btn-primary" onclick={() => handlePostAllowance(alw.id)} disabled={isSubmitting}>
+                        過帳
+                      </button>
+                      <button class="btn btn-sm btn-secondary" onclick={() => handleCancelAllowance(alw.id)} disabled={isSubmitting}>
+                        取消
+                      </button>
+                    {:else if alw.status === 'posted'}
+                      <button class="btn btn-sm btn-danger" onclick={() => handleOpenVoidAllowance(alw)} disabled={isSubmitting}>
+                        作廢
+                      </button>
+                    {/if}
                   </td>
                 </tr>
               {/each}
@@ -768,10 +955,7 @@
           <div class="banner-action">
             <button
               class="btn btn-danger"
-              onclick={() => {
-                showToast(`已導向折讓單開立流程，發票「${inv.invoice_number}」短少 NT$ ${currentDetail.shipment_shortfall}`);
-                navigate('/app/customer-credit');
-              }}
+              onclick={() => handleOpenCreateAllowance({ ...inv, shipment_shortfall: currentDetail.shipment_shortfall })}
             >
               開立折讓單
             </button>
@@ -912,6 +1096,16 @@
                   <span class="info-val font-mono">{formatCurrency(ar.amount)}</span>
                 </div>
                 <div class="info-row">
+                  <span class="info-label">已收金額</span>
+                  <span class="info-val font-mono">{formatCurrency(ar.received_amount || 0)}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">折讓沖減</span>
+                  <span class="info-val font-mono text-danger font-bold">
+                    {formatCurrency(ar.allowance_amount || 0)}
+                  </span>
+                </div>
+                <div class="info-row">
                   <span class="info-label">未收餘額</span>
                   <span class="info-val font-mono font-bold text-primary">
                     {formatCurrency(ar.outstanding_amount)}
@@ -922,6 +1116,50 @@
                   <span class="info-val">{ar.settlement_status}</span>
                 </div>
               </div>
+            </div>
+          {/if}
+
+          {#if (appState.salesAllowances || []).some(sa => sa.customer_invoice_id === inv.id)}
+            {@const linkedAllowances = (appState.salesAllowances || []).filter(sa => sa.customer_invoice_id === inv.id)}
+            <div class="glass-panel sub-card">
+              <h3>關聯折讓單 ({linkedAllowances.length})</h3>
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>折讓單號</th>
+                    <th>折讓日期</th>
+                    <th class="text-right">未稅金額</th>
+                    <th class="text-right">稅額</th>
+                    <th class="text-right">總計</th>
+                    <th>狀態</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each linkedAllowances as sa}
+                    <tr>
+                      <td class="font-mono font-bold">{sa.allowance_number}</td>
+                      <td>{sa.allowance_date}</td>
+                      <td class="text-right font-mono">{formatCurrency(sa.untaxed_amount)}</td>
+                      <td class="text-right font-mono">{formatCurrency(sa.tax_amount)}</td>
+                      <td class="text-right font-mono font-bold">{formatCurrency(sa.total_amount)}</td>
+                      <td>
+                        <span class="badge {getStatusBadge(sa.status).class}">
+                          {getStatusBadge(sa.status).label}
+                        </span>
+                      </td>
+                      <td>
+                        {#if sa.status === 'draft'}
+                          <button class="btn btn-sm btn-primary" onclick={() => handlePostAllowance(sa.id)} disabled={isSubmitting}>過帳</button>
+                          <button class="btn btn-sm btn-secondary" onclick={() => handleCancelAllowance(sa.id)} disabled={isSubmitting}>取消</button>
+                        {:else if sa.status === 'posted'}
+                          <button class="btn btn-sm btn-danger" onclick={() => handleOpenVoidAllowance(sa)} disabled={isSubmitting}>作廢</button>
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
             </div>
           {/if}
         </div>
@@ -1116,6 +1354,89 @@
   </div>
 {/if}
 
+<!-- CREATE ALLOWANCE MODAL -->
+{#if isCreateAllowanceModalOpen && allowanceInvoice}
+  <div class="modal-backdrop">
+    <div class="modal-card glass-panel">
+      <h3>開立折讓單（出貨短少）</h3>
+      {#if allowanceError}
+        <div class="error-banner">{allowanceError}</div>
+      {/if}
+      <div class="summary-box">
+        <div><strong>原發票單號：</strong> {allowanceInvoice.invoice_number}</div>
+        <div><strong>客戶名稱：</strong> {allowanceInvoice.customer_name_snapshot}</div>
+        <div><strong>剩餘短少金額：</strong> NT$ {allowanceInvoice.shipment_shortfall}</div>
+      </div>
+      <div class="form-field">
+        <label for="alw-date">折讓日期 *</label>
+        <input type="date" id="alw-date" bind:value={allowanceDate} />
+      </div>
+      <div class="form-field">
+        <label for="alw-untaxed">折讓未稅金額 *</label>
+        <input
+          type="number"
+          id="alw-untaxed"
+          step="0.01"
+          bind:value={allowanceUntaxedAmount}
+          oninput={() => {
+            const u = parseFloat(allowanceUntaxedAmount);
+            const invUntaxed = Number(allowanceInvoice.untaxed_amount || 0);
+            const invTax = Number(allowanceInvoice.tax_amount || 0);
+            if (!isNaN(u) && invUntaxed > 0) {
+              allowanceTaxAmount = String(Math.round(u * invTax / invUntaxed * 100) / 100);
+            }
+          }}
+        />
+      </div>
+      <div class="form-field">
+        <label for="alw-tax">折讓稅額 *</label>
+        <input type="number" id="alw-tax" step="0.01" bind:value={allowanceTaxAmount} />
+      </div>
+      <div class="form-field">
+        <label for="alw-ref">電子折讓單號 (選填)</label>
+        <input type="text" id="alw-ref" bind:value={allowanceExternalReference} placeholder="平台折讓單號" />
+      </div>
+      <div class="form-field">
+        <label for="alw-note">備註</label>
+        <textarea id="alw-note" bind:value={allowanceNote} placeholder="備註說明"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick={() => { isCreateAllowanceModalOpen = false; }}>
+          取消
+        </button>
+        <button class="btn btn-primary" onclick={handleSubmitCreateAllowance} disabled={isSubmitting}>
+          {isSubmitting ? '建立中...' : '確認開立'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- VOID ALLOWANCE MODAL -->
+{#if isVoidAllowanceModalOpen}
+  <div class="modal-backdrop">
+    <div class="modal-card glass-panel">
+      <h3>作廢折讓單 ({targetAllowanceNumber})</h3>
+      {#if voidAllowanceError}
+        <div class="error-banner">{voidAllowanceError}</div>
+      {/if}
+      <p class="text-danger font-bold">作廢折讓單後，原應收帳款未收餘額將恢復，且可能重新出現出貨短少標記。</p>
+      <div class="form-field">
+        <label for="void-alw-reason">作廢原因 *</label>
+        <textarea id="void-alw-reason" bind:value={voidAllowanceReason} placeholder="請輸入作廢原因"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-secondary" onclick={() => { isVoidAllowanceModalOpen = false; }}>
+          取消
+        </button>
+        <button class="btn btn-danger" onclick={handleSubmitVoidAllowance} disabled={isSubmitting}>
+          {isSubmitting ? '處理中...' : '確認作廢'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .workspace-scrollable {
     overflow-y: auto;
@@ -1199,6 +1520,16 @@
     color: inherit;
     padding: 0.4rem 0.75rem;
     border-radius: 6px;
+  }
+  .summary-box {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.875rem;
   }
   .table-container {
     overflow-x: auto;

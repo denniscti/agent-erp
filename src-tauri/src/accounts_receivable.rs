@@ -725,7 +725,7 @@ pub fn get_account_receivable_impl(
 
     let raw_allowance_amount = if table_exists(conn, "sales_allowances") {
         let sum_res: Result<Option<f64>, _> = conn.query_row(
-            "SELECT SUM(amount_untaxed + tax_amount)
+            "SELECT SUM(untaxed_amount + tax_amount)
              FROM sales_allowances
              WHERE account_receivable_id = ?1 AND tenant_id = ?2 AND status = 'posted'",
             params![target_id, tid],
@@ -801,7 +801,7 @@ pub fn list_accounts_receivable_impl(
 
     let allowance_subquery = if has_allowances {
         "COALESCE(
-            (SELECT SUM(sa.amount_untaxed + sa.tax_amount)
+            (SELECT SUM(sa.untaxed_amount + sa.tax_amount)
              FROM sales_allowances sa
              WHERE sa.account_receivable_id = ar.id
                AND sa.tenant_id = ar.tenant_id
@@ -1490,7 +1490,7 @@ mod tests {
                 tenant_id TEXT NOT NULL,
                 allowance_number TEXT NOT NULL,
                 account_receivable_id TEXT NOT NULL,
-                amount_untaxed REAL NOT NULL,
+                untaxed_amount REAL NOT NULL,
                 tax_amount REAL NOT NULL,
                 status TEXT NOT NULL,
                 created_at INTEGER NOT NULL
@@ -1513,7 +1513,7 @@ mod tests {
         let ar = create_account_receivable(&mut conn, "tnt_test", "usr_admin", input).unwrap();
 
         conn.execute(
-            "INSERT INTO sales_allowances (id, tenant_id, allowance_number, account_receivable_id, amount_untaxed, tax_amount, status, created_at)
+            "INSERT INTO sales_allowances (id, tenant_id, allowance_number, account_receivable_id, untaxed_amount, tax_amount, status, created_at)
              VALUES ('alw_01', 'tnt_test', 'ALW-202611001', ?1, 200.0, 10.0, 'posted', 1000)",
             params![ar.id],
         )

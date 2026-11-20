@@ -47,7 +47,10 @@ export function formatMockAccountReceivable(ar) {
     }
   }
 
-  const rawAllowance = 0; // #235 sales allowances default to 0 before completed
+  const activeAllowances = loadStorage('agent_erp_mock_sales_allowances', []);
+  const rawAllowance = (activeAllowances || [])
+    .filter(sa => sa.account_receivable_id === ar.id && (sa.tenant_id || 'tnt_mock_1') === targetTenantId && sa.status === 'posted')
+    .reduce((sum, sa) => sum + (Number(sa.untaxed_amount) || 0) + (Number(sa.tax_amount) || 0), 0);
 
   const roundedTotal = Math.round(Number(ar.amount) * 100) / 100;
   const roundedReceived = Math.round(rawReceived * 100) / 100;

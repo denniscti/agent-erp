@@ -20,6 +20,7 @@ pub mod partners;
 pub mod products;
 pub mod purchase_orders;
 pub mod quotes;
+pub mod sales_allowances;
 pub mod sales_orders;
 pub mod stock_transfers;
 pub mod stocktakes;
@@ -74,6 +75,7 @@ where
         "opening_receivables",
         "vendor_payments",
         "customer_receipts",
+        "sales_allowances",
     ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
@@ -286,6 +288,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     customer_receipts::create_customer_receipt_tables(&conn)
         .map_err(|e| format!("Failed to create customer receipt tables: {}", e))?;
+
+    sales_allowances::create_sales_allowances_tables(&conn)
+        .map_err(|e| format!("Failed to create sales allowances tables: {}", e))?;
 
     quotes::create_quotes_tables(&conn)
         .map_err(|e| format!("Failed to create quotes tables: {}", e))?;
@@ -632,6 +637,13 @@ pub fn run() {
             customer_invoices::list_uninvoiced_sales_orders,
             customer_invoices::get_sales_order_invoicing_info,
             customer_invoices::list_pending_allowance_invoices,
+            sales_allowances::create_sales_allowance,
+            sales_allowances::update_sales_allowance,
+            sales_allowances::post_sales_allowance,
+            sales_allowances::cancel_sales_allowance,
+            sales_allowances::void_sales_allowance,
+            sales_allowances::get_sales_allowance,
+            sales_allowances::list_sales_allowances,
             vendor_bills::create_vendor_bill,
             vendor_bills::update_vendor_bill_header,
             vendor_bills::add_vendor_bill_order,

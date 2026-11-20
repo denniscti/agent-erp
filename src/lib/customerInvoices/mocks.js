@@ -227,6 +227,12 @@ export function formatMockCustomerInvoice(cinv) {
   };
 }
 
+function syncAllowanceStorage() {
+  mockCustomerInvoices = loadStorage('agent_erp_mock_customer_invoices', mockCustomerInvoices);
+  mockCustomerInvoiceOrders = loadStorage('agent_erp_mock_customer_invoice_orders', mockCustomerInvoiceOrders);
+  mockSalesAllowances = loadStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+}
+
 export const customerInvoiceMocks = {
   reset_mock_customer_invoices: async (args) => {
     const targetTenantId = (args && args.tenant_id) || resolveMockActiveTenantId();
@@ -734,7 +740,8 @@ export const customerInvoiceMocks = {
   },
 
   void_customer_invoice: async (args) => {
-    const { invoice_id, invoiceId, void_reason, voidReason } = args || {};
+    const params = args?.input || args || {};
+    const { invoice_id, invoiceId, void_reason, voidReason } = params;
     const targetTenantId = resolveMockActiveTenantId();
     const activeUid = resolveMockActiveUserId();
     const invId = String(invoice_id || invoiceId || '').trim();
@@ -760,6 +767,15 @@ export const customerInvoiceMocks = {
         .find(a => a.receipt_status === 'posted');
       if (postedAlloc) {
         throw new Error(`此發票已有收款核銷：${postedAlloc.receipt_number}，請先作廢收款單`);
+      }
+
+      // Check posted allowances (CI-08)
+      const postedAllowance = (mockSalesAllowances || []).find(
+        sa => (sa.customer_invoice_id === invId || sa.account_receivable_id === ar.id) &&
+              sa.status === 'posted' && (sa.tenant_id || 'tnt_mock_1') === targetTenantId
+      );
+      if (postedAllowance) {
+        throw new Error(`此發票已有過帳之折讓單：${postedAllowance.allowance_number}，請先作廢折讓單`);
       }
 
       ar.status = 'voided';
@@ -956,6 +972,298 @@ export const customerInvoiceMocks = {
       invoice_total_amount: total,
       invoice_order_count: count
     };
+  },
+
+  create_sales_allowance: async (args) => {
+    syncAllowanceStorage();
+    const input = args.input || args || {};
+    const targetTenantId = resolveMockActiveTenantId();
+    const activeUid = resolveMockActiveUserId();
+    const invId = String(input.customer_invoice_id || input.customerInvoiceId || '').trim();
+    if (!invId) throw new Error('找不到對應的銷項發票');
+
+    if (input.reason_type && input.reason_type.trim() !== 'shipment_shortfall') {
+      throw new Error('折讓原因類型僅支援出貨短少 (shipment_shortfall)');
+    }
+
+    const cinv = mockCustomerInvoices.find(
+      ci => ci.id === invId && (ci.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+    if (!cinv) throw new Error('找不到對應的銷項發票');
+
+    const formatted = formatMockCustomerInvoice(cinv);
+    const orders = mockCustomerInvoiceOrders
+      .filter(cio => cio.customer_invoice_id === cinv.id && (cio.tenant_id || 'tnt_mock_1') === targetTenantId)
+      .map(cio => mockSalesOrders.find(so => so.id === cio.sales_order_id))
+      .filter(Boolean);
+
+    if (cinv.status !== 'posted' || orders.length === 0 || !orders.every(o => o.status === 'shipped') || (formatted.item.shipment_shortfall || 0) < 1.0) {
+      throw new Error('僅能對已過帳、已出貨且有出貨短少的發票開立折讓單');
+    }
+
+    const existingDraft = (mockSalesAllowances || []).find(
+      sa => sa.customer_invoice_id === cinv.id && sa.status === 'draft' && (sa.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+    if (existingDraft) {
+      throw new Error(`發票 ${cinv.invoice_number} 已有草稿折讓單 ${existingDraft.allowance_number}`);
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const allowanceDate = String(input.allowance_date || input.allowanceDate || today).trim();
+    if (allowanceDate > today) {
+      throw new Error('折讓日期不可晚於今天');
+    }
+    if (allowanceDate < cinv.invoice_date) {
+      throw new Error('折讓日期不可早於發票日或出貨日');
+    }
+    const shipDates = orders.map(o => o.ship_date).filter(Boolean).sort();
+    if (shipDates.length > 0 && allowanceDate < shipDates[shipDates.length - 1]) {
+      throw new Error('折讓日期不可早於發票日或出貨日');
+    }
+
+    const remainingShortfall = formatted.item.shipment_shortfall;
+    const untaxedAmount = input.untaxed_amount !== undefined && input.untaxed_amount !== null
+      ? Math.round(Number(input.untaxed_amount) * 100) / 100
+      : remainingShortfall;
+
+    if (untaxedAmount <= 0) {
+      throw new Error('折讓未稅金額需大於 0');
+    }
+    if (untaxedAmount > remainingShortfall + 0.001) {
+      throw new Error(`折讓未稅金額不可超過出貨短少剩餘 ${remainingShortfall}`);
+    }
+
+    const defaultTax = Number(cinv.untaxed_amount) > 0
+      ? Math.round(untaxedAmount * Number(cinv.tax_amount || 0) / Number(cinv.untaxed_amount) * 100) / 100
+      : 0;
+    const taxAmount = input.tax_amount !== undefined && input.tax_amount !== null
+      ? Math.round(Number(input.tax_amount) * 100) / 100
+      : defaultTax;
+
+    if (taxAmount < 0) {
+      throw new Error('折讓稅額需大於或等於 0');
+    }
+
+    const postedTaxSum = (mockSalesAllowances || [])
+      .filter(sa => sa.customer_invoice_id === cinv.id && sa.status === 'posted' && (sa.tenant_id || 'tnt_mock_1') === targetTenantId)
+      .reduce((s, sa) => s + (Number(sa.tax_amount) || 0), 0);
+    if (taxAmount + postedTaxSum > Number(cinv.tax_amount || 0) + 0.001) {
+      throw new Error(`折讓稅額累計不可超過原發票稅額 ${cinv.tax_amount}`);
+    }
+
+    const ar = mockAccountsReceivable.find(
+      a => a.source_type === 'customer_invoice' && a.source_id === cinv.id && (a.tenant_id || 'tnt_mock_1') === targetTenantId && a.status !== 'voided'
+    );
+    if (!ar) throw new Error('找不到對應的應收帳款');
+
+    const tenantAllowances = (mockSalesAllowances || []).filter(sa => (sa.tenant_id || 'tnt_mock_1') === targetTenantId);
+    let maxSeq = 0;
+    for (const sa of tenantAllowances) {
+      if (sa.allowance_number && sa.allowance_number.startsWith('SALW-')) {
+        const num = parseInt(sa.allowance_number.replace('SALW-', ''), 10);
+        if (!isNaN(num) && num > maxSeq) maxSeq = num;
+      }
+    }
+    const allowanceNumber = `SALW-${String(maxSeq + 1).padStart(5, '0')}`;
+    const newAllowance = {
+      id: `salw_${Date.now()}_${nextMockUid()}`,
+      tenant_id: targetTenantId,
+      allowance_number: allowanceNumber,
+      customer_invoice_id: cinv.id,
+      invoice_number_snapshot: cinv.invoice_number,
+      tax_invoice_number_snapshot: cinv.tax_invoice_number || null,
+      account_receivable_id: ar.id,
+      customer_partner_id: cinv.customer_partner_id,
+      customer_name_snapshot: cinv.customer_name_snapshot,
+      reason_type: 'shipment_shortfall',
+      allowance_date: allowanceDate,
+      shortfall_snapshot: null,
+      untaxed_amount: untaxedAmount,
+      tax_amount: taxAmount,
+      total_amount: Math.round((untaxedAmount + taxAmount) * 100) / 100,
+      external_reference: input.external_reference || null,
+      currency: 'TWD',
+      status: 'draft',
+      note: input.note || null,
+      created_by: activeUid,
+      created_at: Math.floor(Date.now() / 1000),
+      posted_by: null,
+      posted_at: null,
+      cancelled_at: null,
+      voided_by: null,
+      voided_at: null,
+      void_reason: null,
+      task_id: null
+    };
+
+    mockSalesAllowances.push(newAllowance);
+    saveStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+    return newAllowance;
+  },
+
+  update_sales_allowance: async (args) => {
+    syncAllowanceStorage();
+    const input = args.input || args || {};
+    const targetTenantId = resolveMockActiveTenantId();
+    const id = String(input.id || '').trim();
+    const allowance = (mockSalesAllowances || []).find(
+      sa => sa.id === id && (sa.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+    if (!allowance) throw new Error('找不到指定的折讓單');
+    if (allowance.status !== 'draft') throw new Error('僅草稿狀態可修改');
+
+    const cinv = mockCustomerInvoices.find(ci => ci.id === allowance.customer_invoice_id);
+    const formatted = cinv ? formatMockCustomerInvoice(cinv) : null;
+    const remainingShortfall = formatted ? formatted.item.shipment_shortfall : 0;
+
+    const today = new Date().toISOString().split('T')[0];
+    const allowanceDate = input.allowance_date !== undefined ? String(input.allowance_date).trim() : allowance.allowance_date;
+    if (allowanceDate > today) throw new Error('折讓日期不可晚於今天');
+    if (cinv && allowanceDate < cinv.invoice_date) throw new Error('折讓日期不可早於發票日或出貨日');
+
+    if (input.untaxed_amount !== undefined) {
+      const u = Math.round(Number(input.untaxed_amount) * 100) / 100;
+      if (u <= 0) throw new Error('折讓未稅金額需大於 0');
+      if (u > remainingShortfall + 0.001) throw new Error(`折讓未稅金額不可超過出貨短少剩餘 ${remainingShortfall}`);
+      allowance.untaxed_amount = u;
+    }
+
+    if (input.tax_amount !== undefined) {
+      const t = Math.round(Number(input.tax_amount) * 100) / 100;
+      if (t < 0) throw new Error('折讓稅額需大於或等於 0');
+      allowance.tax_amount = t;
+    }
+
+    allowance.total_amount = Math.round((allowance.untaxed_amount + allowance.tax_amount) * 100) / 100;
+    allowance.allowance_date = allowanceDate;
+    if (input.external_reference !== undefined) allowance.external_reference = input.external_reference || null;
+    if (input.note !== undefined) allowance.note = input.note || null;
+
+    saveStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+    return allowance;
+  },
+
+  post_sales_allowance: async (args) => {
+    syncAllowanceStorage();
+    const { allowance_id, allowanceId } = args || {};
+    const id = String(allowance_id || allowanceId || '').trim();
+    const targetTenantId = resolveMockActiveTenantId();
+    const activeUid = resolveMockActiveUserId();
+
+    const allowance = (mockSalesAllowances || []).find(
+      sa => sa.id === id && (sa.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+    if (!allowance) throw new Error('找不到指定的折讓單');
+    if (allowance.status !== 'draft') {
+      throw new Error(`無效的狀態轉換：不可從 ${allowance.status} 轉換至 posted`);
+    }
+
+    const ar = mockAccountsReceivable.find(a => a.id === allowance.account_receivable_id);
+    if (!ar) throw new Error('找不到對應的應收帳款');
+    if (ar.status !== 'open') throw new Error('原應收非 open 狀態');
+
+    const formattedAr = formatMockAccountReceivable(ar);
+    const outstanding = formattedAr.detail.outstanding_amount;
+    const allowanceTotal = Math.round((allowance.untaxed_amount + allowance.tax_amount) * 100) / 100;
+
+    if (allowanceTotal > outstanding + 0.001) {
+      throw new Error(`折讓金額 ${allowanceTotal} 超過應收未收餘額 ${outstanding}；客戶已付款需退款的情境不在本輪範圍`);
+    }
+
+    const cinv = mockCustomerInvoices.find(ci => ci.id === allowance.customer_invoice_id);
+    const formattedCinv = cinv ? formatMockCustomerInvoice(cinv) : null;
+    const currentShortfall = formattedCinv ? formattedCinv.item.shipment_shortfall : allowance.untaxed_amount;
+
+    allowance.status = 'posted';
+    allowance.posted_by = activeUid;
+    allowance.posted_at = Math.floor(Date.now() / 1000);
+    allowance.shortfall_snapshot = currentShortfall;
+
+    saveStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+    return allowance;
+  },
+
+  cancel_sales_allowance: async (args) => {
+    syncAllowanceStorage();
+    const { allowance_id, allowanceId } = args || {};
+    const id = String(allowance_id || allowanceId || '').trim();
+    const targetTenantId = resolveMockActiveTenantId();
+
+    const allowance = (mockSalesAllowances || []).find(
+      sa => sa.id === id && (sa.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+    if (!allowance) throw new Error('找不到指定的折讓單');
+    if (allowance.status !== 'draft') throw new Error('僅草稿狀態可取消');
+
+    allowance.status = 'cancelled';
+    allowance.cancelled_at = Math.floor(Date.now() / 1000);
+
+    saveStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+    return allowance;
+  },
+
+  void_sales_allowance: async (args) => {
+    syncAllowanceStorage();
+    const { allowance_id, allowanceId, void_reason, voidReason } = args || {};
+    const id = String(allowance_id || allowanceId || '').trim();
+    const reason = String(void_reason || voidReason || '').trim();
+    const targetTenantId = resolveMockActiveTenantId();
+    const activeUid = resolveMockActiveUserId();
+
+    if (!reason) throw new Error('作廢原因必填');
+
+    const allowance = (mockSalesAllowances || []).find(
+      sa => sa.id === id && (sa.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+    if (!allowance) throw new Error('找不到指定的折讓單');
+    if (allowance.status !== 'posted') throw new Error('僅已過帳狀態可作廢');
+
+    allowance.status = 'voided';
+    allowance.voided_by = activeUid;
+    allowance.voided_at = Math.floor(Date.now() / 1000);
+    allowance.void_reason = reason;
+
+    saveStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+    return allowance;
+  },
+
+  get_sales_allowance: async (args) => {
+    syncAllowanceStorage();
+    const { allowance_id, allowanceId } = args || {};
+    const id = String(allowance_id || allowanceId || '').trim();
+    const targetTenantId = resolveMockActiveTenantId();
+
+    const allowance = (mockSalesAllowances || []).find(
+      sa => sa.id === id && (sa.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+    if (!allowance) throw new Error('找不到指定的折讓單');
+    return allowance;
+  },
+
+  list_sales_allowances: async (args) => {
+    syncAllowanceStorage();
+    const { filter } = args || {};
+    const targetTenantId = resolveMockActiveTenantId();
+    const st = filter?.status?.trim();
+    const cid = filter?.customer_partner_id || filter?.customerPartnerId;
+    const invId = filter?.customer_invoice_id || filter?.customerInvoiceId;
+    const q = filter?.query?.trim().toLowerCase();
+
+    return (mockSalesAllowances || [])
+      .filter(sa => {
+        if ((sa.tenant_id || 'tnt_mock_1') !== targetTenantId) return false;
+        if (st && sa.status !== st) return false;
+        if (cid && sa.customer_partner_id !== cid) return false;
+        if (invId && sa.customer_invoice_id !== invId) return false;
+        if (q) {
+          const matchNum = (sa.allowance_number || '').toLowerCase().includes(q);
+          const matchInv = (sa.invoice_number_snapshot || '').toLowerCase().includes(q);
+          const matchCust = (sa.customer_name_snapshot || '').toLowerCase().includes(q);
+          if (!matchNum && !matchInv && !matchCust) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => b.created_at - a.created_at);
   }
 };
 

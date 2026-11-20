@@ -569,6 +569,8 @@ export const appState = $state({
   selectedCustomerInvoiceId: /** @type {string | null} */ (null),
   uninvoicedSalesOrders: /** @type {any[]} */ ([]),
   pendingAllowanceInvoices: /** @type {any[]} */ ([]),
+  salesAllowances: /** @type {any[]} */ ([]),
+  currentSalesAllowanceDetail: /** @type {any | null} */ (null),
 
   // Vendor Bills cache (Issue #202)
   /** @type {any[]} */
