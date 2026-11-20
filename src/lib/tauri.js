@@ -113,6 +113,7 @@ import {
   customerInvoiceMocks,
   mockCustomerInvoices,
   mockCustomerInvoiceOrders,
+  mockSalesAllowances,
   formatMockCustomerInvoice,
   nextMockCustomerInvoiceNumber
 } from './customerInvoices/mocks.js';
@@ -217,6 +218,7 @@ export {
   customerInvoiceMocks,
   mockCustomerInvoices,
   mockCustomerInvoiceOrders,
+  mockSalesAllowances,
   formatMockCustomerInvoice,
   nextMockCustomerInvoiceNumber,
   vendorPaymentMocks,

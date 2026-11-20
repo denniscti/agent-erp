@@ -631,6 +631,7 @@ pub fn run() {
             customer_invoices::list_customer_invoices,
             customer_invoices::list_uninvoiced_sales_orders,
             customer_invoices::get_sales_order_invoicing_info,
+            customer_invoices::list_pending_allowance_invoices,
             vendor_bills::create_vendor_bill,
             vendor_bills::update_vendor_bill_header,
             vendor_bills::add_vendor_bill_order,

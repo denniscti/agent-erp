@@ -563,6 +563,13 @@ export const appState = $state({
   /** @type {any | null} */
   currentOpeningReceivableDetail: null,
 
+  // Customer Invoices cache (Issue #223 & #226)
+  customerInvoices: /** @type {any[]} */ ([]),
+  currentCustomerInvoiceDetail: /** @type {any | null} */ (null),
+  selectedCustomerInvoiceId: /** @type {string | null} */ (null),
+  uninvoicedSalesOrders: /** @type {any[]} */ ([]),
+  pendingAllowanceInvoices: /** @type {any[]} */ ([]),
+
   // Vendor Bills cache (Issue #202)
   /** @type {any[]} */
   vendorBills: [],
@@ -711,6 +718,7 @@ export function getWorkspaceLabel(workspace) {
   if (ws === 'quotes' || ws === 'quote') return '報價單';
   if (ws === 'sales-orders' || ws === 'sales-order') return '銷售單';
   if (ws === 'customer-credit' || ws === 'customer-credits') return '客戶信用';
+  if (ws === 'customer-invoices' || ws === 'customer-invoice' || ws === 'invoices') return '銷項發票';
   return '業務工作區';
 }
 

@@ -117,6 +117,7 @@
     else if (ws === 'accounts-payable') navigate('/app/accounts-payable');
     else if (ws === 'quotes' || ws === 'quote') navigate('/app/quotes');
     else if (ws === 'sales-orders' || ws === 'sales-order') navigate('/app/sales-orders');
+    else if (ws === 'customer-invoices' || ws === 'customer-invoice' || ws === 'invoices') navigate('/app/customer-invoices');
     else if (ws === 'customer-credit' || ws === 'customer-credits') navigate('/app/customer-credit');
     else if (ws === 'inventory') navigate('/app/inventory');
     else navigate(`/app/${ws}`);
@@ -249,6 +250,23 @@
                 <polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon>
                 <circle cx="5.5" cy="18.5" r="2.5"></circle>
                 <circle cx="18.5" cy="18.5" r="2.5"></circle>
+              </svg>
+            </button>
+
+            <!-- 銷項發票 (Issue #223 / #226) -->
+            <button
+              class="rail-nav-btn {activeTab === 'customer-invoices' || activeTab === 'customer-invoice' || activeTab === 'invoices' ? 'active' : ''}"
+              onclick={() => selectWorkspace('customer-invoices')}
+              title="銷項發票"
+              aria-label="銷項發票"
+              id="rail-nav-customer-invoices"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+                <line x1="10" y1="9" x2="8" y2="9"></line>
               </svg>
             </button>
 

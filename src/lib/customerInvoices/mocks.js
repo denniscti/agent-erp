@@ -44,6 +44,12 @@ if (!mockCustomerInvoiceOrders || !Array.isArray(mockCustomerInvoiceOrders)) {
   saveStorage('agent_erp_mock_customer_invoice_orders', mockCustomerInvoiceOrders);
 }
 
+export let mockSalesAllowances = loadStorage('agent_erp_mock_sales_allowances', []);
+if (!mockSalesAllowances || !Array.isArray(mockSalesAllowances)) {
+  mockSalesAllowances = [];
+  saveStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+}
+
 export function nextMockCustomerInvoiceNumber(tenantId) {
   const existing = mockCustomerInvoices.filter(b => (b.tenant_id || 'tnt_mock_1') === tenantId);
   let maxSeq = 0;
@@ -103,7 +109,14 @@ export function formatMockCustomerInvoice(cinv) {
   if (cinv.status === 'posted' && orders.length > 0 && orders.every(o => o.status === 'shipped')) {
     const shippedSum = orders.reduce((sum, o) => sum + o.shipped_amount, 0);
     const basis = cinv.basis_amount !== null && cinv.basis_amount !== undefined ? Number(cinv.basis_amount) : 0;
-    const shortfall = Math.round((basis - shippedSum) * 100) / 100;
+    let postedAllowancesUntaxed = 0;
+    const activeAllowances = loadStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
+    if (Array.isArray(activeAllowances)) {
+      postedAllowancesUntaxed = activeAllowances
+        .filter(sa => sa.customer_invoice_id === cinv.id && sa.status === 'posted')
+        .reduce((sum, sa) => sum + (Number(sa.untaxed_amount) || 0), 0);
+    }
+    const shortfall = Math.round((basis - shippedSum - postedAllowancesUntaxed) * 100) / 100;
     if (shortfall >= 1.0) {
       shipment_shortfall = shortfall;
     }
@@ -219,8 +232,10 @@ export const customerInvoiceMocks = {
     const targetTenantId = (args && args.tenant_id) || resolveMockActiveTenantId();
     mockCustomerInvoices = mockCustomerInvoices.filter(b => (b.tenant_id || 'tnt_mock_1') !== targetTenantId);
     mockCustomerInvoiceOrders = mockCustomerInvoiceOrders.filter(o => (o.tenant_id || 'tnt_mock_1') !== targetTenantId);
+    mockSalesAllowances = mockSalesAllowances.filter(a => (a.tenant_id || 'tnt_mock_1') !== targetTenantId);
     saveStorage('agent_erp_mock_customer_invoices', mockCustomerInvoices);
     saveStorage('agent_erp_mock_customer_invoice_orders', mockCustomerInvoiceOrders);
+    saveStorage('agent_erp_mock_sales_allowances', mockSalesAllowances);
     return true;
   },
 
@@ -813,36 +828,106 @@ export const customerInvoiceMocks = {
     const { customer_partner_id, customerPartnerId } = args || {};
     const targetTenantId = resolveMockActiveTenantId();
     const cid = String(customer_partner_id || customerPartnerId || '').trim();
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const currentYm = today.slice(0, 7);
 
-    return mockSalesOrders
-      .filter(so => {
-        if ((so.tenant_id || 'tnt_mock_1') !== targetTenantId) return false;
-        if (so.status !== 'confirmed' && so.status !== 'shipped') return false;
-        if (cid && so.customer_partner_id !== cid) return false;
+    const result = [];
+    for (const so of mockSalesOrders) {
+      if ((so.tenant_id || 'tnt_mock_1') !== targetTenantId) continue;
+      if (so.status !== 'confirmed' && so.status !== 'shipped') continue;
+      if (cid && so.customer_partner_id !== cid) continue;
 
-        // Must not be covered by draft/posted invoice
-        const isCovered = mockCustomerInvoiceOrders.some(cio => {
-          if (cio.sales_order_id !== so.id || (cio.tenant_id || 'tnt_mock_1') !== targetTenantId) return false;
-          const parent = mockCustomerInvoices.find(ci => ci.id === cio.customer_invoice_id);
-          return parent && (parent.status === 'draft' || parent.status === 'posted');
-        });
-        return !isCovered;
-      })
-      .map(so => {
-        const amounts = getMockSalesOrderAmounts(so);
-        return {
+      // Must not be covered by draft/posted invoice
+      const isCovered = mockCustomerInvoiceOrders.some(cio => {
+        if (cio.sales_order_id !== so.id || (cio.tenant_id || 'tnt_mock_1') !== targetTenantId) return false;
+        const parent = mockCustomerInvoices.find(ci => ci.id === cio.customer_invoice_id);
+        return parent && (parent.status === 'draft' || parent.status === 'posted');
+      });
+      if (isCovered) continue;
+
+      const partner = mockPartners.find(p => p.id === so.customer_partner_id && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+      const issuanceMode = partner?.invoice_issuance_mode || 'per_order';
+      const amounts = getMockSalesOrderAmounts(so);
+
+      if (issuanceMode === 'monthly_consolidated') {
+        // (c) 月結客戶本月待彙開。出貨金額為 0 的銷售單不列入
+        if (so.status !== 'shipped' || amounts.shipped_amount <= 0) continue;
+        const sYm = (so.ship_date || '').slice(0, 7);
+        if (currentYm && sYm !== currentYm) continue;
+        result.push({
           sales_order_id: so.id,
           so_number: so.so_number || '',
           customer_partner_id: so.customer_partner_id,
-          customer_name_snapshot: so.customer_name_snapshot || '',
+          customer_name_snapshot: so.customer_name_snapshot || partner?.name || '',
           status: so.status,
           confirmed_at: so.confirmed_at || so.created_at,
           shipped_at: so.shipped_at || null,
           ship_date: so.ship_date || null,
           total_amount: amounts.total_amount,
-          shipped_amount: amounts.shipped_amount
-        };
-      });
+          shipped_amount: amounts.shipped_amount,
+          group: 'monthly_consolidated',
+          is_overdue_risk: false,
+          uninvoiced_amount: amounts.shipped_amount
+        });
+      } else {
+        // 逐單客戶
+        if (so.status === 'confirmed') {
+          // (a) 逐單客戶、已確認未開票
+          result.push({
+            sales_order_id: so.id,
+            so_number: so.so_number || '',
+            customer_partner_id: so.customer_partner_id,
+            customer_name_snapshot: so.customer_name_snapshot || partner?.name || '',
+            status: so.status,
+            confirmed_at: so.confirmed_at || so.created_at,
+            shipped_at: so.shipped_at || null,
+            ship_date: so.ship_date || null,
+            total_amount: amounts.total_amount,
+            shipped_amount: amounts.shipped_amount,
+            group: 'per_order_confirmed',
+            is_overdue_risk: false,
+            uninvoiced_amount: amounts.total_amount
+          });
+        } else if (so.status === 'shipped') {
+          // (b) 逐單客戶、已出貨未開票（標示逾時風險）。出貨金額為 0 的銷售單不列入
+          if (amounts.shipped_amount <= 0) continue;
+          const isOverdueRisk = Boolean(so.ship_date && so.ship_date < today);
+          result.push({
+            sales_order_id: so.id,
+            so_number: so.so_number || '',
+            customer_partner_id: so.customer_partner_id,
+            customer_name_snapshot: so.customer_name_snapshot || partner?.name || '',
+            status: so.status,
+            confirmed_at: so.confirmed_at || so.created_at,
+            shipped_at: so.shipped_at || null,
+            ship_date: so.ship_date || null,
+            total_amount: amounts.total_amount,
+            shipped_amount: amounts.shipped_amount,
+            group: 'per_order_shipped',
+            is_overdue_risk: isOverdueRisk,
+            uninvoiced_amount: amounts.shipped_amount
+          });
+        }
+      }
+    }
+    return result.sort((a, b) => b.confirmed_at - a.confirmed_at);
+  },
+
+  list_pending_allowance_invoices: async (args) => {
+    const { customer_partner_id, customerPartnerId } = args || {};
+    const targetTenantId = resolveMockActiveTenantId();
+    const cid = String(customer_partner_id || customerPartnerId || '').trim();
+
+    return mockCustomerInvoices
+      .filter(cinv => {
+        if ((cinv.tenant_id || 'tnt_mock_1') !== targetTenantId) return false;
+        if (cinv.status !== 'posted') return false;
+        if (cid && cinv.customer_partner_id !== cid) return false;
+        const formatted = formatMockCustomerInvoice(cinv);
+        return (formatted.item.shipment_shortfall || 0) >= 1.0;
+      })
+      .map(cinv => formatMockCustomerInvoice(cinv).item);
   },
 
   get_sales_order_invoicing_info: async (args) => {

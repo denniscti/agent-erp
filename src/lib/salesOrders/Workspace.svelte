@@ -29,6 +29,10 @@
     buildShipOrderPayload,
     formatOrderQty
   } from '../salesOrdersHelper.js';
+  import {
+    fetchSalesOrderInvoicingInfo,
+    fetchCustomerInvoiceDetail
+  } from '../customerInvoices/store.js';
 
   // View mode: 'list' | 'detail'
   let viewMode = $state('list');
@@ -55,6 +59,34 @@
   let detailError = $state('');
   let actionError = $state('');
   let sourceQuoteNumber = $state('');
+  let currentInvoicingInfo = $state(null);
+  let currentInvoiceDetail = $state(null);
+
+  async function loadInvoicingInfo(soId) {
+    if (!soId) {
+      currentInvoicingInfo = null;
+      currentInvoiceDetail = null;
+      return;
+    }
+    try {
+      const info = await fetchSalesOrderInvoicingInfo(soId);
+      currentInvoicingInfo = info;
+      if (info && info.invoice_id) {
+        try {
+          const inv = await fetchCustomerInvoiceDetail(info.invoice_id);
+          currentInvoiceDetail = inv;
+        } catch {
+          currentInvoiceDetail = null;
+        }
+      } else {
+        currentInvoiceDetail = null;
+      }
+    } catch (err) {
+      console.error('Failed to load invoicing info:', err);
+      currentInvoicingInfo = null;
+      currentInvoiceDetail = null;
+    }
+  }
 
   // Ship modal state (倉管出貨表單)
   let isShipModalOpen = $state(false);
@@ -174,6 +206,9 @@
       if (currentDetail?.order?.source_quote_id) {
         loadSourceQuoteNumber(currentDetail.order.source_quote_id);
       }
+      if (currentDetail?.order?.id) {
+        await loadInvoicingInfo(currentDetail.order.id);
+      }
     } catch (e) {
       detailError = e.message || String(e);
       currentDetail = null;
@@ -267,6 +302,38 @@
           ? `銷售單 ${updated.order.so_number} 已完成全部出貨`
           : `銷售單 ${updated.order.so_number} 已完成批次出貨（部分出貨）`
       );
+
+      await loadInvoicingInfo(updated.order.id);
+
+      // 出貨表單（#221）出貨成功後聯動
+      const partner = (appState.partners || []).find(p => p.id === updated.order.customer_partner_id);
+      const issuanceMode = partner?.invoice_issuance_mode || 'per_order';
+
+      if (!currentInvoicingInfo) {
+        // 逐單客戶還沒開票時，提示「此銷售單尚未開立發票」
+        if (issuanceMode === 'per_order') {
+          showToast('此銷售單尚未開立發票');
+        }
+      } else {
+        // 已開票而且產生短少時，提示倉管，並用 window.__SHELL__.notify 發 alert 通知財務，action.target 指向發票明細頁
+        if (currentInvoiceDetail && (currentInvoiceDetail.shipment_shortfall || 0) >= 1.0) {
+          const shortfallAmt = currentInvoiceDetail.shipment_shortfall;
+          showToast(`倉管提示：此銷售單已開票但產生出貨短少 NT$ ${formatCurrency(shortfallAmt)}`);
+          if (typeof window !== 'undefined' && window.__SHELL__?.notify) {
+            window.__SHELL__.notify({
+              type: 'alert',
+              level: 'alert',
+              title: '發票出貨短少通知',
+              message: `銷售單 ${updated.order.so_number} 出貨金額小於發票金額，發票 ${currentInvoicingInfo.invoice_number} 產生短少 NT$ ${formatCurrency(shortfallAmt)} 元`,
+              sourceModule: 'sales_orders',
+              action: {
+                label: '查看發票明細',
+                target: `/app/customer-invoices?id=${currentInvoicingInfo.invoice_id}`
+              }
+            });
+          }
+        }
+      }
     } catch (err) {
       const msg = err?.message || String(err);
       shipModalError = msg;
@@ -495,6 +562,16 @@
               </span>
             </div>
             <div class="so-actions-row">
+              {#if (so.status === 'confirmed' || so.status === 'shipped') && !currentInvoicingInfo}
+                <button
+                  type="button"
+                  class="btn btn-secondary btn-sm"
+                  id="btn-so-create-invoice"
+                  onclick={() => navigate('/app/customer-invoices')}
+                >
+                  開立發票
+                </button>
+              {/if}
               {#if canShipSalesOrder(so)}
                 <button
                   type="button"
@@ -586,6 +663,52 @@
               <div class="info-item full-width">
                 <span class="info-label">備註說明</span>
                 <span class="info-value">{so.note}</span>
+              </div>
+            {/if}
+            {#if currentInvoicingInfo}
+              <div class="info-item">
+                <span class="info-label">關聯銷項發票</span>
+                <div class="info-value">
+                  <button
+                    type="button"
+                    class="quote-link-btn"
+                    id="so-invoice-link"
+                    onclick={() => {
+                      appState.selectedCustomerInvoiceId = currentInvoicingInfo.invoice_id;
+                      navigate(`/app/customer-invoices?id=${currentInvoicingInfo.invoice_id}`);
+                    }}
+                    title="前往銷項發票明細"
+                  >
+                    📄 {currentInvoicingInfo.invoice_number}
+                  </button>
+                </div>
+              </div>
+              <div class="info-item">
+                <span class="info-label">發票收入分類</span>
+                <span class="info-value">
+                  {#if currentInvoiceDetail?.revenue_status === 'recognized'}
+                    <span class="badge badge-emerald">已認列</span>
+                  {:else}
+                    <span class="badge badge-amber">遞延收入</span>
+                  {/if}
+                </span>
+              </div>
+            {:else if so.status === 'confirmed' || so.status === 'shipped'}
+              {@const partner = (appState.partners || []).find(p => p.id === so.customer_partner_id)}
+              {@const mode = partner?.invoice_issuance_mode || 'per_order'}
+              {@const uninvAmt = (so.status === 'shipped' ? (so.shipped_amount || 0) : (so.total_amount || 0))}
+              {@const groupLabel = mode === 'monthly_consolidated'
+                ? '(c) 月結本月待彙開'
+                : (so.status === 'confirmed' ? '(a) 逐單已確認未開票' : '(b) 逐單已出貨未開票')}
+              <div class="info-item">
+                <span class="info-label">未開票金額 (uninvoiced_amount)</span>
+                <span class="info-value font-mono font-bold text-primary">
+                  {so.currency} {formatCurrency(uninvAmt)}
+                </span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">待開票分組</span>
+                <span class="info-value text-muted font-bold">{groupLabel}</span>
               </div>
             {/if}
           </div>

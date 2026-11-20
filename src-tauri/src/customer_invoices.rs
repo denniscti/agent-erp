@@ -246,6 +246,9 @@ pub struct UninvoicedSalesOrder {
     pub ship_date: Option<String>,
     pub total_amount: f64,
     pub shipped_amount: f64,
+    pub group: String,
+    pub is_overdue_risk: bool,
+    pub uninvoiced_amount: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
@@ -1778,13 +1781,18 @@ pub fn list_uninvoiced_sales_orders_impl(
         return Err(CustomerInvoiceError::EmptyTenantId);
     }
 
+    let today = get_today_local(conn).unwrap_or_else(|_| "1970-01-01".to_string());
+    let current_ym = if today.len() >= 7 { &today[0..7] } else { "" };
+
     let mut sql = String::from(
         "SELECT 
             so.id, so.so_number, so.customer_partner_id, so.customer_name_snapshot,
             so.status, so.confirmed_at, so.shipped_at, so.ship_date,
             COALESCE((SELECT SUM(ROUND(l.quantity * l.unit_price, 2)) FROM sales_order_lines l WHERE l.sales_order_id = so.id), 0.0) AS total_amount,
-            COALESCE((SELECT SUM(ROUND(COALESCE(l.shipped_quantity, 0.0) * l.unit_price, 2)) FROM sales_order_lines l WHERE l.sales_order_id = so.id), 0.0) AS shipped_amount
+            COALESCE((SELECT SUM(ROUND(COALESCE(l.shipped_quantity, 0.0) * l.unit_price, 2)) FROM sales_order_lines l WHERE l.sales_order_id = so.id), 0.0) AS shipped_amount,
+            COALESCE(p.invoice_issuance_mode, 'per_order') AS issuance_mode
          FROM sales_orders so
+         LEFT JOIN partners p ON p.id = so.customer_partner_id AND p.tenant_id = so.tenant_id
          WHERE so.tenant_id = ?1 
            AND so.status IN ('confirmed', 'shipped')
            AND NOT EXISTS (
@@ -1814,26 +1822,125 @@ pub fn list_uninvoiced_sales_orders_impl(
 
     let rows = stmt
         .query_map(params_slice.as_slice(), |row| {
-            Ok(UninvoicedSalesOrder {
-                sales_order_id: row.get(0)?,
-                so_number: row.get(1)?,
-                customer_partner_id: row.get(2)?,
-                customer_name_snapshot: row.get(3)?,
-                status: row.get(4)?,
-                confirmed_at: row.get(5)?,
-                shipped_at: row.get(6)?,
-                ship_date: row.get(7)?,
-                total_amount: round_2(row.get(8)?),
-                shipped_amount: round_2(row.get(9)?),
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                round_2(row.get::<_, f64>(8)?),
+                round_2(row.get::<_, f64>(9)?),
+                row.get::<_, String>(10)?,
+            ))
         })
         .map_err(|e| CustomerInvoiceError::DatabaseError(e.to_string()))?;
 
     let mut list = Vec::new();
     for r in rows {
-        list.push(r.map_err(|e| CustomerInvoiceError::DatabaseError(e.to_string()))?);
+        let (
+            sales_order_id,
+            so_number,
+            customer_partner_id,
+            customer_name_snapshot,
+            status,
+            confirmed_at,
+            shipped_at,
+            ship_date,
+            total_amount,
+            shipped_amount,
+            issuance_mode,
+        ) = r.map_err(|e| CustomerInvoiceError::DatabaseError(e.to_string()))?;
+
+        if issuance_mode == "monthly_consolidated" {
+            // (c) 月結客戶本月待彙開。出貨金額為 0 的銷售單不列入
+            if status != "shipped" || shipped_amount <= 0.0 {
+                continue;
+            }
+            let s_ym = ship_date
+                .as_deref()
+                .map(|d| if d.len() >= 7 { &d[0..7] } else { "" })
+                .unwrap_or("");
+            if !current_ym.is_empty() && s_ym != current_ym {
+                continue;
+            }
+            list.push(UninvoicedSalesOrder {
+                sales_order_id,
+                so_number,
+                customer_partner_id,
+                customer_name_snapshot,
+                status,
+                confirmed_at,
+                shipped_at,
+                ship_date,
+                total_amount,
+                shipped_amount,
+                group: "monthly_consolidated".to_string(),
+                is_overdue_risk: false,
+                uninvoiced_amount: shipped_amount,
+            });
+        } else {
+            // 逐單客戶
+            if status == "confirmed" {
+                // (a) 逐單客戶、已確認未開票
+                list.push(UninvoicedSalesOrder {
+                    sales_order_id,
+                    so_number,
+                    customer_partner_id,
+                    customer_name_snapshot,
+                    status,
+                    confirmed_at,
+                    shipped_at,
+                    ship_date,
+                    total_amount,
+                    shipped_amount,
+                    group: "per_order_confirmed".to_string(),
+                    is_overdue_risk: false,
+                    uninvoiced_amount: total_amount,
+                });
+            } else if status == "shipped" {
+                // (b) 逐單客戶、已出貨未開票（標示逾時風險）。出貨金額為 0 的銷售單不列入
+                if shipped_amount <= 0.0 {
+                    continue;
+                }
+                let is_overdue_risk = match &ship_date {
+                    Some(d) => d.as_str() < today.as_str(),
+                    None => false,
+                };
+                list.push(UninvoicedSalesOrder {
+                    sales_order_id,
+                    so_number,
+                    customer_partner_id,
+                    customer_name_snapshot,
+                    status,
+                    confirmed_at,
+                    shipped_at,
+                    ship_date,
+                    total_amount,
+                    shipped_amount,
+                    group: "per_order_shipped".to_string(),
+                    is_overdue_risk,
+                    uninvoiced_amount: shipped_amount,
+                });
+            }
+        }
     }
     Ok(list)
+}
+
+pub fn list_pending_allowance_invoices_impl(
+    conn: &Connection,
+    tenant_id: &str,
+    customer_partner_id: Option<&str>,
+) -> Result<Vec<CustomerInvoiceItem>, CustomerInvoiceError> {
+    let list =
+        list_customer_invoices_impl(conn, tenant_id, Some("posted"), customer_partner_id, None)?;
+    Ok(list
+        .into_iter()
+        .filter(|i| i.shipment_shortfall >= 1.0)
+        .collect())
 }
 
 pub fn get_sales_order_invoicing_info_impl(
@@ -2051,6 +2158,20 @@ pub fn get_sales_order_invoicing_info(
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
 
     get_sales_order_invoicing_info_impl(&conn, &active_tid, &sales_order_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn list_pending_allowance_invoices(
+    app_handle: tauri::AppHandle,
+    customer_partner_id: Option<String>,
+) -> Result<Vec<CustomerInvoiceItem>, String> {
+    let db_path = crate::get_db_path(&app_handle);
+    let conn = Connection::open(&db_path).map_err(|e| format!("DB Open Error: {}", e))?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+
+    list_pending_allowance_invoices_impl(&conn, &active_tid, customer_partner_id.as_deref())
         .map_err(|e| e.to_string())
 }
 
@@ -3034,5 +3155,196 @@ pub mod tests {
             inv_m.late_issue_warning,
             Some("銷售單 SO-CROSS 於 2026-10-31 出貨，已超過當月彙開期間".to_string())
         );
+    }
+
+    #[test]
+    fn test_tc_ci_226_uninvoiced_groups_and_pending_allowance() {
+        // Given: Seeded database with per_order and monthly_consolidated customers and various SOs
+        let mut conn = setup_test_db();
+        let today = get_today_local(&conn).unwrap();
+        let current_ym = if today.len() >= 7 {
+            today[0..7].to_string()
+        } else {
+            "2026-11".to_string()
+        };
+
+        // Group (a): 逐單、已確認未開票
+        insert_test_so(
+            &conn,
+            "tnt_test",
+            "so_a1",
+            "SO-A01",
+            "cus_001",
+            "confirmed",
+            None,
+            100.0,
+            10.0,
+            None,
+        );
+
+        // Group (b): 逐單、已出貨未開票 (出貨日早於今天 -> 逾時風險)
+        insert_test_so(
+            &conn,
+            "tnt_test",
+            "so_b1",
+            "SO-B01",
+            "cus_001",
+            "shipped",
+            Some("2020-01-01"),
+            200.0,
+            5.0,
+            Some(5.0),
+        );
+
+        // Group (b) boundary: 逐單、已出貨但出貨金額為 0 -> 不列入
+        insert_test_so(
+            &conn,
+            "tnt_test",
+            "so_b_zero",
+            "SO-B02",
+            "cus_001",
+            "shipped",
+            Some("2020-01-01"),
+            200.0,
+            5.0,
+            Some(0.0),
+        );
+
+        // Group (c): 月結、當月已出貨
+        let this_month_ship_date = format!("{}-10", current_ym);
+        insert_test_so(
+            &conn,
+            "tnt_test",
+            "so_c1",
+            "SO-C01",
+            "cus_monthly",
+            "shipped",
+            Some(&this_month_ship_date),
+            300.0,
+            3.0,
+            Some(3.0),
+        );
+
+        // Group (c) boundary: 月結、非當月已出貨 (跨月) -> 不列入
+        insert_test_so(
+            &conn,
+            "tnt_test",
+            "so_c_cross",
+            "SO-C02",
+            "cus_monthly",
+            "shipped",
+            Some("2020-05-15"),
+            300.0,
+            3.0,
+            Some(3.0),
+        );
+
+        // When: Querying list_uninvoiced_sales_orders
+        let list = list_uninvoiced_sales_orders_impl(&conn, "tnt_test", None).unwrap();
+
+        // Then: Exactly 3 orders in the list
+        assert_eq!(list.len(), 3);
+        let a1 = list.iter().find(|o| o.sales_order_id == "so_a1").unwrap();
+        assert_eq!(a1.group, "per_order_confirmed");
+        assert_eq!(a1.uninvoiced_amount, 1000.0);
+        assert!(!a1.is_overdue_risk);
+
+        let b1 = list.iter().find(|o| o.sales_order_id == "so_b1").unwrap();
+        assert_eq!(b1.group, "per_order_shipped");
+        assert_eq!(b1.uninvoiced_amount, 1000.0);
+        assert!(b1.is_overdue_risk);
+
+        let c1 = list.iter().find(|o| o.sales_order_id == "so_c1").unwrap();
+        assert_eq!(c1.group, "monthly_consolidated");
+        assert_eq!(c1.uninvoiced_amount, 900.0);
+        assert!(!c1.is_overdue_risk);
+
+        // When: Invoicing so_a1 and posting it
+        let inv_detail = create_customer_invoice_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateCustomerInvoiceInput {
+                customer_partner_id: "cus_001".to_string(),
+                issuance_mode: Some("per_order".to_string()),
+                invoice_date: today.clone(),
+                due_date: None,
+                untaxed_amount: Some(1000.0),
+                tax_amount: Some(50.0),
+                sales_order_ids: Some(vec!["so_a1".to_string()]),
+                tax_invoice_number: Some("AB-55556666".to_string()),
+                tax_invoice_exemption_reason: None,
+                note: None,
+                task_id: None,
+            },
+        )
+        .unwrap();
+
+        // Then: so_a1 disappears from uninvoiced list even in draft
+        let list_after_draft = list_uninvoiced_sales_orders_impl(&conn, "tnt_test", None).unwrap();
+        assert_eq!(list_after_draft.len(), 2);
+        assert!(list_after_draft.iter().all(|o| o.sales_order_id != "so_a1"));
+
+        // When: Posting invoice
+        post_customer_invoice_impl(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            PostCustomerInvoiceInput {
+                invoice_id: inv_detail.invoice.id.clone(),
+                tax_invoice_number: None,
+                tax_invoice_exemption_reason: None,
+                difference_note: None,
+                note: None,
+            },
+        )
+        .unwrap();
+
+        // When: Updating so_a1 to shipped with short delivery (basis 1000, shipped 600 -> shortfall 400)
+        conn.execute(
+            "UPDATE sales_orders SET status = 'shipped', ship_date = ?1 WHERE id = 'so_a1'",
+            params![today],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE sales_order_lines SET shipped_quantity = 6.0 WHERE sales_order_id = 'so_a1'",
+            [],
+        )
+        .unwrap();
+
+        // Then: Invoice has shipment_shortfall = 400 and appears in pending allowance list
+        let pending_allowances =
+            list_pending_allowance_invoices_impl(&conn, "tnt_test", None).unwrap();
+        assert_eq!(pending_allowances.len(), 1);
+        assert_eq!(pending_allowances[0].id, inv_detail.invoice.id);
+        assert_eq!(pending_allowances[0].shipment_shortfall, 400.0);
+
+        // When: A posted sales_allowances exists covering the 400 shortfall
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sales_allowances (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                allowance_number TEXT NOT NULL,
+                customer_invoice_id TEXT NOT NULL,
+                account_receivable_id TEXT,
+                untaxed_amount REAL NOT NULL,
+                tax_amount REAL NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sales_allowances (id, tenant_id, allowance_number, customer_invoice_id, untaxed_amount, tax_amount, status, created_at)
+             VALUES ('alw_1', 'tnt_test', 'ALW-001', ?1, 400.0, 20.0, 'posted', 1000)",
+            params![inv_detail.invoice.id],
+        )
+        .unwrap();
+
+        // Then: shortfall reduced to 0, pending allowances becomes empty!
+        let pending_allowances_after =
+            list_pending_allowance_invoices_impl(&conn, "tnt_test", None).unwrap();
+        assert_eq!(pending_allowances_after.len(), 0);
     }
 }

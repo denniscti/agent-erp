@@ -4,14 +4,31 @@
     appState,
     fetchPartners,
     updatePartnerAction,
-    showToast
+    showToast,
+    formatCurrency
   } from '../store.svelte.js';
   import { getCollectionTermsNotice } from '../terms.js';
+  import { fetchUninvoicedSalesOrders } from '../customerInvoices/store.js';
 
   let selectedCustomerId = $state('');
   let searchTerm = $state('');
   let isSaving = $state(false);
   let formError = $state('');
+
+  let customerUninvoiced = $derived.by(() => {
+    if (!selectedCustomerId) return { sumA: 0, sumB: 0, sumC: 0, total: 0, count: 0 };
+    const list = (appState.uninvoicedSalesOrders || []).filter(o => o.customer_partner_id === selectedCustomerId);
+    const sumA = list.filter(o => o.group === 'per_order_confirmed').reduce((s, o) => s + (o.uninvoiced_amount || 0), 0);
+    const sumB = list.filter(o => o.group === 'per_order_shipped').reduce((s, o) => s + (o.uninvoiced_amount || 0), 0);
+    const sumC = list.filter(o => o.group === 'monthly_consolidated').reduce((s, o) => s + (o.uninvoiced_amount || 0), 0);
+    return {
+      sumA: Math.round(sumA * 100) / 100,
+      sumB: Math.round(sumB * 100) / 100,
+      sumC: Math.round(sumC * 100) / 100,
+      total: Math.round((sumA + sumB + sumC) * 100) / 100,
+      count: list.length
+    };
+  });
 
   // Form states for selected customer
   let collectionTermsType = $state('');
@@ -56,6 +73,7 @@
     if (!appState.partners || appState.partners.length === 0) {
       await fetchPartners();
     }
+    await fetchUninvoicedSalesOrders();
     if (customers.length > 0 && !selectedCustomerId) {
       selectedCustomerId = customers[0].id;
     }
@@ -189,6 +207,29 @@
             <div class="chip">
               <span class="chip-label">帳齡摘要</span>
               <span class="chip-val">無逾期應收帳款</span>
+            </div>
+          </div>
+
+          <!-- Uninvoiced Amount Summary (CI-226) -->
+          <div class="uninvoiced-section">
+            <h4 class="section-title">未開票金額（uninvoiced_amount）分組摘要</h4>
+            <div class="aging-summary-chips">
+              <div class="chip">
+                <span class="chip-label">(a) 逐單已確認未開票</span>
+                <span class="chip-val font-mono">{formatCurrency(customerUninvoiced.sumA)}</span>
+              </div>
+              <div class="chip">
+                <span class="chip-label">(b) 逐單已出貨未開票</span>
+                <span class="chip-val font-mono text-warning">{formatCurrency(customerUninvoiced.sumB)}</span>
+              </div>
+              <div class="chip">
+                <span class="chip-label">(c) 月結本月待彙開</span>
+                <span class="chip-val font-mono text-primary">{formatCurrency(customerUninvoiced.sumC)}</span>
+              </div>
+              <div class="chip">
+                <span class="chip-label">未開票總額</span>
+                <span class="chip-val font-mono font-bold">{formatCurrency(customerUninvoiced.total)}</span>
+              </div>
             </div>
           </div>
         </div>
