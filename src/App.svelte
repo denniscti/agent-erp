@@ -271,17 +271,13 @@
             </button>
 
             <!-- 客戶信用 (Issue #219 / M14 應收工作區) -->
-            <button
-              class="rail-nav-btn {activeTab === 'customer-credit' || activeTab === 'customer-credits' ? 'active' : ''}"
-              onclick={() => selectWorkspace('customer-credit')}
-              title="客戶信用"
-              aria-label="客戶信用"
-              id="rail-nav-customer-credit"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-                <path d="m9 12 2 2 4-4"></path>
-              </svg>
+            <button class="rail-nav-btn {activeTab === 'customer-credit' || activeTab === 'customer-credits' ? 'active' : ''}" onclick={() => selectWorkspace('customer-credit')} title="客戶信用" aria-label="客戶信用" id="rail-nav-customer-credit">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="m9 12 2 2 4-4"></path></svg>
+            </button>
+
+            <!-- 客戶收款單 (Issue #227) -->
+            <button class="rail-nav-btn {activeTab === 'customer-receipts' || activeTab === 'customerReceipts' || activeTab === 'receipts' ? 'active' : ''}" onclick={() => selectWorkspace('customer-receipts')} title="客戶收款單" aria-label="客戶收款單" id="rail-nav-customer-receipts">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
             </button>
 
             <!-- Settings icon -->

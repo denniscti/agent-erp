@@ -170,52 +170,39 @@ export {
 } from './stockTransfers/store.js';
 
 export {
-  loadOpeningPayablesAction,
-  createOpeningPayableAction,
-  voidOpeningPayableAction
+  loadOpeningPayablesAction, createOpeningPayableAction, voidOpeningPayableAction
 } from './openingPayables/store.js';
 
 export {
-  loadOpeningReceivablesAction,
-  createOpeningReceivableAction,
-  voidOpeningReceivableAction
+  loadOpeningReceivablesAction, createOpeningReceivableAction, voidOpeningReceivableAction
 } from './openingReceivables/store.js';
 
 export {
-  fetchVendorBills,
-  fetchVendorBillDetail,
-  fetchUnbilledReceivedOrders,
-  fetchPurchaseOrderBillingInfo,
-  createVendorBillAction,
-  updateVendorBillHeaderAction,
-  addVendorBillOrderAction,
-  removeVendorBillOrderAction,
-  postVendorBillAction,
-  acceptVendorBillDifferenceAction,
-  returnVendorBillToDraftAction,
-  cancelVendorBillAction,
-  voidVendorBillAction
+  fetchVendorBills, fetchVendorBillDetail, fetchUnbilledReceivedOrders,
+  fetchPurchaseOrderBillingInfo, createVendorBillAction, updateVendorBillHeaderAction,
+  addVendorBillOrderAction, removeVendorBillOrderAction, postVendorBillAction,
+  acceptVendorBillDifferenceAction, returnVendorBillToDraftAction,
+  cancelVendorBillAction, voidVendorBillAction
 } from './vendorBills/store.js';
 
 export {
-  loadVendorPaymentsAction,
-  getVendorPaymentAction,
-  createVendorPaymentAction,
-  updateVendorPaymentHeaderAction,
-  addVendorPaymentAllocationAction,
-  updateVendorPaymentAllocationAction,
-  removeVendorPaymentAllocationAction,
-  postVendorPaymentAction,
-  cancelVendorPaymentAction,
-  voidVendorPaymentAction
+  loadVendorPaymentsAction, getVendorPaymentAction, createVendorPaymentAction,
+  updateVendorPaymentHeaderAction, addVendorPaymentAllocationAction,
+  updateVendorPaymentAllocationAction, removeVendorPaymentAllocationAction,
+  postVendorPaymentAction, cancelVendorPaymentAction, voidVendorPaymentAction
 } from './vendorPayments/store.js';
 
 export {
-  queryAccountsPayableAction,
-  loadAccountsPayableAction,
-  getAccountPayableAction,
-  loadPayablesAgingAction,
-  loadVendorStatementAction
+  loadCustomerReceiptsAction, getCustomerReceiptAction, createCustomerReceiptAction,
+  updateCustomerReceiptHeaderAction, addCustomerReceiptAllocationAction,
+  updateCustomerReceiptAllocationAction, removeCustomerReceiptAllocationAction,
+  postCustomerReceiptAction, cancelCustomerReceiptAction, voidCustomerReceiptAction,
+  loadCustomerOpenReceivablesAction
+} from './customerReceipts/store.js';
+
+export {
+  queryAccountsPayableAction, loadAccountsPayableAction, getAccountPayableAction,
+  loadPayablesAgingAction, loadVendorStatementAction
 } from './accountsPayable/store.js';
 
 export {
@@ -596,6 +583,14 @@ export const appState = $state({
   /** @type {any | null} */
   payablesAgingReport: null,
 
+  // Customer Receipts cache (Issue #227)
+  /** @type {any[]} */
+  customerReceipts: [],
+  /** @type {any | null} */
+  currentCustomerReceiptDetail: null,
+  /** @type {string | null} */
+  selectedCustomerReceiptId: null,
+
   // Quotes cache (Issue #231, #232, #233)
   /** @type {any[]} */
   quotes: [],
@@ -721,6 +716,7 @@ export function getWorkspaceLabel(workspace) {
   if (ws === 'sales-orders' || ws === 'sales-order') return '銷售單';
   if (ws === 'customer-credit' || ws === 'customer-credits') return '客戶信用';
   if (ws === 'customer-invoices' || ws === 'customer-invoice' || ws === 'invoices') return '銷項發票';
+  if (ws === 'customer-receipts' || ws === 'customerReceipts' || ws === 'receipts') return '收款單';
   return '業務工作區';
 }
 
