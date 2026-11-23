@@ -1,0 +1,14 @@
+{
+  "id": "inventoryAdjustments",
+  "label": "庫存調整",
+  "icon": "warehouse",
+  "route": "/app/inventory-adjustments",
+  "aliases": [
+    "inventory-adjustments",
+    "adjustments",
+    "/app/adjustments"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": false
+}
+

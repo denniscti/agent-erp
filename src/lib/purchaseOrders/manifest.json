@@ -1,0 +1,14 @@
+{
+  "id": "purchaseOrders",
+  "label": "採購單",
+  "icon": "shopping-bag",
+  "route": "/app/purchase-orders",
+  "aliases": [
+    "purchase-orders",
+    "purchase-order",
+    "/app/purchase-order"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": true
+}
+

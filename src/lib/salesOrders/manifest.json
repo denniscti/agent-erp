@@ -1,0 +1,14 @@
+{
+  "id": "salesOrders",
+  "label": "銷售單",
+  "icon": "truck",
+  "route": "/app/sales-orders",
+  "aliases": [
+    "sales-orders",
+    "sales-order",
+    "/app/sales-order"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": true
+}
+

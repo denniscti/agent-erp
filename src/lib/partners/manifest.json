@@ -1,0 +1,15 @@
+{
+  "id": "partners",
+  "label": "合作夥伴",
+  "icon": "settings",
+  "route": "/app/settings",
+  "aliases": [
+    "partners",
+    "partner",
+    "customers",
+    "vendors"
+  ],
+  "entry": "../settings/Workspace.svelte",
+  "topLevelNav": false
+}
+

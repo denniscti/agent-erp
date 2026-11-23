@@ -1,0 +1,14 @@
+{
+  "id": "openingPayables",
+  "label": "期初應付帳款",
+  "icon": "credit-card",
+  "route": "/app/opening-payables",
+  "aliases": [
+    "opening-payables",
+    "openingPayables",
+    "/app/openingPayables"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": false
+}
+

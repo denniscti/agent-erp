@@ -1,0 +1,14 @@
+{
+  "id": "products",
+  "label": "商品管理",
+  "icon": "settings",
+  "route": "/app/settings",
+  "aliases": [
+    "products",
+    "product",
+    "bom"
+  ],
+  "entry": "../settings/Workspace.svelte",
+  "topLevelNav": false
+}
+

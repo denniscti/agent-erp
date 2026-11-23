@@ -1,0 +1,13 @@
+{
+  "id": "departments",
+  "label": "部門管理",
+  "icon": "settings",
+  "route": "/app/settings",
+  "aliases": [
+    "departments",
+    "department"
+  ],
+  "entry": "../settings/Workspace.svelte",
+  "topLevelNav": false
+}
+

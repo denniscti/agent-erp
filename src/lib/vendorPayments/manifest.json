@@ -1,0 +1,16 @@
+{
+  "id": "vendorPayments",
+  "label": "付款單",
+  "icon": "credit-card",
+  "route": "/app/vendor-payments",
+  "aliases": [
+    "vendor-payments",
+    "vendorPayments",
+    "payments",
+    "/app/vendorPayments",
+    "/app/payments"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": false
+}
+

@@ -1,0 +1,16 @@
+{
+  "id": "stockTransfers",
+  "label": "調撥管理",
+  "icon": "truck",
+  "route": "/app/stock-transfers",
+  "aliases": [
+    "stock-transfers",
+    "transfers",
+    "stockTransfers",
+    "/app/stockTransfers",
+    "/app/transfers"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": false
+}
+

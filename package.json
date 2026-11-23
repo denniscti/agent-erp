@@ -10,6 +10,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./jsconfig.json",
+    "verify:manifests": "node scripts/verify-domain-manifests.mjs",
     "test": "node --test tests/*.test.js",
     "test:workflow": "node --test tests/workflow-harness.test.js",
     "test:members": "node --test tests/member-management.test.js",

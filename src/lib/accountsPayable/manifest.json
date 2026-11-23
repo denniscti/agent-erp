@@ -1,0 +1,14 @@
+{
+  "id": "accountsPayable",
+  "label": "應付帳款",
+  "icon": "credit-card",
+  "route": "/app/accounts-payable",
+  "aliases": [
+    "accounts-payable",
+    "ap",
+    "/app/ap"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": true
+}
+

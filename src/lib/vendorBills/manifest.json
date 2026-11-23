@@ -1,0 +1,16 @@
+{
+  "id": "vendorBills",
+  "label": "請款單",
+  "icon": "file-text",
+  "route": "/app/vendor-bills",
+  "aliases": [
+    "vendor-bills",
+    "bills",
+    "vendor-bill",
+    "/app/bills",
+    "/app/vendor-bill"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": true
+}
+

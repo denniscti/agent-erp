@@ -1,0 +1,16 @@
+{
+  "id": "warehouses",
+  "label": "倉庫管理",
+  "icon": "warehouse",
+  "route": "/app/warehouses",
+  "aliases": [
+    "warehouses",
+    "warehouse",
+    "/app/warehouse",
+    "inventory",
+    "/app/inventory"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": true
+}
+

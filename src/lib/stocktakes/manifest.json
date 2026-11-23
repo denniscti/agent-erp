@@ -1,0 +1,14 @@
+{
+  "id": "stocktakes",
+  "label": "盤點管理",
+  "icon": "clipboard-list",
+  "route": "/app/stocktakes",
+  "aliases": [
+    "stocktakes",
+    "stocktake",
+    "/app/stocktake"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": false
+}
+

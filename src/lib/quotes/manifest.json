@@ -1,0 +1,14 @@
+{
+  "id": "quotes",
+  "label": "報價單",
+  "icon": "clipboard-list",
+  "route": "/app/quotes",
+  "aliases": [
+    "quotes",
+    "quote",
+    "/app/quote"
+  ],
+  "entry": "Workspace.svelte",
+  "topLevelNav": true
+}
+
