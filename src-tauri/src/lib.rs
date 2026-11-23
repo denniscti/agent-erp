@@ -626,6 +626,7 @@ pub fn run() {
             accounts_receivable::get_account_receivable,
             accounts_receivable::list_accounts_receivable,
             accounts_receivable::get_receivables_aging,
+            accounts_receivable::get_customer_statement,
             customer_invoices::create_customer_invoice,
             customer_invoices::update_customer_invoice_header,
             customer_invoices::add_customer_invoice_order,

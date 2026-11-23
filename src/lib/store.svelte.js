@@ -207,7 +207,7 @@ export {
 
 export {
   queryAccountsReceivableAction, loadAccountsReceivableAction, getAccountReceivableAction,
-  loadReceivablesAgingAction
+  loadReceivablesAgingAction, loadCustomerStatementAction
 } from './accountsReceivable/store.js';
 
 export {
@@ -572,13 +572,15 @@ export const appState = $state({
   /** @type {any | null} */
   payablesAgingReport: null,
 
-  // Accounts Receivable cache (Issue #222, #228)
+  // Accounts Receivable cache (Issue #222, #228, #229)
   /** @type {any[]} */
   accountsReceivable: [],
   /** @type {any | null} */
   currentAccountReceivableDetail: null,
   /** @type {any | null} */
   receivablesAgingReport: null,
+  /** @type {any | null} */
+  customerStatement: null,
 
   // Customer Receipts cache (Issue #227)
   /** @type {any[]} */

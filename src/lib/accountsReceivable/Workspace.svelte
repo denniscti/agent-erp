@@ -8,7 +8,8 @@
     formatTime,
     fetchPartners,
     loadReceivablesAgingAction,
-    loadAccountsReceivableAction
+    loadAccountsReceivableAction,
+    loadCustomerStatementAction
   } from '../store.svelte.js';
   import OpeningReceivablesWorkspace from '../openingReceivables/Workspace.svelte';
   import CustomerReceiptsWorkspace from '../customerReceipts/Workspace.svelte';
@@ -109,12 +110,84 @@
     }
   }
 
+  // ==========================================
+  // Customer Statement States (Issue #229)
+  // ==========================================
+  let stmtCustomerId = $state('');
+
+  function getFirstDayOfMonth() {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    return `${year}-${month}-01`;
+  }
+
+  let stmtStartDate = $state(getFirstDayOfMonth());
+  let stmtEndDate = $state(getTodayDateString());
+  let customerStatement = $state(null);
+  let isStatementLoading = $state(false);
+
+  function setStatementCurrentMonth() {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    stmtStartDate = `${year}-${month}-01`;
+    stmtEndDate = getTodayDateString();
+    if (stmtCustomerId) {
+      refreshStatement();
+    }
+  }
+
+  function setStatementLastMonth() {
+    const now = new Date();
+    const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+    const prevMonthNum = now.getMonth() === 0 ? 12 : now.getMonth();
+    const month = String(prevMonthNum).padStart(2, '0');
+    const lastDay = new Date(year, prevMonthNum, 0).getDate();
+    stmtStartDate = `${year}-${month}-01`;
+    stmtEndDate = `${year}-${month}-${String(lastDay).padStart(2, '0')}`;
+    if (stmtCustomerId) {
+      refreshStatement();
+    }
+  }
+
+  async function refreshStatement() {
+    if (!stmtCustomerId) return;
+    isStatementLoading = true;
+    try {
+      customerStatement = await loadCustomerStatementAction(stmtCustomerId, stmtStartDate, stmtEndDate);
+    } catch (err) {
+      console.error('Failed to load customer statement:', err);
+      showToast('載入對帳明細失敗：' + (err.message || String(err)), 'error');
+    } finally {
+      isStatementLoading = false;
+    }
+  }
+
+  function openStatementForCustomer(customerId) {
+    stmtCustomerId = customerId;
+    activeSubTab = 'statement';
+    refreshStatement();
+  }
+
+  function getReceiptMethodLabel(method) {
+    switch (method) {
+      case 'bank_transfer': return '銀行匯款';
+      case 'check': return '支票';
+      case 'cash': return '現金';
+      case 'credit_card': return '信用卡';
+      default: return method || '-';
+    }
+  }
+
   onMount(async () => {
     await loadCustomers();
     if (activeSubTab === 'aging') {
       await refreshAging();
     } else if (activeSubTab === 'accounts-receivable') {
       await refreshAccountsReceivable();
+    } else if (activeSubTab === 'statement' && stmtCustomerId) {
+      await refreshStatement();
     }
   });
 
@@ -195,6 +268,21 @@
           <line x1="3" y1="18" x2="3.01" y2="18"></line>
         </svg>
         應收帳款明細
+      </button>
+
+      <button
+        class="subtab-btn {activeSubTab === 'statement' ? 'active' : ''}"
+        onclick={() => { activeSubTab = 'statement'; if (stmtCustomerId) refreshStatement(); }}
+        id="tab-ar-statement"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        對帳明細
       </button>
 
       <button
@@ -379,6 +467,14 @@
                     </button>
                     <button
                       class="btn-action text-info"
+                      onclick={() => openStatementForCustomer(c.customer_partner_id)}
+                      id="btn-action-statement"
+                      title="查看對帳明細 (Customer Statement)"
+                    >
+                      對帳 ↗
+                    </button>
+                    <button
+                      class="btn-action text-info"
                       onclick={() => goToCustomerCredit(c.customer_partner_id)}
                       id="btn-action-credit"
                       title="前往客戶信用設定 (正式收款條件與開票模式)"
@@ -429,6 +525,13 @@
               <span class="badge badge-info">客戶代碼：{selectedAgingCustomer.customer_partner_id}</span>
             </div>
             <div class="drilldown-actions">
+              <button
+                class="btn btn-secondary btn-sm"
+                onclick={() => openStatementForCustomer(selectedAgingCustomer.customer_partner_id)}
+                id="btn-drilldown-statement"
+              >
+                對帳明細 ↗
+              </button>
               <button
                 class="btn btn-secondary btn-sm"
                 onclick={() => goToCustomerCredit(selectedAgingCustomer.customer_partner_id)}
@@ -669,6 +772,303 @@
     <div class="embedded-subtab">
       <CustomerCreditWorkspace />
     </div>
+
+  <!-- ======================================================== -->
+  <!-- SUBTAB 6: Customer Statement View (Issue #229)            -->
+  <!-- ======================================================== -->
+  {:else if activeSubTab === 'statement'}
+    <!-- Toolbar & Filters -->
+    <div class="toolbar">
+      <div class="filters">
+        <div class="filter-group">
+          <label for="stmt-customer-select">客戶：</label>
+          <select id="stmt-customer-select" bind:value={stmtCustomerId} onchange={refreshStatement}>
+            <option value="">請選擇客戶</option>
+            {#each availableCustomers as c}
+              <option value={c.id}>{c.name}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="filter-group">
+          <label for="stmt-start-date">起日：</label>
+          <input type="date" id="stmt-start-date" bind:value={stmtStartDate} onchange={refreshStatement} />
+        </div>
+        <div class="filter-group">
+          <label for="stmt-end-date">迄日：</label>
+          <input type="date" id="stmt-end-date" bind:value={stmtEndDate} onchange={refreshStatement} />
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick={setStatementCurrentMonth} id="btn-stmt-current-month">本月</button>
+        <button class="btn btn-secondary btn-sm" onclick={setStatementLastMonth} id="btn-stmt-last-month">上月</button>
+        <button class="btn btn-primary btn-sm" onclick={refreshStatement} disabled={isStatementLoading || !stmtCustomerId} id="btn-stmt-refresh">
+          {isStatementLoading ? '查詢中...' : '查詢'}
+        </button>
+      </div>
+    </div>
+
+    <!-- Warning notice on retroactive void impact -->
+    <div class="statement-notice-banner" id="statement-void-notice">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <span>
+        <strong>作廢的回溯影響：</strong>
+        作廢的單據會從所有期間消失，因此作廢操作會改變過去期間的對帳結果。
+      </span>
+    </div>
+
+    {#if !stmtCustomerId}
+      <div class="empty-state" style="padding: 3rem 1rem; text-align: center;">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="1.5">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+        </svg>
+        <p style="margin-top: 1rem; color: #64748b; font-size: 0.95rem;">請由上方選擇欲對帳的客戶與期間以查詢明細</p>
+      </div>
+    {:else if isStatementLoading}
+      <div class="loading-state" style="padding: 3rem; text-align: center; color: #64748b;">
+        載入對帳明細中...
+      </div>
+    {:else if customerStatement}
+      <!-- Section 1: 期初未收 (Opening Balance) -->
+      <div class="statement-section-card opening-card" id="section-opening-balance">
+        <div class="card-inner">
+          <div class="card-header-line">
+            <span class="card-badge">第 1 段</span>
+            <span class="card-title">期初未收 (截至 {customerStatement.start_date} 之前)</span>
+          </div>
+          <div class="amount-line">
+            <span class="amount-val font-mono">{formatCurrency(customerStatement.opening_balance)}</span>
+            <span class="amount-formula font-mono text-muted">Σ(單據日 &lt; 起日應收) − Σ(收款日 &lt; 起日已過帳收款核銷) − Σ(折讓日 &lt; 起日已過帳折讓)</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 2: 本期新增應收清單 (Current Receivables) -->
+      <div class="statement-table-section" id="section-current-receivables">
+        <div class="section-heading">
+          <div class="heading-left">
+            <span class="card-badge">第 2 段</span>
+            <h3>本期新增應收清單</h3>
+            <span class="count-tag font-mono">{customerStatement.receivables.length} 筆</span>
+          </div>
+          <div class="heading-right font-mono">
+            本期應收小計：<span class="font-bold text-danger">{formatCurrency(customerStatement.current_receivables_total)}</span>
+          </div>
+        </div>
+
+        {#if customerStatement.receivables.length === 0}
+          <div class="table-empty-notice">此期間無新增應收帳款</div>
+        {:else}
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>單據日</th>
+                  <th>來源類型</th>
+                  <th>來源單號</th>
+                  <th>外部單號 / 發票號</th>
+                  <th>到期日</th>
+                  <th class="text-right">金額</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each customerStatement.receivables as ar}
+                  <tr>
+                    <td class="font-mono">{ar.document_date}</td>
+                    <td>
+                      {#if ar.source_type === 'customer_invoice'}
+                        <span class="badge badge-primary">銷項發票</span>
+                      {:else if ar.source_type === 'opening_balance'}
+                        <span class="badge badge-info">期初應收</span>
+                      {:else}
+                        <span class="badge badge-secondary">{ar.source_type}</span>
+                      {/if}
+                    </td>
+                    <td class="font-mono font-medium">{ar.source_number}</td>
+                    <td class="font-mono text-muted">{ar.external_reference || '-'}</td>
+                    <td class="font-mono">{ar.due_date}</td>
+                    <td class="text-right font-mono font-semibold text-danger">
+                      {formatCurrency(ar.amount)}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+              <tfoot>
+                <tr class="table-total-row">
+                  <td colspan="5" class="text-right font-bold">本期應收合計</td>
+                  <td class="text-right font-mono font-bold text-danger">
+                    {formatCurrency(customerStatement.current_receivables_total)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Section 3: 本期收款清單 (Current Receipts) -->
+      <div class="statement-table-section" id="section-current-receipts">
+        <div class="section-heading">
+          <div class="heading-left">
+            <span class="card-badge">第 3 段</span>
+            <h3>本期收款清單 (已過帳)</h3>
+            <span class="count-tag font-mono">{customerStatement.receipts.length} 筆</span>
+          </div>
+          <div class="heading-right font-mono">
+            本期收款小計：<span class="font-bold text-success">{formatCurrency(customerStatement.current_receipts_total)}</span>
+          </div>
+        </div>
+
+        {#if customerStatement.receipts.length === 0}
+          <div class="table-empty-notice">此期間無收款記錄</div>
+        {:else}
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>收款日</th>
+                  <th>收款單號</th>
+                  <th>收款方式</th>
+                  <th>參考號</th>
+                  <th>核銷對象 (單號 / 金額)</th>
+                  <th class="text-right">收款金額</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each customerStatement.receipts as rcpt}
+                  <tr>
+                    <td class="font-mono">{rcpt.receipt_date}</td>
+                    <td class="font-mono font-semibold">{rcpt.receipt_number}</td>
+                    <td>{getReceiptMethodLabel(rcpt.receipt_method)}</td>
+                    <td class="font-mono text-muted">{rcpt.receipt_reference || '-'}</td>
+                    <td>
+                      <div class="allocations-pill-list">
+                        {#each rcpt.allocations as alloc}
+                          <span class="alloc-pill font-mono">
+                            <span class="alloc-source">{alloc.source_number}</span>
+                            <span class="alloc-amt">({formatCurrency(alloc.amount)})</span>
+                          </span>
+                        {/each}
+                      </div>
+                    </td>
+                    <td class="text-right font-mono font-semibold text-success">
+                      {formatCurrency(rcpt.amount)}
+                    </td>
+                  </tr>
+                {/each}
+              </tbody>
+              <tfoot>
+                <tr class="table-total-row">
+                  <td colspan="5" class="text-right font-bold">本期收款合計</td>
+                  <td class="text-right font-mono font-bold text-success">
+                    {formatCurrency(customerStatement.current_receipts_total)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Section 4: 本期折讓清單 (Current Allowances) -->
+      <div class="statement-table-section" id="section-current-allowances">
+        <div class="section-heading">
+          <div class="heading-left">
+            <span class="card-badge">第 4 段</span>
+            <h3>本期折讓清單 (已過帳，依折讓日)</h3>
+            <span class="count-tag font-mono">{customerStatement.allowances.length} 筆</span>
+          </div>
+          <div class="heading-right font-mono">
+            本期折讓小計：<span class="font-bold text-warning">{formatCurrency(customerStatement.current_allowances_total)}</span>
+          </div>
+        </div>
+
+        {#if customerStatement.allowances.length === 0}
+          <div class="table-empty-notice">此期間無折讓記錄</div>
+        {:else}
+          <div class="table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>折讓日</th>
+                  <th>折讓單號</th>
+                  <th>對應發票</th>
+                  <th>原因類型</th>
+                  <th class="text-right">未稅金額</th>
+                  <th class="text-right">稅額</th>
+                  <th class="text-right">折讓總額</th>
+                  <th>備註 / 參考號</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each customerStatement.allowances as alw}
+                  <tr>
+                    <td class="font-mono">{alw.allowance_date}</td>
+                    <td class="font-mono font-semibold">{alw.allowance_number}</td>
+                    <td class="font-mono text-muted">{alw.invoice_number_snapshot || '-'}</td>
+                    <td>
+                      <span class="badge badge-warning">
+                        {alw.reason_type === 'shipment_shortfall' ? '出貨短少折讓' : alw.reason_type}
+                      </span>
+                    </td>
+                    <td class="text-right font-mono text-muted">{formatCurrency(alw.untaxed_amount)}</td>
+                    <td class="text-right font-mono text-muted">{formatCurrency(alw.tax_amount)}</td>
+                    <td class="text-right font-mono font-semibold text-warning">
+                      {formatCurrency(alw.total_amount)}
+                    </td>
+                    <td class="text-muted text-sm">{alw.note || alw.external_reference || '-'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+              <tfoot>
+                <tr class="table-total-row">
+                  <td colspan="6" class="text-right font-bold">本期折讓合計</td>
+                  <td class="text-right font-mono font-bold text-warning">
+                    {formatCurrency(customerStatement.current_allowances_total)}
+                  </td>
+                  <td></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        {/if}
+      </div>
+
+      <!-- Section 5: 期末未收 (Closing Balance) & 恆等式勾稽 -->
+      <div class="statement-section-card closing-card" id="section-closing-balance">
+        <div class="card-inner">
+          <div class="card-header-line">
+            <span class="card-badge">第 5 段</span>
+            <span class="card-title">期末未收 (截至 {customerStatement.end_date})</span>
+          </div>
+          <div class="amount-line">
+            <span class="amount-val font-mono font-bold text-danger">{formatCurrency(customerStatement.closing_balance)}</span>
+          </div>
+          <div class="reconciliation-formula-box">
+            <div class="formula-label">勾稽平衡驗證 (恆等式)：</div>
+            <div class="formula-content font-mono">
+              <span class="term">期初 {formatCurrency(customerStatement.opening_balance)}</span>
+              <span class="op">+</span>
+              <span class="term text-danger">本期應收 {formatCurrency(customerStatement.current_receivables_total)}</span>
+              <span class="op">−</span>
+              <span class="term text-success">本期收款 {formatCurrency(customerStatement.current_receipts_total)}</span>
+              <span class="op">−</span>
+              <span class="term text-warning">本期折讓 {formatCurrency(customerStatement.current_allowances_total)}</span>
+              <span class="op">=</span>
+              <span class="term font-bold text-danger">期末未收 {formatCurrency(customerStatement.closing_balance)}</span>
+              <span class="check-icon" title="計算已平衡">✓ 平衡</span>
+            </div>
+            <div class="formula-hint text-muted">
+              註：當迄日為今天時，期末未收將與工作區顯示之該客戶未收合計一致。
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -1038,6 +1438,188 @@
     margin: 0 0 0.75rem 0;
     font-size: 0.95rem;
     font-weight: 600;
+  }
+
+  /* Statement Styles (Issue #229) */
+  .statement-notice-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: #fffbeb;
+    border: 1px solid #fef3c7;
+    border-radius: 8px;
+    color: #92400e;
+    font-size: 0.875rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .statement-section-card {
+    background: #ffffff;
+    border: 1px solid var(--color-border, #e2e8f0);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  }
+
+  .statement-section-card.opening-card {
+    border-left: 4px solid #64748b;
+  }
+
+  .statement-section-card.closing-card {
+    border-left: 4px solid #ef4444;
+    background: #fffafa;
+  }
+
+  .card-header-line {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .card-badge {
+    display: inline-block;
+    padding: 0.125rem 0.375rem;
+    background: #e2e8f0;
+    color: #475569;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  .card-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #334155;
+  }
+
+  .amount-line {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .amount-val {
+    font-size: 1.5rem;
+    font-weight: 700;
+  }
+
+  .amount-formula {
+    font-size: 0.8125rem;
+  }
+
+  .statement-table-section {
+    margin-bottom: 1.5rem;
+  }
+
+  .section-heading {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+
+  .heading-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .heading-left h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .count-tag {
+    font-size: 0.75rem;
+    background: #f1f5f9;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    color: #64748b;
+  }
+
+  .table-empty-notice {
+    padding: 1.5rem;
+    text-align: center;
+    color: #94a3b8;
+    background: #f8fafc;
+    border: 1px dashed #cbd5e1;
+    border-radius: 8px;
+    font-size: 0.875rem;
+  }
+
+  .reconciliation-formula-box {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px dashed #fca5a5;
+  }
+
+  .formula-label {
+    font-size: 0.8125rem;
+    color: #64748b;
+    margin-bottom: 0.375rem;
+    font-weight: 500;
+  }
+
+  .formula-content {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    font-size: 0.9375rem;
+  }
+
+  .formula-content .op {
+    color: #94a3b8;
+    font-weight: 700;
+  }
+
+  .check-icon {
+    display: inline-flex;
+    align-items: center;
+    background: #dcfce7;
+    color: #16a34a;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    margin-left: 0.5rem;
+  }
+
+  .formula-hint {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .allocations-pill-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+  }
+
+  .alloc-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    background: #f1f5f9;
+    border: 1px solid #e2e8f0;
+    border-radius: 4px;
+    padding: 0.125rem 0.375rem;
+    font-size: 0.75rem;
+  }
+
+  .alloc-amt {
+    color: #15803d;
+    font-weight: 600;
+  }
+
+  .table-total-row td {
+    background: #f8fafc;
+    border-top: 2px solid #cbd5e1;
   }
 </style>
 

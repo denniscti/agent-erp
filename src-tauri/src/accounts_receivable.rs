@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::accounts_payable::{calendar_day_diff, AgingBucket};
+use crate::accounts_payable::{calendar_day_diff, is_valid_ymd_string, AgingBucket};
 
 static AR_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -255,6 +255,77 @@ pub struct ListAccountsReceivableFilter {
     pub status: Option<String>,
     pub due_date_from: Option<String>,
     pub due_date_to: Option<String>,
+}
+
+// ==========================================
+// Statement Models (Issue #229)
+// ==========================================
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct StatementReceivableItem {
+    pub account_receivable_id: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub source_number: String,
+    pub external_reference: Option<String>,
+    pub document_date: String,
+    pub due_date: String,
+    pub amount: f64,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct StatementReceiptAllocation {
+    pub account_receivable_id: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub source_number: String,
+    pub amount: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct StatementReceiptItem {
+    pub receipt_id: String,
+    pub receipt_number: String,
+    pub receipt_date: String,
+    pub receipt_method: String,
+    pub receipt_reference: Option<String>,
+    pub amount: f64,
+    pub note: Option<String>,
+    pub allocations: Vec<StatementReceiptAllocation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct StatementAllowanceItem {
+    pub allowance_id: String,
+    pub allowance_number: String,
+    pub allowance_date: String,
+    pub customer_invoice_id: String,
+    pub invoice_number_snapshot: String,
+    pub account_receivable_id: String,
+    pub reason_type: String,
+    pub untaxed_amount: f64,
+    pub tax_amount: f64,
+    pub total_amount: f64,
+    pub external_reference: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+pub struct CustomerStatement {
+    pub tenant_id: String,
+    pub customer_partner_id: String,
+    pub customer_name: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub opening_balance: f64,
+    pub current_receivables_total: f64,
+    pub current_receipts_total: f64,
+    pub current_allowances_total: f64,
+    pub closing_balance: f64,
+    pub receivables: Vec<StatementReceivableItem>,
+    pub receipts: Vec<StatementReceiptItem>,
+    pub allowances: Vec<StatementAllowanceItem>,
 }
 
 // ==========================================
@@ -1230,6 +1301,301 @@ pub async fn get_receivables_aging<R: tauri::Runtime>(
 }
 
 // ==========================================
+// Customer Statement Implementation (Issue #229)
+// ==========================================
+
+pub fn get_customer_statement_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    customer_partner_id: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<CustomerStatement, AccountsReceivableError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(AccountsReceivableError::EmptyTenantId);
+    }
+
+    let cid = customer_partner_id.trim();
+    if cid.is_empty() {
+        return Err(AccountsReceivableError::CustomerNotFound);
+    }
+
+    let customer_name = resolve_customer_snapshot(conn, tid, cid)?;
+
+    let s_date = start_date.trim();
+    let e_date = end_date.trim();
+    if !is_valid_ymd_string(s_date) || !is_valid_ymd_string(e_date) {
+        return Err(AccountsReceivableError::InvalidDateFormat);
+    }
+    if s_date > e_date {
+        return Err(AccountsReceivableError::InvalidDateRange);
+    }
+
+    // 1. Calculate opening balance:
+    // Σ(document_date < start_date of non-voided AR)
+    // − Σ(receipt_date < start_date of posted receipt allocations to non-voided AR)
+    // − Σ(allowance_date < start_date of posted allowances to non-voided AR)
+    let opening_ar: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0.0)
+         FROM accounts_receivable
+         WHERE tenant_id = ?1
+           AND customer_partner_id = ?2
+           AND status != 'voided'
+           AND document_date < ?3",
+        params![tid, cid, s_date],
+        |row| row.get(0),
+    )?;
+
+    let opening_receipts: f64 = if table_exists(conn, "customer_receipt_allocations")
+        && table_exists(conn, "customer_receipts")
+    {
+        conn.query_row(
+            "SELECT COALESCE(SUM(ra.amount), 0.0)
+             FROM customer_receipt_allocations ra
+             JOIN customer_receipts r ON r.id = ra.receipt_id AND r.tenant_id = ra.tenant_id
+             JOIN accounts_receivable ar ON ar.id = ra.account_receivable_id AND ar.tenant_id = ra.tenant_id
+             WHERE ra.tenant_id = ?1
+               AND r.customer_partner_id = ?2
+               AND r.status = 'posted'
+               AND ar.status != 'voided'
+               AND r.receipt_date < ?3",
+            params![tid, cid, s_date],
+            |row| row.get(0),
+        )?
+    } else {
+        0.0
+    };
+
+    let opening_allowances: f64 = if table_exists(conn, "sales_allowances") {
+        conn.query_row(
+            "SELECT COALESCE(SUM(sa.untaxed_amount + sa.tax_amount), 0.0)
+             FROM sales_allowances sa
+             JOIN accounts_receivable ar ON ar.id = sa.account_receivable_id AND ar.tenant_id = sa.tenant_id
+             WHERE sa.tenant_id = ?1
+               AND sa.customer_partner_id = ?2
+               AND sa.status = 'posted'
+               AND ar.status != 'voided'
+               AND sa.allowance_date < ?3",
+            params![tid, cid, s_date],
+            |row| row.get(0),
+        )?
+    } else {
+        0.0
+    };
+
+    let opening_balance = round_2(opening_ar - opening_receipts - opening_allowances);
+
+    // 2. Query current period receivables [start_date, end_date]
+    let mut ar_stmt = conn.prepare(
+        "SELECT id, source_type, source_id, source_number, external_reference, document_date, due_date, amount, status
+         FROM accounts_receivable
+         WHERE tenant_id = ?1
+           AND customer_partner_id = ?2
+           AND status != 'voided'
+           AND document_date >= ?3
+           AND document_date <= ?4
+         ORDER BY document_date ASC, created_at ASC, id ASC",
+    )?;
+
+    let ar_rows = ar_stmt.query_map(params![tid, cid, s_date, e_date], |row| {
+        Ok(StatementReceivableItem {
+            account_receivable_id: row.get(0)?,
+            source_type: row.get(1)?,
+            source_id: row.get(2)?,
+            source_number: row.get(3)?,
+            external_reference: row.get(4)?,
+            document_date: row.get(5)?,
+            due_date: row.get(6)?,
+            amount: round_2(row.get(7)?),
+            status: row.get(8)?,
+        })
+    })?;
+
+    let mut receivables = Vec::new();
+    let mut current_receivables_total = 0.0;
+    for r in ar_rows {
+        let item = r?;
+        current_receivables_total += item.amount;
+        receivables.push(item);
+    }
+    current_receivables_total = round_2(current_receivables_total);
+
+    // 3. Query current period posted receipts [start_date, end_date]
+    let mut receipts = Vec::new();
+    let mut current_receipts_total = 0.0;
+
+    if table_exists(conn, "customer_receipt_allocations") && table_exists(conn, "customer_receipts")
+    {
+        let mut rcpt_stmt = conn.prepare(
+            "SELECT id, receipt_number, receipt_date, receipt_method, receipt_reference, note
+             FROM customer_receipts
+             WHERE tenant_id = ?1
+               AND customer_partner_id = ?2
+               AND status = 'posted'
+               AND receipt_date >= ?3
+               AND receipt_date <= ?4
+             ORDER BY receipt_date ASC, created_at ASC, id ASC",
+        )?;
+
+        struct RawReceiptHeader {
+            id: String,
+            receipt_number: String,
+            receipt_date: String,
+            receipt_method: String,
+            receipt_reference: Option<String>,
+            note: Option<String>,
+        }
+
+        let receipt_headers = rcpt_stmt.query_map(params![tid, cid, s_date, e_date], |row| {
+            Ok(RawReceiptHeader {
+                id: row.get(0)?,
+                receipt_number: row.get(1)?,
+                receipt_date: row.get(2)?,
+                receipt_method: row.get(3)?,
+                receipt_reference: row.get(4)?,
+                note: row.get(5)?,
+            })
+        })?;
+
+        let mut alloc_stmt = conn.prepare(
+            "SELECT ra.account_receivable_id, ar.source_type, ar.source_id, ar.source_number, ra.amount
+             FROM customer_receipt_allocations ra
+             JOIN accounts_receivable ar ON ar.id = ra.account_receivable_id AND ar.tenant_id = ra.tenant_id
+             WHERE ra.tenant_id = ?1
+               AND ra.receipt_id = ?2
+               AND ar.status != 'voided'
+             ORDER BY ra.created_at ASC, ra.id ASC",
+        )?;
+
+        for rh_res in receipt_headers {
+            let rh = rh_res?;
+            let alloc_rows = alloc_stmt.query_map(params![tid, &rh.id], |arow| {
+                Ok(StatementReceiptAllocation {
+                    account_receivable_id: arow.get(0)?,
+                    source_type: arow.get(1)?,
+                    source_id: arow.get(2)?,
+                    source_number: arow.get(3)?,
+                    amount: round_2(arow.get(4)?),
+                })
+            })?;
+
+            let mut allocations = Vec::new();
+            let mut receipt_amount = 0.0;
+            for a in alloc_rows {
+                let item = a?;
+                receipt_amount += item.amount;
+                allocations.push(item);
+            }
+            receipt_amount = round_2(receipt_amount);
+            current_receipts_total += receipt_amount;
+
+            receipts.push(StatementReceiptItem {
+                receipt_id: rh.id,
+                receipt_number: rh.receipt_number,
+                receipt_date: rh.receipt_date,
+                receipt_method: rh.receipt_method,
+                receipt_reference: rh.receipt_reference,
+                amount: receipt_amount,
+                note: rh.note,
+                allocations,
+            });
+        }
+    }
+    current_receipts_total = round_2(current_receipts_total);
+
+    // 4. Query current period posted allowances [start_date, end_date]
+    let mut allowances = Vec::new();
+    let mut current_allowances_total = 0.0;
+
+    if table_exists(conn, "sales_allowances") {
+        let mut alw_stmt = conn.prepare(
+            "SELECT sa.id, sa.allowance_number, sa.allowance_date, sa.customer_invoice_id, sa.invoice_number_snapshot, sa.account_receivable_id, sa.reason_type, sa.untaxed_amount, sa.tax_amount, sa.external_reference, sa.note
+             FROM sales_allowances sa
+             JOIN accounts_receivable ar ON ar.id = sa.account_receivable_id AND ar.tenant_id = sa.tenant_id
+             WHERE sa.tenant_id = ?1
+               AND sa.customer_partner_id = ?2
+               AND sa.status = 'posted'
+               AND ar.status != 'voided'
+               AND sa.allowance_date >= ?3
+               AND sa.allowance_date <= ?4
+             ORDER BY sa.allowance_date ASC, sa.created_at ASC, sa.id ASC",
+        )?;
+
+        let alw_rows = alw_stmt.query_map(params![tid, cid, s_date, e_date], |row| {
+            let untaxed: f64 = row.get(7)?;
+            let tax: f64 = row.get(8)?;
+            Ok(StatementAllowanceItem {
+                allowance_id: row.get(0)?,
+                allowance_number: row.get(1)?,
+                allowance_date: row.get(2)?,
+                customer_invoice_id: row.get(3)?,
+                invoice_number_snapshot: row.get(4)?,
+                account_receivable_id: row.get(5)?,
+                reason_type: row.get(6)?,
+                untaxed_amount: round_2(untaxed),
+                tax_amount: round_2(tax),
+                total_amount: round_2(untaxed + tax),
+                external_reference: row.get(9)?,
+                note: row.get(10)?,
+            })
+        })?;
+
+        for a in alw_rows {
+            let item = a?;
+            current_allowances_total += item.total_amount;
+            allowances.push(item);
+        }
+    }
+    current_allowances_total = round_2(current_allowances_total);
+
+    // 5. Closing balance:
+    // Opening + Current Receivables − Current Receipts − Current Allowances = Closing
+    let closing_balance = round_2(
+        opening_balance + current_receivables_total
+            - current_receipts_total
+            - current_allowances_total,
+    );
+
+    Ok(CustomerStatement {
+        tenant_id: tid.to_string(),
+        customer_partner_id: cid.to_string(),
+        customer_name,
+        start_date: s_date.to_string(),
+        end_date: e_date.to_string(),
+        opening_balance,
+        current_receivables_total,
+        current_receipts_total,
+        current_allowances_total,
+        closing_balance,
+        receivables,
+        receipts,
+        allowances,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_customer_statement<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    customer_partner_id: String,
+    start_date: String,
+    end_date: String,
+) -> Result<CustomerStatement, String> {
+    let db_path = crate::get_db_path(&app_handle);
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    get_customer_statement_impl(
+        &conn,
+        &active_tid,
+        &customer_partner_id,
+        &start_date,
+        &end_date,
+    )
+    .map_err(|e| e.to_string())
+}
+
+// ==========================================
 // Tests
 // ==========================================
 
@@ -2189,5 +2555,292 @@ mod tests {
         // When: as_of_date is None, defaults to current local date without panic
         let rep_default = get_receivables_aging_impl(&conn_mut, "tnt_test", None).unwrap();
         assert!(!rep_default.as_of_date.is_empty());
+    }
+
+    #[test]
+    fn test_customer_statement_perspective_cases() {
+        let mut conn = setup_test_db();
+        let now = current_timestamp();
+
+        // 1. Error cases
+        // E01: Empty tenant
+        let err_t = get_customer_statement_impl(&conn, "", "cus_001", "2026-03-01", "2026-03-31")
+            .unwrap_err();
+        assert_eq!(err_t, AccountsReceivableError::EmptyTenantId);
+
+        // E02: Empty customer
+        let err_c = get_customer_statement_impl(&conn, "tnt_test", "", "2026-03-01", "2026-03-31")
+            .unwrap_err();
+        assert_eq!(err_c, AccountsReceivableError::CustomerNotFound);
+
+        // E03: Non-existent customer
+        let err_ghost =
+            get_customer_statement_impl(&conn, "tnt_test", "cus_ghost", "2026-03-01", "2026-03-31")
+                .unwrap_err();
+        assert_eq!(err_ghost, AccountsReceivableError::CustomerNotFound);
+
+        // E04: Partner is vendor, not customer
+        conn.execute(
+            "INSERT INTO partners (id, tenant_id, name, is_customer, is_vendor, created_at)
+             VALUES ('vnd_999', 'tnt_test', '測試供應商', 0, 1, ?1)",
+            params![now],
+        )
+        .unwrap();
+        let err_not_cus =
+            get_customer_statement_impl(&conn, "tnt_test", "vnd_999", "2026-03-01", "2026-03-31")
+                .unwrap_err();
+        assert_eq!(err_not_cus, AccountsReceivableError::PartnerNotCustomer);
+
+        // E05: Invalid date format
+        let err_fmt =
+            get_customer_statement_impl(&conn, "tnt_test", "cus_001", "2026/03/01", "2026-03-31")
+                .unwrap_err();
+        assert_eq!(err_fmt, AccountsReceivableError::InvalidDateFormat);
+
+        // E06: Invalid date range (start > end)
+        let err_rng =
+            get_customer_statement_impl(&conn, "tnt_test", "cus_001", "2026-03-31", "2026-03-01")
+                .unwrap_err();
+        assert_eq!(err_rng, AccountsReceivableError::InvalidDateRange);
+
+        // 2. Set up auxiliary tables: customer_receipts, customer_receipt_allocations, sales_allowances
+        conn.execute(
+            "CREATE TABLE customer_receipts (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                receipt_number TEXT NOT NULL,
+                customer_partner_id TEXT NOT NULL,
+                receipt_date TEXT NOT NULL,
+                receipt_method TEXT NOT NULL,
+                receipt_reference TEXT,
+                note TEXT,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE customer_receipt_allocations (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                receipt_id TEXT NOT NULL,
+                account_receivable_id TEXT NOT NULL,
+                amount REAL NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE sales_allowances (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                allowance_number TEXT NOT NULL,
+                customer_invoice_id TEXT NOT NULL,
+                invoice_number_snapshot TEXT NOT NULL,
+                account_receivable_id TEXT NOT NULL,
+                customer_partner_id TEXT NOT NULL,
+                reason_type TEXT NOT NULL,
+                allowance_date TEXT NOT NULL,
+                untaxed_amount REAL NOT NULL,
+                tax_amount REAL NOT NULL,
+                external_reference TEXT,
+                status TEXT NOT NULL,
+                note TEXT,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        // 3. Populate test scenario data
+        // Prior AR in Feb: 1000.0, paid 200.0, allowance 100.0 -> Opening balance for March = 700.0
+        let ar_prior = create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_prior".to_string(),
+                source_number: "INV-PRIOR".to_string(),
+                external_reference: None,
+                document_date: "2026-02-10".to_string(),
+                due_date: "2026-03-10".to_string(),
+                amount: 1000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // Prior receipt (2026-02-20): 200.0
+        conn.execute(
+            "INSERT INTO customer_receipts (id, tenant_id, receipt_number, customer_partner_id, receipt_date, receipt_method, status, created_at)
+             VALUES ('rcpt_p1', 'tnt_test', 'CR-001', 'cus_001', '2026-02-20', 'bank_transfer', 'posted', ?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO customer_receipt_allocations (id, tenant_id, receipt_id, account_receivable_id, amount, created_at)
+             VALUES ('cra_p1', 'tnt_test', 'rcpt_p1', ?1, 200.0, ?2)",
+            params![ar_prior.id, now],
+        ).unwrap();
+
+        // Prior allowance (2026-02-25): untaxed 95.24 + tax 4.76 = 100.0
+        conn.execute(
+            "INSERT INTO sales_allowances (id, tenant_id, allowance_number, customer_invoice_id, invoice_number_snapshot, account_receivable_id, customer_partner_id, reason_type, allowance_date, untaxed_amount, tax_amount, status, created_at)
+             VALUES ('alw_p1', 'tnt_test', 'SALW-001', 'inv_prior', 'INV-PRIOR', ?1, 'cus_001', 'shipment_shortfall', '2026-02-25', 95.24, 4.76, 'posted', ?2)",
+            params![ar_prior.id, now],
+        ).unwrap();
+
+        // Current period ARs in March:
+        // AR1 (2026-03-05): 500.0
+        let ar_cur1 = create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_cur1".to_string(),
+                source_number: "INV-CUR1".to_string(),
+                external_reference: None,
+                document_date: "2026-03-05".to_string(),
+                due_date: "2026-04-05".to_string(),
+                amount: 500.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // AR2 (2026-03-20): 300.0
+        let ar_cur2 = create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_cur2".to_string(),
+                source_number: "INV-CUR2".to_string(),
+                external_reference: None,
+                document_date: "2026-03-20".to_string(),
+                due_date: "2026-04-20".to_string(),
+                amount: 300.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // Voided AR in March (should be excluded): 999.0
+        let ar_void = create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_void".to_string(),
+                source_number: "INV-VOID".to_string(),
+                external_reference: None,
+                document_date: "2026-03-15".to_string(),
+                due_date: "2026-04-15".to_string(),
+                amount: 999.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+        void_account_receivable(&mut conn, "tnt_test", "usr_admin", &ar_void.id, "作廢測試")
+            .unwrap();
+
+        // Current period receipt in March (2026-03-10): 250.0 allocating 150 to ar_prior and 100 to ar_cur1
+        conn.execute(
+            "INSERT INTO customer_receipts (id, tenant_id, receipt_number, customer_partner_id, receipt_date, receipt_method, status, created_at)
+             VALUES ('rcpt_c1', 'tnt_test', 'CR-002', 'cus_001', '2026-03-10', 'bank_transfer', 'posted', ?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO customer_receipt_allocations (id, tenant_id, receipt_id, account_receivable_id, amount, created_at)
+             VALUES ('cra_c1', 'tnt_test', 'rcpt_c1', ?1, 150.0, ?2)",
+            params![ar_prior.id, now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO customer_receipt_allocations (id, tenant_id, receipt_id, account_receivable_id, amount, created_at)
+             VALUES ('cra_c2', 'tnt_test', 'rcpt_c1', ?1, 100.0, ?2)",
+            params![ar_cur1.id, now],
+        ).unwrap();
+
+        // Draft receipt in March (should be excluded): 500.0
+        conn.execute(
+            "INSERT INTO customer_receipts (id, tenant_id, receipt_number, customer_partner_id, receipt_date, receipt_method, status, created_at)
+             VALUES ('rcpt_draft', 'tnt_test', 'CR-DRAFT', 'cus_001', '2026-03-12', 'bank_transfer', 'draft', ?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO customer_receipt_allocations (id, tenant_id, receipt_id, account_receivable_id, amount, created_at)
+             VALUES ('cra_draft', 'tnt_test', 'rcpt_draft', ?1, 500.0, ?2)",
+            params![ar_cur1.id, now],
+        ).unwrap();
+
+        // Current period allowance in March (2026-03-25): untaxed 47.62 + tax 2.38 = 50.0
+        conn.execute(
+            "INSERT INTO sales_allowances (id, tenant_id, allowance_number, customer_invoice_id, invoice_number_snapshot, account_receivable_id, customer_partner_id, reason_type, allowance_date, untaxed_amount, tax_amount, status, created_at)
+             VALUES ('alw_c1', 'tnt_test', 'SALW-002', 'inv_cur1', 'INV-CUR1', ?1, 'cus_001', 'shipment_shortfall', '2026-03-25', 47.62, 2.38, 'posted', ?2)",
+            params![ar_cur1.id, now],
+        ).unwrap();
+
+        // Cancelled allowance in March (should be excluded): 80.0
+        conn.execute(
+            "INSERT INTO sales_allowances (id, tenant_id, allowance_number, customer_invoice_id, invoice_number_snapshot, account_receivable_id, customer_partner_id, reason_type, allowance_date, untaxed_amount, tax_amount, status, created_at)
+             VALUES ('alw_cancel', 'tnt_test', 'SALW-CANCEL', 'inv_cur2', 'INV-CUR2', ?1, 'cus_001', 'shipment_shortfall', '2026-03-26', 76.19, 3.81, 'cancelled', ?2)",
+            params![ar_cur2.id, now],
+        ).unwrap();
+
+        // 4. Query March Statement
+        let stmt_mar =
+            get_customer_statement_impl(&conn, "tnt_test", "cus_001", "2026-03-01", "2026-03-31")
+                .unwrap();
+
+        // Verification:
+        // Opening = 1000.0 - 200.0 - 100.0 = 700.0
+        assert_eq!(stmt_mar.opening_balance, 700.0);
+
+        // Current Receivables: 500.0 + 300.0 = 800.0 (voided 999 excluded)
+        assert_eq!(stmt_mar.current_receivables_total, 800.0);
+        assert_eq!(stmt_mar.receivables.len(), 2);
+
+        // Current Receipts: 250.0 (draft 500 excluded)
+        assert_eq!(stmt_mar.current_receipts_total, 250.0);
+        assert_eq!(stmt_mar.receipts.len(), 1);
+        assert_eq!(stmt_mar.receipts[0].allocations.len(), 2);
+
+        // Current Allowances: 50.0 (cancelled 80 excluded)
+        assert_eq!(stmt_mar.current_allowances_total, 50.0);
+        assert_eq!(stmt_mar.allowances.len(), 1);
+
+        // Closing Balance: 700.0 + 800.0 - 250.0 - 50.0 = 1200.0
+        assert_eq!(stmt_mar.closing_balance, 1200.0);
+
+        // Identity verification: Opening + Receivables - Receipts - Allowances == Closing
+        assert_eq!(
+            round_2(
+                stmt_mar.opening_balance + stmt_mar.current_receivables_total
+                    - stmt_mar.current_receipts_total
+                    - stmt_mar.current_allowances_total
+            ),
+            stmt_mar.closing_balance
+        );
+
+        // 5. Query April Statement (Period Continuity: March Closing == April Opening)
+        let stmt_apr =
+            get_customer_statement_impl(&conn, "tnt_test", "cus_001", "2026-04-01", "2026-04-30")
+                .unwrap();
+        assert_eq!(stmt_apr.opening_balance, stmt_mar.closing_balance);
+        assert_eq!(stmt_apr.current_receivables_total, 0.0);
+        assert_eq!(stmt_apr.current_receipts_total, 0.0);
+        assert_eq!(stmt_apr.current_allowances_total, 0.0);
+        assert_eq!(stmt_apr.closing_balance, stmt_apr.opening_balance);
     }
 }

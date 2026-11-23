@@ -5,6 +5,7 @@ import {
   resolveMockActiveTenantId
 } from '../mockStorage.js';
 import { customerInvoiceMocks } from '../customerInvoices/mocks.js';
+import { mockPartners } from '../partners/mocks.js';
 
 export let mockAccountsReceivable = loadStorage('agent_erp_mock_accounts_receivable', []);
 if (!mockAccountsReceivable || !Array.isArray(mockAccountsReceivable)) {
@@ -170,6 +171,26 @@ export const accountReceivableMocks = {
       return items.filter(item => item.settlement_status === targetNorm);
     }
     return items;
+  },
+
+  void_account_receivable: async (args) => {
+    const { id, ar_id, account_receivable_id, void_reason, reason } = args || {};
+    const targetTenantId = resolveMockActiveTenantId();
+    const targetId = id || ar_id || account_receivable_id;
+    const ar = mockAccountsReceivable.find(a => a.id === targetId && (a.tenant_id || 'tnt_mock_1') === targetTenantId);
+    if (!ar) {
+      throw new Error('找不到指定的應收帳款或不屬於目前租戶');
+    }
+    const r = (void_reason || reason || '').trim();
+    if (!r) {
+      throw new Error('原因必填');
+    }
+    ar.status = 'voided';
+    ar.voided_at = Date.now();
+    ar.voided_by = 'usr_mock_admin';
+    ar.void_reason = r;
+    saveStorage('agent_erp_mock_accounts_receivable', mockAccountsReceivable);
+    return formatMockAccountReceivable(ar).detail;
   },
 
   get_receivables_aging: async (args) => {
@@ -411,15 +432,213 @@ export const accountReceivableMocks = {
     };
   },
 
+  get_customer_statement: async (args) => {
+    const { customer_partner_id, customerPartnerId, start_date, startDate, end_date, endDate } = args || {};
+    const targetTenantId = resolveMockActiveTenantId();
+    if (!targetTenantId || !String(targetTenantId).trim()) {
+      throw new Error('Tenant ID cannot be empty');
+    }
+
+    const cid = String(customer_partner_id || customerPartnerId || '').trim();
+    if (!cid) {
+      throw new Error('找不到指定的客戶或不屬於目前租戶');
+    }
+
+    const partner = (mockPartners || []).find(p => p.id === cid && (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+    if (!partner) {
+      throw new Error('找不到指定的客戶或不屬於目前租戶');
+    }
+    if (!partner.is_customer && !partner.isCustomer) {
+      throw new Error('指定的合作夥伴不是客戶 (is_customer != 1)');
+    }
+
+    const sDate = String(start_date || startDate || '').trim();
+    const eDate = String(end_date || endDate || '').trim();
+
+    function round2(v) {
+      return Math.round((v || 0) * 100) / 100;
+    }
+
+    function isValidYmd(s) {
+      if (!s || typeof s !== 'string' || s.length !== 10) return false;
+      const parts = s.split('-');
+      if (parts.length !== 3 || parts[0].length !== 4 || parts[1].length !== 2 || parts[2].length !== 2) return false;
+      const y = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      const d = parseInt(parts[2], 10);
+      if (isNaN(y) || isNaN(m) || isNaN(d) || m < 1 || m > 12 || d < 1 || d > 31) return false;
+      return true;
+    }
+
+    if (!isValidYmd(sDate) || !isValidYmd(eDate)) {
+      throw new Error('無效的日期格式，需為 YYYY-MM-DD');
+    }
+    if (sDate > eDate) {
+      throw new Error('起日不可晚於迄日');
+    }
+
+    // Refresh stores from storage to ensure latest state in test scenarios
+    mockAccountsReceivable = loadStorage('agent_erp_mock_accounts_receivable', mockAccountsReceivable);
+    mockCustomerReceipts = loadStorage('agent_erp_mock_customer_receipts', mockCustomerReceipts);
+    mockCustomerReceiptAllocations = loadStorage('agent_erp_mock_customer_receipt_allocations', mockCustomerReceiptAllocations);
+    const activeAllowances = loadStorage('agent_erp_mock_sales_allowances', []);
+
+    // Gather non-voided ARs for customer
+    const allArs = (mockAccountsReceivable || []).filter(
+      ar => (ar.tenant_id || 'tnt_mock_1') === targetTenantId && ar.customer_partner_id === cid && ar.status !== 'voided'
+    );
+    const arIdSet = new Set(allArs.map(a => a.id));
+
+    // Gather posted receipts
+    const allReceipts = (mockCustomerReceipts || []).filter(
+      r => (r.tenant_id || 'tnt_mock_1') === targetTenantId && r.customer_partner_id === cid && r.status === 'posted'
+    );
+
+    const allAllocations = (mockCustomerReceiptAllocations || []).filter(
+      ra => (ra.tenant_id || 'tnt_mock_1') === targetTenantId
+    );
+
+    // Gather posted allowances
+    const allAllowances = (activeAllowances || []).filter(
+      sa => (sa.tenant_id || 'tnt_mock_1') === targetTenantId && sa.customer_partner_id === cid && sa.status === 'posted' && arIdSet.has(sa.account_receivable_id)
+    );
+
+    // 1. Opening balance:
+    // Σ(AR document_date < sDate) - Σ(receipt_date < sDate of posted allocations) - Σ(allowance_date < sDate of posted allowances)
+    const openingArs = allArs.filter(ar => ar.document_date < sDate);
+    const openingArTotal = openingArs.reduce((sum, ar) => sum + Number(ar.amount || 0), 0);
+
+    const openingReceipts = allReceipts.filter(r => r.receipt_date < sDate);
+    const openingReceiptIds = new Set(openingReceipts.map(r => r.id));
+    const openingPaidTotal = allAllocations
+      .filter(ra => openingReceiptIds.has(ra.receipt_id) && arIdSet.has(ra.account_receivable_id))
+      .reduce((sum, ra) => sum + Number(ra.amount || 0), 0);
+
+    const openingAllowanceTotal = allAllowances
+      .filter(sa => sa.allowance_date < sDate)
+      .reduce((sum, sa) => sum + (Number(sa.untaxed_amount) || 0) + (Number(sa.tax_amount) || 0), 0);
+
+    const opening_balance = round2(openingArTotal - openingPaidTotal - openingAllowanceTotal);
+
+    // 2. Current period receivables [sDate, eDate]
+    const currentArs = allArs
+      .filter(ar => ar.document_date >= sDate && ar.document_date <= eDate)
+      .sort((a, b) => (a.document_date || '').localeCompare(b.document_date || '') || (a.created_at || 0) - (b.created_at || 0) || (a.id || '').localeCompare(b.id || ''));
+
+    const receivables = currentArs.map(ar => ({
+      account_receivable_id: ar.id,
+      source_type: ar.source_type,
+      source_id: ar.source_id,
+      source_number: ar.source_number,
+      external_reference: ar.external_reference || null,
+      document_date: ar.document_date,
+      due_date: ar.due_date,
+      amount: round2(ar.amount),
+      status: ar.status
+    }));
+
+    const current_receivables_total = round2(receivables.reduce((sum, r) => sum + r.amount, 0));
+
+    // 3. Current period posted receipts [sDate, eDate]
+    const currentReceipts = allReceipts
+      .filter(r => r.receipt_date >= sDate && r.receipt_date <= eDate)
+      .sort((a, b) => (a.receipt_date || '').localeCompare(b.receipt_date || '') || (a.created_at || 0) - (b.created_at || 0) || (a.id || '').localeCompare(b.id || ''));
+
+    const receipts = [];
+    let current_receipts_total = 0;
+    for (const r of currentReceipts) {
+      const allocs = allAllocations
+        .filter(ra => ra.receipt_id === r.id && arIdSet.has(ra.account_receivable_id))
+        .sort((a, b) => (a.created_at || 0) - (b.created_at || 0) || (a.id || '').localeCompare(b.id || ''));
+
+      const mappedAllocs = allocs.map(ra => {
+        const ar = allArs.find(a => a.id === ra.account_receivable_id);
+        return {
+          account_receivable_id: ra.account_receivable_id,
+          source_type: ar?.source_type || 'customer_invoice',
+          source_id: ar?.source_id || '',
+          source_number: ar?.source_number || '',
+          amount: round2(ra.amount)
+        };
+      });
+
+      const receiptAmt = round2(mappedAllocs.reduce((sum, a) => sum + a.amount, 0));
+      current_receipts_total += receiptAmt;
+
+      receipts.push({
+        receipt_id: r.id,
+        receipt_number: r.receipt_number || '',
+        receipt_date: r.receipt_date || '',
+        receipt_method: r.receipt_method || '',
+        receipt_reference: r.receipt_reference || null,
+        amount: receiptAmt,
+        note: r.note || null,
+        allocations: mappedAllocs
+      });
+    }
+    current_receipts_total = round2(current_receipts_total);
+
+    // 4. Current period posted allowances [sDate, eDate]
+    const currentAllowances = allAllowances
+      .filter(sa => sa.allowance_date >= sDate && sa.allowance_date <= eDate)
+      .sort((a, b) => (a.allowance_date || '').localeCompare(b.allowance_date || '') || (a.created_at || 0) - (b.created_at || 0) || (a.id || '').localeCompare(b.id || ''));
+
+    const allowances = currentAllowances.map(sa => {
+      const untaxed = round2(sa.untaxed_amount);
+      const tax = round2(sa.tax_amount);
+      return {
+        allowance_id: sa.id,
+        allowance_number: sa.allowance_number || '',
+        allowance_date: sa.allowance_date || '',
+        customer_invoice_id: sa.customer_invoice_id || '',
+        invoice_number_snapshot: sa.invoice_number_snapshot || '',
+        account_receivable_id: sa.account_receivable_id || '',
+        reason_type: sa.reason_type || 'shipment_shortfall',
+        untaxed_amount: untaxed,
+        tax_amount: tax,
+        total_amount: round2(untaxed + tax),
+        external_reference: sa.external_reference || null,
+        note: sa.note || null
+      };
+    });
+
+    const current_allowances_total = round2(allowances.reduce((sum, a) => sum + a.total_amount, 0));
+
+    // 5. Closing balance:
+    // Opening + Current Receivables - Current Receipts - Current Allowances = Closing
+    const closing_balance = round2(
+      opening_balance + current_receivables_total - current_receipts_total - current_allowances_total
+    );
+
+    return {
+      tenant_id: targetTenantId,
+      customer_partner_id: cid,
+      customer_name: partner.name,
+      start_date: sDate,
+      end_date: eDate,
+      opening_balance,
+      current_receivables_total,
+      current_receipts_total,
+      current_allowances_total,
+      closing_balance,
+      receivables,
+      receipts,
+      allowances
+    };
+  },
+
   reset_mock_accounts_receivable: async (args) => {
     const { tenant_id, tenantId } = args || {};
     const targetTid = tenant_id || tenantId;
     if (targetTid) {
       mockAccountsReceivable = (mockAccountsReceivable || []).filter(a => (a.tenant_id || 'tnt_mock_1') !== targetTid);
+      mockCustomerReceiptAllocations = (mockCustomerReceiptAllocations || []).filter(ra => (ra.tenant_id || 'tnt_mock_1') !== targetTid);
     } else {
       mockAccountsReceivable = [];
+      mockCustomerReceiptAllocations = [];
     }
     saveStorage('agent_erp_mock_accounts_receivable', mockAccountsReceivable);
+    saveStorage('agent_erp_mock_customer_receipt_allocations', mockCustomerReceiptAllocations);
     return true;
   }
 };

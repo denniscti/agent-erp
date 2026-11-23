@@ -97,3 +97,28 @@ export async function loadReceivablesAgingAction(asOfDate) {
   }
 }
 
+/**
+ * Load customer statement for reconciliation (Issue #229)
+ * @param {string} customerPartnerId
+ * @param {string} startDate
+ * @param {string} endDate
+ * @returns {Promise<any>}
+ */
+export async function loadCustomerStatementAction(customerPartnerId, startDate, endDate) {
+  try {
+    const statement = await invoke('get_customer_statement', {
+      customer_partner_id: customerPartnerId,
+      customerPartnerId: customerPartnerId,
+      start_date: startDate,
+      startDate: startDate,
+      end_date: endDate,
+      endDate: endDate
+    });
+    appState.customerStatement = statement;
+    return statement;
+  } catch (err) {
+    console.error("Failed to load customer statement:", err);
+    throw err;
+  }
+}
+
