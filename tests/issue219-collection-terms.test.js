@@ -48,14 +48,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const routesPath = path.join(rootDir, 'src/lib/routes.js');
-
-// Dynamically load routes.js by mocking .svelte component imports with identifier tokens
-const rawRoutesSource = fs.readFileSync(routesPath, 'utf-8');
-const transformedRoutesSource = rawRoutesSource.replace(
-  /import\s+(\w+)\s+from\s+['"]([^'"]+\.svelte)['"];/g,
-  'const $1 = { name: "$1", path: "$2" };'
-);
-const routesDataUri = `data:text/javascript;base64,${Buffer.from(transformedRoutesSource).toString('base64')}`;
+const routesDir = path.dirname(routesPath);
+let routesSource = fs.readFileSync(routesPath, 'utf-8');
+routesSource = routesSource.replace(/import\s+(\w+)\s+from\s+['"]([^'"]+\.json)['"];/g, (_, varName, relPath) => {
+  const jsonContent = fs.readFileSync(path.resolve(routesDir, relPath), 'utf-8');
+  return `const ${varName} = ${jsonContent.trim()};`;
+});
+const routesDataUri = `data:text/javascript;base64,${Buffer.from(routesSource).toString('base64')}`;
 const { getRoute } = await import(routesDataUri);
 
 const {

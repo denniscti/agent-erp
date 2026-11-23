@@ -2,168 +2,198 @@
  * @file routes.js
  * @description Central route registry and component resolver for agent-erp.
  * Maps route strings and workspace identifiers to domain Workspace components.
+ * Driven by Issue #263 T1 domain manifests with per-domain dynamic import() code-splitting.
  * Conforms to docs/system_design/module_boundary_architecture.md Stage 1.
  */
 
-import ChatBox from './components/ChatBox.svelte';
-import SettingsWorkspace from './settings/Workspace.svelte';
-import PurchaseOrdersWorkspace from './purchaseOrders/Workspace.svelte';
-import WarehouseWorkspace from './warehouses/Workspace.svelte';
-import VendorBillsWorkspace from './vendorBills/Workspace.svelte';
-import AccountsPayableWorkspace from './accountsPayable/Workspace.svelte';
-import QuotesWorkspace from './quotes/Workspace.svelte';
-import SalesOrdersWorkspace from './salesOrders/Workspace.svelte';
-import InventoryAdjustmentsWorkspace from './inventoryAdjustments/Workspace.svelte';
-import StocktakesWorkspace from './stocktakes/Workspace.svelte';
-import StockTransfersWorkspace from './stockTransfers/Workspace.svelte';
-import OpeningPayablesWorkspace from './openingPayables/Workspace.svelte';
-import OpeningReceivablesWorkspace from './openingReceivables/Workspace.svelte';
-import VendorPaymentsWorkspace from './vendorPayments/Workspace.svelte';
-import CustomerCreditWorkspace from './customerCredits/Workspace.svelte';
-import CustomerInvoicesWorkspace from './customerInvoices/Workspace.svelte';
-import CustomerReceiptsWorkspace from './customerReceipts/Workspace.svelte';
-import AccountsReceivableWorkspace from './accountsReceivable/Workspace.svelte';
+// Import T1 domain manifest declarations
+import accountsPayableManifest from './accountsPayable/manifest.json';
+import departmentsManifest from './departments/manifest.json';
+import inventoryAdjustmentsManifest from './inventoryAdjustments/manifest.json';
+import openingPayablesManifest from './openingPayables/manifest.json';
+import partnersManifest from './partners/manifest.json';
+import productsManifest from './products/manifest.json';
+import purchaseOrdersManifest from './purchaseOrders/manifest.json';
+import quotesManifest from './quotes/manifest.json';
+import salesOrdersManifest from './salesOrders/manifest.json';
+import stockTransfersManifest from './stockTransfers/manifest.json';
+import stocktakesManifest from './stocktakes/manifest.json';
+import vendorBillsManifest from './vendorBills/manifest.json';
+import vendorPaymentsManifest from './vendorPayments/manifest.json';
+import warehousesManifest from './warehouses/manifest.json';
+
+/**
+ * All 14 T1 business domain manifests verified in Issue #263.
+ */
+export const DOMAIN_MANIFESTS = [
+  purchaseOrdersManifest,
+  quotesManifest,
+  salesOrdersManifest,
+  vendorBillsManifest,
+  accountsPayableManifest,
+  warehousesManifest,
+  inventoryAdjustmentsManifest,
+  stocktakesManifest,
+  stockTransfersManifest,
+  openingPayablesManifest,
+  vendorPaymentsManifest,
+  departmentsManifest,
+  partnersManifest,
+  productsManifest
+];
+
+/**
+ * Helper to wrap a dynamic import into a lazy loader function with a component name.
+ * Enables both async execution in App.svelte and test reflection on loader.name.
+ * @param {string} name
+ * @param {() => Promise<any>} loader
+ * @returns {() => Promise<any>}
+ */
+function createLazyComponent(name, loader) {
+  const lazy = () => loader();
+  Object.defineProperty(lazy, 'name', { value: name, configurable: true });
+  lazy.componentName = name;
+  return lazy;
+}
+
+/**
+ * Per-domain lazy loader map.
+ * Using explicit literal import() calls enables Vite/Rollup static analysis
+ * for chunk creation and code-splitting per domain.
+ */
+export const DOMAIN_LOADERS = {
+  agent: createLazyComponent('ChatBox', () => import('./components/ChatBox.svelte')),
+  settings: createLazyComponent('SettingsWorkspace', () => import('./settings/Workspace.svelte')),
+  purchaseOrders: createLazyComponent('PurchaseOrdersWorkspace', () => import('./purchaseOrders/Workspace.svelte')),
+  warehouses: createLazyComponent('WarehouseWorkspace', () => import('./warehouses/Workspace.svelte')),
+  vendorBills: createLazyComponent('VendorBillsWorkspace', () => import('./vendorBills/Workspace.svelte')),
+  accountsPayable: createLazyComponent('AccountsPayableWorkspace', () => import('./accountsPayable/Workspace.svelte')),
+  quotes: createLazyComponent('QuotesWorkspace', () => import('./quotes/Workspace.svelte')),
+  salesOrders: createLazyComponent('SalesOrdersWorkspace', () => import('./salesOrders/Workspace.svelte')),
+  inventoryAdjustments: createLazyComponent('InventoryAdjustmentsWorkspace', () => import('./inventoryAdjustments/Workspace.svelte')),
+  stocktakes: createLazyComponent('StocktakesWorkspace', () => import('./stocktakes/Workspace.svelte')),
+  stockTransfers: createLazyComponent('StockTransfersWorkspace', () => import('./stockTransfers/Workspace.svelte')),
+  openingPayables: createLazyComponent('OpeningPayablesWorkspace', () => import('./openingPayables/Workspace.svelte')),
+  vendorPayments: createLazyComponent('VendorPaymentsWorkspace', () => import('./vendorPayments/Workspace.svelte')),
+  departments: createLazyComponent('SettingsWorkspace', () => import('./settings/Workspace.svelte')),
+  partners: createLazyComponent('SettingsWorkspace', () => import('./settings/Workspace.svelte')),
+  products: createLazyComponent('SettingsWorkspace', () => import('./settings/Workspace.svelte')),
+  openingReceivables: createLazyComponent('OpeningReceivablesWorkspace', () => import('./openingReceivables/Workspace.svelte')),
+  accountsReceivable: createLazyComponent('AccountsReceivableWorkspace', () => import('./accountsReceivable/Workspace.svelte')),
+  customerCredit: createLazyComponent('CustomerCreditWorkspace', () => import('./customerCredits/Workspace.svelte')),
+  customerInvoices: createLazyComponent('CustomerInvoicesWorkspace', () => import('./customerInvoices/Workspace.svelte')),
+  customerReceipts: createLazyComponent('CustomerReceiptsWorkspace', () => import('./customerReceipts/Workspace.svelte'))
+};
 
 /**
  * @typedef {Object} RouteDefinition
  * @property {string} id - Workspace identifier
  * @property {string} path - Canonical route path (e.g. '/app/purchase-orders')
- * @property {any} component - Svelte component to render
+ * @property {() => Promise<any>} component - Lazy component loader function returning dynamic import() Promise
  * @property {string} label - Human readable workspace title
+ * @property {string} [domainId] - T1 domain identifier if manifest-driven
+ * @property {string} [icon] - Icon name from manifest
+ * @property {boolean} [topLevelNav] - Whether included in top-level rail navigation
  * @property {string[]} [aliases] - Alternative route paths or workspace aliases
  */
 
 /**
- * All registered workspace routes in the application.
+ * Base non-domain core routes.
  * @type {RouteDefinition[]}
  */
-export const ROUTES = [
+const CORE_ROUTES = [
   {
     id: 'agent',
     path: '/app/agent',
-    component: ChatBox,
+    component: DOMAIN_LOADERS.agent,
     label: 'AI 助理對話',
-    aliases: ['agent', '/agent']
+    aliases: ['agent', '/agent'],
+    icon: 'message-square',
+    topLevelNav: true
   },
   {
     id: 'settings',
     path: '/app/settings',
-    component: SettingsWorkspace,
+    component: DOMAIN_LOADERS.settings,
     label: '系統設定',
-    aliases: ['settings', '/settings']
-  },
-  {
-    id: 'purchase-orders',
-    path: '/app/purchase-orders',
-    component: PurchaseOrdersWorkspace,
-    label: '採購單',
-    aliases: ['purchase-orders', 'purchase-order', '/app/purchase-order']
-  },
-  {
-    id: 'warehouses',
-    path: '/app/warehouses',
-    component: WarehouseWorkspace,
-    label: '倉庫管理',
-    aliases: ['warehouses', 'warehouse', '/app/warehouse', 'inventory', '/app/inventory']
-  },
-  {
-    id: 'vendor-bills',
-    path: '/app/vendor-bills',
-    component: VendorBillsWorkspace,
-    label: '請款單',
-    aliases: ['vendor-bills', 'bills', 'vendor-bill', '/app/bills', '/app/vendor-bill']
-  },
-  {
-    id: 'accounts-payable',
-    path: '/app/accounts-payable',
-    component: AccountsPayableWorkspace,
-    label: '應付帳款',
-    aliases: ['accounts-payable', 'ap', '/app/ap']
-  },
-  {
-    id: 'quotes',
-    path: '/app/quotes',
-    component: QuotesWorkspace,
-    label: '報價單',
-    aliases: ['quotes', 'quote', '/app/quote']
-  },
-  {
-    id: 'sales-orders',
-    path: '/app/sales-orders',
-    component: SalesOrdersWorkspace,
-    label: '銷售單',
-    aliases: ['sales-orders', 'sales-order', '/app/sales-order']
-  },
-  {
-    id: 'inventory-adjustments',
-    path: '/app/inventory-adjustments',
-    component: InventoryAdjustmentsWorkspace,
-    label: '庫存調整',
-    aliases: ['inventory-adjustments', 'adjustments', '/app/adjustments']
-  },
-  {
-    id: 'stocktakes',
-    path: '/app/stocktakes',
-    component: StocktakesWorkspace,
-    label: '盤點管理',
-    aliases: ['stocktakes', 'stocktake', '/app/stocktake']
-  },
-  {
-    id: 'stock-transfers',
-    path: '/app/stock-transfers',
-    component: StockTransfersWorkspace,
-    label: '調撥管理',
-    aliases: ['stock-transfers', 'transfers', 'stockTransfers', '/app/stockTransfers', '/app/transfers']
-  },
-  {
-    id: 'opening-payables',
-    path: '/app/opening-payables',
-    component: OpeningPayablesWorkspace,
-    label: '期初應付帳款',
-    aliases: ['opening-payables', 'openingPayables', '/app/openingPayables']
-  },
+    aliases: ['settings', '/settings'],
+    icon: 'settings',
+    topLevelNav: true
+  }
+];
+
+/**
+ * Manifest-driven domain routes generated from T1 DOMAIN_MANIFESTS.
+ * @type {RouteDefinition[]}
+ */
+const MANIFEST_ROUTES = DOMAIN_MANIFESTS.map((manifest) => {
+  // Use kebab-case alias as primary id for backward compatibility with existing tests and router keys
+  const primaryId = (manifest.aliases && manifest.aliases[0]) || manifest.id;
+  const loader = DOMAIN_LOADERS[manifest.id] || DOMAIN_LOADERS[primaryId] || DOMAIN_LOADERS.settings;
+
+  return {
+    id: primaryId,
+    domainId: manifest.id,
+    path: manifest.route,
+    component: loader,
+    label: manifest.label,
+    icon: manifest.icon,
+    topLevelNav: manifest.topLevelNav,
+    aliases: manifest.aliases || [],
+    manifest
+  };
+});
+
+/**
+ * Additional standalone workspace routes awaiting separate domain manifests.
+ * @type {RouteDefinition[]}
+ */
+const ADDITIONAL_ROUTES = [
   {
     id: 'opening-receivables',
     path: '/app/opening-receivables',
-    component: OpeningReceivablesWorkspace,
+    component: DOMAIN_LOADERS.openingReceivables,
     label: '期初應收帳款',
     aliases: ['opening-receivables', 'openingReceivables', '/app/openingReceivables']
   },
   {
-    id: 'vendor-payments',
-    path: '/app/vendor-payments',
-    component: VendorPaymentsWorkspace,
-    label: '付款單',
-    aliases: ['vendor-payments', 'vendorPayments', 'payments', '/app/vendorPayments', '/app/payments']
-  },
-  {
     id: 'accounts-receivable',
     path: '/app/accounts-receivable',
-    component: AccountsReceivableWorkspace,
+    component: DOMAIN_LOADERS.accountsReceivable,
     label: '應收帳款',
     aliases: ['accounts-receivable', 'ar', '/app/ar']
   },
   {
     id: 'customer-credit',
     path: '/app/customer-credit',
-    component: CustomerCreditWorkspace,
+    component: DOMAIN_LOADERS.customerCredit,
     label: '客戶信用',
     aliases: ['customer-credit', 'customer-credits', '/app/customer-credits']
   },
   {
     id: 'customer-invoices',
     path: '/app/customer-invoices',
-    component: CustomerInvoicesWorkspace,
+    component: DOMAIN_LOADERS.customerInvoices,
     label: '銷項發票',
     aliases: ['customer-invoices', 'customer-invoice', 'invoices', 'sales-invoices', '/app/invoices', '/app/customer-invoice']
   },
   {
     id: 'customer-receipts',
     path: '/app/customer-receipts',
-    component: CustomerReceiptsWorkspace,
+    component: DOMAIN_LOADERS.customerReceipts,
     label: '收款單',
     aliases: ['customer-receipts', 'customerReceipts', 'receipts', '/app/customerReceipts', '/app/receipts']
   }
+];
+
+/**
+ * All registered workspace routes in the application.
+ * @type {RouteDefinition[]}
+ */
+export const ROUTES = [
+  ...CORE_ROUTES,
+  ...MANIFEST_ROUTES,
+  ...ADDITIONAL_ROUTES
 ];
 
 export const DEFAULT_ROUTE = ROUTES[0]; // agent / ChatBox
@@ -171,17 +201,28 @@ export const DEFAULT_ROUTE = ROUTES[0]; // agent / ChatBox
 /**
  * Route lookup map populated from ROUTES, indexed by:
  * - id
+ * - domainId (if available)
  * - path
  * - all aliases
  */
 const ROUTE_LOOKUP = new Map();
 
 for (const route of ROUTES) {
-  ROUTE_LOOKUP.set(route.id, route);
-  ROUTE_LOOKUP.set(route.path, route);
+  // Preserve first-come precedence for canonical paths (e.g. /app/settings belongs to 'settings')
+  if (!ROUTE_LOOKUP.has(route.id)) {
+    ROUTE_LOOKUP.set(route.id, route);
+  }
+  if (route.domainId && !ROUTE_LOOKUP.has(route.domainId)) {
+    ROUTE_LOOKUP.set(route.domainId, route);
+  }
+  if (!ROUTE_LOOKUP.has(route.path)) {
+    ROUTE_LOOKUP.set(route.path, route);
+  }
   if (Array.isArray(route.aliases)) {
     for (const alias of route.aliases) {
-      ROUTE_LOOKUP.set(alias, route);
+      if (!ROUTE_LOOKUP.has(alias)) {
+        ROUTE_LOOKUP.set(alias, route);
+      }
     }
   }
 }
@@ -228,9 +269,10 @@ export function getRoute(routeOrKey) {
 }
 
 /**
- * Resolves Svelte component to render for given route or workspace key.
+ * Resolves lazy Svelte component loader for given route or workspace key.
+ * Returns a function returning dynamic import() Promise.
  * @param {string | null | undefined} routeOrKey
- * @returns {any}
+ * @returns {() => Promise<any>}
  */
 export function resolveRouteComponent(routeOrKey) {
   return getRoute(routeOrKey).component;
@@ -248,6 +290,9 @@ export function getRouteLabel(routeOrKey) {
     return DEFAULT_ROUTE.label;
   }
   const trimmed = routeOrKey.trim();
+  if (!trimmed) {
+    return DEFAULT_ROUTE.label;
+  }
   const clean = trimmed.startsWith('#') ? trimmed.slice(1) : trimmed;
 
   if (SPECIAL_LABELS[clean]) {
@@ -278,4 +323,3 @@ export function getWorkspaceRoutePath(ws) {
   const route = getRoute(ws);
   return route.path;
 }
-

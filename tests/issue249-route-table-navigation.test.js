@@ -59,15 +59,14 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const appPath = path.join(rootDir, 'src/App.svelte');
 const routesPath = path.join(rootDir, 'src/lib/routes.js');
+const routesDir = path.dirname(routesPath);
+let routesSource = fs.readFileSync(routesPath, 'utf-8');
+routesSource = routesSource.replace(/import\s+(\w+)\s+from\s+['"]([^'"]+\.json)['"];/g, (_, varName, relPath) => {
+  const jsonContent = fs.readFileSync(path.resolve(routesDir, relPath), 'utf-8');
+  return `const ${varName} = ${jsonContent.trim()};`;
+});
+const routesDataUri = `data:text/javascript;base64,${Buffer.from(routesSource).toString('base64')}`;
 
-// Dynamically load routes.js by mocking .svelte component imports with identifier tokens
-// to enable testing in standard Node.js test runner without Svelte compiler loader
-const rawRoutesSource = fs.readFileSync(routesPath, 'utf-8');
-const transformedRoutesSource = rawRoutesSource.replace(
-  /import\s+(\w+)\s+from\s+['"]([^'"]+\.svelte)['"];/g,
-  'const $1 = { name: "$1", path: "$2" };'
-);
-const routesDataUri = `data:text/javascript;base64,${Buffer.from(transformedRoutesSource).toString('base64')}`;
 const {
   ROUTES,
   DEFAULT_ROUTE,

@@ -18,6 +18,7 @@
     fetchAuditLogs
   } from './lib/store.svelte.js';
   import { resolveRouteComponent } from './lib/routes.js';
+  import { getWorkspaceRoutePath } from './lib/routes.js';
   import TaskPanel from './lib/components/TaskPanel.svelte';
   import Breadcrumb from './lib/components/Breadcrumb.svelte';
   import StatusOverview from './lib/components/StatusOverview.svelte';
@@ -31,7 +32,65 @@
   let isNotificationOpen = $state(false);
   let initializedKey = $state('');
 
-  let ActiveWorkspace = $derived(resolveRouteComponent(appState.route));
+  // Async Workspace Resolution with Loading & Error States (Issue #264)
+  let ActiveWorkspace = $state(null);
+  let isWorkspaceLoading = $state(false);
+  let workspaceLoadError = $state(null);
+  let currentLoadedLoader = null;
+
+  $effect(() => {
+    const route = appState.route;
+    const loader = resolveRouteComponent(route);
+
+    // 若新路由解析到相同 loader 且已載入完成，直接保留原元件實例，避免子路由切換時重複 unmount/mount 造成狀態遺失
+    if (loader && loader === currentLoadedLoader && ActiveWorkspace) {
+      return;
+    }
+
+    isWorkspaceLoading = true;
+    workspaceLoadError = null;
+    ActiveWorkspace = null;
+    let cancelled = false;
+
+    if (!loader) {
+      currentLoadedLoader = null;
+      workspaceLoadError = new Error(`未找到工作區路由：${route}`);
+      isWorkspaceLoading = false;
+      return;
+    }
+
+    const handleLoaded = (mod) => {
+      if (!cancelled) {
+        currentLoadedLoader = loader;
+        ActiveWorkspace = mod?.default || mod;
+        isWorkspaceLoading = false;
+      }
+    };
+
+    try {
+      const res = typeof loader === 'function' ? loader() : loader;
+      if (res && typeof res.then === 'function') {
+        res.then(handleLoaded).catch((err) => {
+          if (!cancelled) {
+            currentLoadedLoader = null;
+            console.error('Failed to load workspace component:', err);
+            workspaceLoadError = err;
+            isWorkspaceLoading = false;
+          }
+        });
+      } else {
+        handleLoaded(res);
+      }
+    } catch (err) {
+      if (!cancelled) {
+        currentLoadedLoader = null;
+        workspaceLoadError = err;
+        isWorkspaceLoading = false;
+      }
+    }
+
+    return () => { cancelled = true; };
+  });
 
   async function initializeAppData(force = false) {
     const currentKey = `${appState.authUser?.id || ''}_${appState.activeTenant?.id || ''}`;
@@ -109,19 +168,7 @@
   });
 
   function selectWorkspace(ws) {
-    if (ws === 'agent') navigate('/app/agent');
-    else if (ws === 'settings') navigate('/app/settings');
-    else if (ws === 'purchase-orders') navigate('/app/purchase-orders');
-    else if (ws === 'vendor-bills' || ws === 'bills') navigate('/app/vendor-bills');
-    else if (ws === 'warehouses' || ws === 'warehouse') navigate('/app/warehouses');
-    else if (ws === 'accounts-payable') navigate('/app/accounts-payable');
-    else if (ws === 'accounts-receivable' || ws === 'ar') navigate('/app/accounts-receivable');
-    else if (ws === 'quotes' || ws === 'quote') navigate('/app/quotes');
-    else if (ws === 'sales-orders' || ws === 'sales-order') navigate('/app/sales-orders');
-    else if (ws === 'customer-invoices' || ws === 'customer-invoice' || ws === 'invoices') navigate('/app/customer-invoices');
-    else if (ws === 'customer-credit' || ws === 'customer-credits') navigate('/app/customer-credit');
-    else if (ws === 'inventory') navigate('/app/inventory');
-    else navigate(`/app/${ws}`);
+    navigate(getWorkspaceRoutePath(ws));
   }
 
   function handleBrandLogoClick() {
@@ -150,92 +197,33 @@
 
           <nav class="rail-nav">
             <!-- AI Agent Chat / 主助理 -->
-            <button 
-              class="rail-nav-btn {activeTab === 'agent' ? 'active' : ''}" 
-              onclick={() => selectWorkspace('agent')}
-              title="AI 助理對話"
-              aria-label="AI 助理對話"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-              </svg>
+            <button class="rail-nav-btn {activeTab === 'agent' ? 'active' : ''}" onclick={() => selectWorkspace('agent')} title="AI 助理對話" aria-label="AI 助理對話">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
             </button>
 
             <!-- 採購單 (Issue #165) -->
-            <button 
-              class="rail-nav-btn {activeTab === 'purchase-orders' ? 'active' : ''}" 
-              onclick={() => selectWorkspace('purchase-orders')}
-              title="採購單"
-              aria-label="採購單"
-              id="rail-nav-purchase-orders"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"></path>
-                <line x1="3" y1="6" x2="21" y2="6"></line>
-                <path d="M16 10a4 4 0 0 1-8 0"></path>
-              </svg>
+            <button class="rail-nav-btn {activeTab === 'purchase-orders' ? 'active' : ''}" onclick={() => selectWorkspace('purchase-orders')} title="採購單" aria-label="採購單" id="rail-nav-purchase-orders">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"></path><line x1="3" y1="6" x2="21" y2="6"></line><path d="M16 10a4 4 0 0 1-8 0"></path></svg>
             </button>
 
             <!-- 請款單 (Issue #202) -->
-            <button 
-              class="rail-nav-btn {activeTab === 'vendor-bills' || activeTab === 'bills' ? 'active' : ''}" 
-              onclick={() => selectWorkspace('vendor-bills')}
-              title="請款單"
-              aria-label="請款單"
-              id="rail-nav-vendor-bills"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <line x1="16" y1="13" x2="8" y2="13"></line>
-                <line x1="16" y1="17" x2="8" y2="17"></line>
-                <polyline points="10 9 9 9 8 9"></polyline>
-              </svg>
+            <button class="rail-nav-btn {activeTab === 'vendor-bills' || activeTab === 'bills' ? 'active' : ''}" onclick={() => selectWorkspace('vendor-bills')} title="請款單" aria-label="請款單" id="rail-nav-vendor-bills">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
             </button>
 
             <!-- 倉庫管理 (Issue #182) -->
-            <button 
-              class="rail-nav-btn {activeTab === 'warehouses' || activeTab === 'inventory' ? 'active' : ''}" 
-              onclick={() => selectWorkspace('warehouses')}
-              title="倉庫管理"
-              aria-label="倉庫管理"
-              id="rail-nav-warehouses"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
-                <polyline points="9 22 9 12 15 12 15 22"></polyline>
-              </svg>
+            <button class="rail-nav-btn {activeTab === 'warehouses' || activeTab === 'inventory' ? 'active' : ''}" onclick={() => selectWorkspace('warehouses')} title="倉庫管理" aria-label="倉庫管理" id="rail-nav-warehouses">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
             </button>
 
             <!-- 應付帳款 (Issue #200) -->
-            <button 
-              class="rail-nav-btn {activeTab === 'accounts-payable' ? 'active' : ''}" 
-              onclick={() => selectWorkspace('accounts-payable')}
-              title="應付帳款"
-              aria-label="應付帳款"
-              id="rail-nav-accounts-payable"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect width="20" height="14" x="2" y="5" rx="2"></rect>
-                <line x1="2" x2="22" y1="10" y2="10"></line>
-              </svg>
+            <button class="rail-nav-btn {activeTab === 'accounts-payable' ? 'active' : ''}" onclick={() => selectWorkspace('accounts-payable')} title="應付帳款" aria-label="應付帳款" id="rail-nav-accounts-payable">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="5" rx="2"></rect><line x1="2" x2="22" y1="10" y2="10"></line></svg>
             </button>
 
             <!-- 報價單 (Issue #233) -->
-            <button 
-              class="rail-nav-btn {activeTab === 'quotes' || activeTab === 'quote' ? 'active' : ''}" 
-              onclick={() => selectWorkspace('quotes')}
-              title="報價單"
-              aria-label="報價單"
-              id="rail-nav-quotes"
-            >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
-                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
-                <path d="M9 14h6"></path>
-                <path d="M9 18h6"></path>
-                <path d="M9 10h6"></path>
-              </svg>
+            <button class="rail-nav-btn {activeTab === 'quotes' || activeTab === 'quote' ? 'active' : ''}" onclick={() => selectWorkspace('quotes')} title="報價單" aria-label="報價單" id="rail-nav-quotes">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect><path d="M9 14h6"></path><path d="M9 18h6"></path><path d="M9 10h6"></path></svg>
             </button>
 
             <!-- 銷售單 (Issue #221) -->
@@ -357,7 +345,26 @@
           {/if}
 
           <!-- Dynamic Workspace Component from Route Table -->
-          <ActiveWorkspace />
+          {#if isWorkspaceLoading}
+            <div class="workspace-loading-state glass-panel" role="status" aria-live="polite">
+              <div class="workspace-spinner"></div>
+              <span class="loading-text">正在載入工作區...</span>
+            </div>
+          {:else if workspaceLoadError}
+            <div class="workspace-error-fallback glass-panel" role="alert">
+              <div class="workspace-error-header">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="workspace-error-icon"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                <h4>工作區載入失敗</h4>
+              </div>
+              <p class="workspace-error-message">{workspaceLoadError.message || '無法載入模組，請檢查網路連線或稍後再試。'}</p>
+              <div class="workspace-error-actions">
+                <button class="btn btn-secondary" onclick={() => location.reload()}>重新載入頁面</button>
+                <button class="btn btn-primary" onclick={() => selectWorkspace('agent')}>回到 AI 助理對話</button>
+              </div>
+            </div>
+          {:else if ActiveWorkspace}
+            <ActiveWorkspace />
+          {/if}
         </div>
 
         <!-- 4. Right Status Overview Panel -->
@@ -401,39 +408,33 @@
     flex-shrink: 0;
     animation: slideIn var(--transition-smooth) forwards;
   }
-
   .update-banner-header {
     display: flex;
     align-items: center;
     gap: 10px;
     margin-bottom: 6px;
   }
-
   .update-notes-preview {
     font-size: 0.88rem;
     color: var(--text-secondary);
     white-space: pre-wrap;
     margin-bottom: 12px;
   }
-
   .update-action-row {
     display: flex;
     align-items: center;
   }
-
   .update-progress-layout {
     width: 100%;
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
-
   .progress-percent {
     font-size: 0.85rem;
     color: var(--text-secondary);
     font-weight: 500;
   }
-
   .progress-bar-container {
     width: 100%;
     height: 6px;
@@ -442,7 +443,6 @@
     overflow: hidden;
     position: relative;
   }
-
   .progress-bar-fill {
     height: 100%;
     background: var(--accent);
@@ -450,49 +450,20 @@
     width: 0%;
     transition: width 0.1s linear;
   }
+  .relaunch-status { display: flex; align-items: center; gap: 10px; color: rgb(var(--accent-amber)); font-weight: 500; }
+  .spinner-icon { width: 14px; height: 14px; border: 2px solid rgba(var(--accent-amber), 0.3); border-top-color: rgb(var(--accent-amber)); border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast-popup { position: fixed; bottom: 36px; right: 24px; z-index: 9999; padding: 12px 20px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(18, 18, 18, 0.85); backdrop-filter: blur(16px); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  .toast-body { display: flex; align-items: center; gap: 10px; font-size: 0.9rem; color: var(--text-primary); font-weight: 500; }
 
-  .relaunch-status {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    color: rgb(var(--accent-amber));
-    font-weight: 500;
-  }
-
-  .spinner-icon {
-    width: 14px;
-    height: 14px;
-    border: 2px solid rgba(var(--accent-amber), 0.3);
-    border-top-color: rgb(var(--accent-amber));
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-
-  /* Toast Popup Styles */
-  .toast-popup {
-    position: fixed;
-    bottom: 36px;
-    right: 24px;
-    z-index: 9999;
-    padding: 12px 20px;
-    border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    background: rgba(18, 18, 18, 0.85);
-    backdrop-filter: blur(16px);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
-    animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-  }
-
-  .toast-body {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 0.9rem;
-    color: var(--text-primary);
-    font-weight: 500;
-  }
+  /* Workspace Async Loading & Error Fallback (Issue #264) */
+  .workspace-loading-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 24px; margin: 24px; gap: 16px; min-height: 280px; background: rgba(255, 255, 255, 0.02); border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 12px; }
+  .workspace-spinner { width: 32px; height: 32px; border: 3px solid rgba(var(--accent-rgb, 99, 102, 241), 0.2); border-top-color: var(--accent, #6366f1); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  .loading-text { font-size: 0.95rem; color: var(--text-secondary, #94a3b8); font-weight: 500; }
+  .workspace-error-fallback { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 48px 24px; margin: 24px; gap: 16px; min-height: 280px; border-color: rgba(239, 68, 68, 0.3); background: rgba(239, 68, 68, 0.04); border-radius: 12px; }
+  .workspace-error-header { display: flex; align-items: center; gap: 10px; color: #ef4444; }
+  .workspace-error-header h4 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+  .workspace-error-icon { color: #ef4444; }
+  .workspace-error-message { max-width: 480px; font-size: 0.9rem; color: var(--text-secondary, #94a3b8); line-height: 1.5; margin: 0; }
+  .workspace-error-actions { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
 </style>
