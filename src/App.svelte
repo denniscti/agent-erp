@@ -115,6 +115,7 @@
     else if (ws === 'vendor-bills' || ws === 'bills') navigate('/app/vendor-bills');
     else if (ws === 'warehouses' || ws === 'warehouse') navigate('/app/warehouses');
     else if (ws === 'accounts-payable') navigate('/app/accounts-payable');
+    else if (ws === 'accounts-receivable' || ws === 'ar') navigate('/app/accounts-receivable');
     else if (ws === 'quotes' || ws === 'quote') navigate('/app/quotes');
     else if (ws === 'sales-orders' || ws === 'sales-order') navigate('/app/sales-orders');
     else if (ws === 'customer-invoices' || ws === 'customer-invoice' || ws === 'invoices') navigate('/app/customer-invoices');
@@ -267,6 +268,14 @@
                 <line x1="16" y1="13" x2="8" y2="13"></line>
                 <line x1="16" y1="17" x2="8" y2="17"></line>
                 <line x1="10" y1="9" x2="8" y2="9"></line>
+              </svg>
+            </button>
+
+            <!-- 應收帳款 (Issue #228 / M14 應收工作區) -->
+            <button class="rail-nav-btn {activeTab === 'accounts-receivable' || activeTab === 'ar' ? 'active' : ''}" onclick={() => selectWorkspace('accounts-receivable')} title="應收帳款" aria-label="應收帳款" id="rail-nav-accounts-receivable">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
               </svg>
             </button>
 

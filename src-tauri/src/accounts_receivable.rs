@@ -1,7 +1,10 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::accounts_payable::{calendar_day_diff, AgingBucket};
 
 static AR_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -966,6 +969,266 @@ pub async fn list_accounts_receivable<R: tauri::Runtime>(
     list_accounts_receivable_impl(&conn, &active_tid, filter).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct ReceivableAgingItem {
+    pub account_receivable_id: String,
+    pub source_id: String,
+    pub source_type: String,
+    pub source_number: String,
+    pub customer_partner_id: String,
+    pub customer_name_snapshot: String,
+    pub external_reference: Option<String>,
+    pub document_date: String,
+    pub due_date: String,
+    pub overdue_days: i32,
+    pub bucket: String,
+    pub amount: f64,
+    pub received_amount: f64,
+    pub allowance_amount: f64,
+    pub outstanding_amount: f64,
+    pub settlement_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct CustomerReceivablesAging {
+    pub customer_partner_id: String,
+    pub customer_name: String,
+    pub current: f64,
+    pub overdue_1_30: f64,
+    pub overdue_31_60: f64,
+    pub overdue_61_90: f64,
+    pub overdue_90_plus: f64,
+    pub total_outstanding: f64,
+    pub uninvoiced_amount: f64,
+    pub uninvoiced_group_a: f64,
+    pub uninvoiced_group_b: f64,
+    pub uninvoiced_group_c: f64,
+    pub items: Vec<ReceivableAgingItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, specta::Type)]
+pub struct ReceivablesAgingTotals {
+    pub current: f64,
+    pub overdue_1_30: f64,
+    pub overdue_31_60: f64,
+    pub overdue_61_90: f64,
+    pub overdue_90_plus: f64,
+    pub total_outstanding: f64,
+    pub uninvoiced_amount: f64,
+    pub uninvoiced_group_a: f64,
+    pub uninvoiced_group_b: f64,
+    pub uninvoiced_group_c: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
+pub struct ReceivablesAgingReport {
+    pub as_of_date: String,
+    pub customers: Vec<CustomerReceivablesAging>,
+    pub totals: ReceivablesAgingTotals,
+}
+
+pub fn get_receivables_aging_impl(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    as_of_date: Option<String>,
+) -> Result<ReceivablesAgingReport, AccountsReceivableError> {
+    let tid = tenant_id.trim();
+    if tid.is_empty() {
+        return Err(AccountsReceivableError::EmptyTenantId);
+    }
+
+    let as_of = match as_of_date {
+        Some(ref d) if !d.trim().is_empty() => d.trim().to_string(),
+        _ => conn
+            .query_row("SELECT date('now', 'localtime')", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap_or_else(|_| "2026-11-23".to_string()),
+    };
+
+    // 1. Uninvoiced sales orders reference column (#226)
+    let uninvoiced_list =
+        match crate::customer_invoices::list_uninvoiced_sales_orders_impl(conn, tid, None) {
+            Ok(list) => list,
+            Err(crate::customer_invoices::CustomerInvoiceError::EmptyTenantId) => {
+                return Err(AccountsReceivableError::EmptyTenantId);
+            }
+            Err(_) => Vec::new(),
+        };
+
+    let mut uninvoiced_map: BTreeMap<String, (String, f64, f64, f64, f64)> = BTreeMap::new();
+    for u in uninvoiced_list {
+        let entry = uninvoiced_map
+            .entry(u.customer_partner_id.clone())
+            .or_insert((u.customer_name_snapshot.clone(), 0.0, 0.0, 0.0, 0.0));
+        match u.group.as_str() {
+            "per_order_confirmed" => entry.1 += u.uninvoiced_amount,
+            "per_order_shipped" => entry.2 += u.uninvoiced_amount,
+            "monthly_consolidated" => entry.3 += u.uninvoiced_amount,
+            _ => {}
+        }
+        entry.4 += u.uninvoiced_amount;
+    }
+
+    // 2. Open accounts receivable with outstanding_amount > 0
+    let open_ars = list_accounts_receivable_impl(
+        conn,
+        tid,
+        ListAccountsReceivableFilter {
+            status: Some("open".to_string()),
+            ..Default::default()
+        },
+    )?;
+
+    let mut customer_map: BTreeMap<String, CustomerReceivablesAging> = BTreeMap::new();
+
+    for ar in open_ars {
+        if ar.outstanding_amount <= 0.0 {
+            continue;
+        }
+
+        let overdue_days = calendar_day_diff(&ar.due_date, &as_of).unwrap_or(0);
+        let bucket = AgingBucket::from_overdue_days(overdue_days);
+
+        let customer_entry = customer_map
+            .entry(ar.customer_partner_id.clone())
+            .or_insert_with(|| CustomerReceivablesAging {
+                customer_partner_id: ar.customer_partner_id.clone(),
+                customer_name: ar.customer_name_snapshot.clone(),
+                current: 0.0,
+                overdue_1_30: 0.0,
+                overdue_31_60: 0.0,
+                overdue_61_90: 0.0,
+                overdue_90_plus: 0.0,
+                total_outstanding: 0.0,
+                uninvoiced_amount: 0.0,
+                uninvoiced_group_a: 0.0,
+                uninvoiced_group_b: 0.0,
+                uninvoiced_group_c: 0.0,
+                items: Vec::new(),
+            });
+
+        match bucket {
+            AgingBucket::Current => customer_entry.current += ar.outstanding_amount,
+            AgingBucket::Overdue1To30 => customer_entry.overdue_1_30 += ar.outstanding_amount,
+            AgingBucket::Overdue31To60 => customer_entry.overdue_31_60 += ar.outstanding_amount,
+            AgingBucket::Overdue61To90 => customer_entry.overdue_61_90 += ar.outstanding_amount,
+            AgingBucket::Overdue90Plus => customer_entry.overdue_90_plus += ar.outstanding_amount,
+        }
+        customer_entry.total_outstanding += ar.outstanding_amount;
+
+        customer_entry.items.push(ReceivableAgingItem {
+            account_receivable_id: ar.id,
+            source_id: ar.source_id,
+            source_type: ar.source_type,
+            source_number: ar.source_number,
+            customer_partner_id: ar.customer_partner_id,
+            customer_name_snapshot: ar.customer_name_snapshot,
+            external_reference: ar.external_reference,
+            document_date: ar.document_date,
+            due_date: ar.due_date,
+            overdue_days,
+            bucket: bucket.as_str().to_string(),
+            amount: ar.amount,
+            received_amount: ar.received_amount,
+            allowance_amount: ar.allowance_amount,
+            outstanding_amount: ar.outstanding_amount,
+            settlement_status: ar.settlement_status.as_str().to_string(),
+        });
+    }
+
+    // 3. Merge uninvoiced sales orders
+    for (c_id, (c_name, ga, gb, gc, total_u)) in uninvoiced_map {
+        let customer_entry =
+            customer_map
+                .entry(c_id.clone())
+                .or_insert_with(|| CustomerReceivablesAging {
+                    customer_partner_id: c_id,
+                    customer_name: c_name,
+                    current: 0.0,
+                    overdue_1_30: 0.0,
+                    overdue_31_60: 0.0,
+                    overdue_61_90: 0.0,
+                    overdue_90_plus: 0.0,
+                    total_outstanding: 0.0,
+                    uninvoiced_amount: 0.0,
+                    uninvoiced_group_a: 0.0,
+                    uninvoiced_group_b: 0.0,
+                    uninvoiced_group_c: 0.0,
+                    items: Vec::new(),
+                });
+        customer_entry.uninvoiced_group_a = round_2(ga);
+        customer_entry.uninvoiced_group_b = round_2(gb);
+        customer_entry.uninvoiced_group_c = round_2(gc);
+        customer_entry.uninvoiced_amount = round_2(total_u);
+    }
+
+    // 4. Round sums and filter customers: keep total_outstanding > 0 || uninvoiced_amount > 0
+    let mut filtered_customers: Vec<CustomerReceivablesAging> = Vec::new();
+    for mut c in customer_map.into_values() {
+        c.current = round_2(c.current);
+        c.overdue_1_30 = round_2(c.overdue_1_30);
+        c.overdue_31_60 = round_2(c.overdue_31_60);
+        c.overdue_61_90 = round_2(c.overdue_61_90);
+        c.overdue_90_plus = round_2(c.overdue_90_plus);
+        c.total_outstanding = round_2(c.total_outstanding);
+        c.uninvoiced_amount = round_2(c.uninvoiced_amount);
+        c.uninvoiced_group_a = round_2(c.uninvoiced_group_a);
+        c.uninvoiced_group_b = round_2(c.uninvoiced_group_b);
+        c.uninvoiced_group_c = round_2(c.uninvoiced_group_c);
+
+        if c.total_outstanding > 0.0 || c.uninvoiced_amount > 0.0 {
+            filtered_customers.push(c);
+        }
+    }
+
+    filtered_customers.sort_by(|a, b| a.customer_name.cmp(&b.customer_name));
+
+    // 5. Calculate totals
+    let mut totals = ReceivablesAgingTotals::default();
+    for c in &filtered_customers {
+        totals.current += c.current;
+        totals.overdue_1_30 += c.overdue_1_30;
+        totals.overdue_31_60 += c.overdue_31_60;
+        totals.overdue_61_90 += c.overdue_61_90;
+        totals.overdue_90_plus += c.overdue_90_plus;
+        totals.total_outstanding += c.total_outstanding;
+        totals.uninvoiced_amount += c.uninvoiced_amount;
+        totals.uninvoiced_group_a += c.uninvoiced_group_a;
+        totals.uninvoiced_group_b += c.uninvoiced_group_b;
+        totals.uninvoiced_group_c += c.uninvoiced_group_c;
+    }
+
+    totals.current = round_2(totals.current);
+    totals.overdue_1_30 = round_2(totals.overdue_1_30);
+    totals.overdue_31_60 = round_2(totals.overdue_31_60);
+    totals.overdue_61_90 = round_2(totals.overdue_61_90);
+    totals.overdue_90_plus = round_2(totals.overdue_90_plus);
+    totals.total_outstanding = round_2(totals.total_outstanding);
+    totals.uninvoiced_amount = round_2(totals.uninvoiced_amount);
+    totals.uninvoiced_group_a = round_2(totals.uninvoiced_group_a);
+    totals.uninvoiced_group_b = round_2(totals.uninvoiced_group_b);
+    totals.uninvoiced_group_c = round_2(totals.uninvoiced_group_c);
+
+    Ok(ReceivablesAgingReport {
+        as_of_date: as_of,
+        customers: filtered_customers,
+        totals,
+    })
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_receivables_aging<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    as_of_date: Option<String>,
+) -> Result<ReceivablesAgingReport, String> {
+    let db_path = crate::get_db_path(&app_handle);
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let active_tid = crate::resolve_active_tenant_id(&conn)?;
+    get_receivables_aging_impl(&conn, &active_tid, as_of_date).map_err(|e| e.to_string())
+}
+
 // ==========================================
 // Tests
 // ==========================================
@@ -1649,5 +1912,282 @@ mod tests {
         // Then: Returns only ar2
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, ar2.id);
+    }
+
+    #[test]
+    fn test_tc_228_b01_to_b09_and_allowance_equality() {
+        // Given: Fixed as_of_date "2026-03-02" and multiple ARs spanning boundaries
+        let mut conn = setup_test_db();
+        let as_of = Some("2026-03-02".to_string());
+
+        // B01: due_date = today (2026-03-02) -> overdue_days = 0 -> current
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b01".to_string(),
+                source_number: "INV-B01".to_string(),
+                external_reference: None,
+                document_date: "2026-02-01".to_string(),
+                due_date: "2026-03-02".to_string(),
+                amount: 100.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B02: due_date = tomorrow (2026-03-03) -> overdue_days = -1 -> current
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b02".to_string(),
+                source_number: "INV-B02".to_string(),
+                external_reference: None,
+                document_date: "2026-02-01".to_string(),
+                due_date: "2026-03-03".to_string(),
+                amount: 200.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B03: due_date = 1 day ago (2026-03-01) -> overdue_days = 1 -> 1-30
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b03".to_string(),
+                source_number: "INV-B03".to_string(),
+                external_reference: None,
+                document_date: "2026-02-01".to_string(),
+                due_date: "2026-03-01".to_string(),
+                amount: 300.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B04: due_date = 30 days ago (2026-01-31) -> overdue_days = 30 -> 1-30
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b04".to_string(),
+                source_number: "INV-B04".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-31".to_string(),
+                amount: 400.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B05: due_date = 31 days ago (2026-01-30) -> overdue_days = 31 -> 31-60
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b05".to_string(),
+                source_number: "INV-B05".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-30".to_string(),
+                amount: 500.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B06: due_date = 60 days ago (2026-01-01) -> overdue_days = 60 -> 31-60
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b06".to_string(),
+                source_number: "INV-B06".to_string(),
+                external_reference: None,
+                document_date: "2025-12-01".to_string(),
+                due_date: "2026-01-01".to_string(),
+                amount: 600.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B07: due_date = 61 days ago (2025-12-31) -> overdue_days = 61 -> 61-90
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b07".to_string(),
+                source_number: "INV-B07".to_string(),
+                external_reference: None,
+                document_date: "2025-11-01".to_string(),
+                due_date: "2025-12-31".to_string(),
+                amount: 700.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B08: due_date = 90 days ago (2025-12-02) -> overdue_days = 90 -> 61-90
+        create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b08".to_string(),
+                source_number: "INV-B08".to_string(),
+                external_reference: None,
+                document_date: "2025-11-01".to_string(),
+                due_date: "2025-12-02".to_string(),
+                amount: 800.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // B09: due_date = 91 days ago (2025-12-01) -> overdue_days = 91 -> 90+
+        let ar_b09 = create_account_receivable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_b09".to_string(),
+                source_number: "INV-B09".to_string(),
+                external_reference: None,
+                document_date: "2025-10-01".to_string(),
+                due_date: "2025-12-01".to_string(),
+                amount: 900.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // Add a posted sales allowance for ar_b09 of 100.0 (untaxed 95 + tax 5)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sales_allowances (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                allowance_number TEXT NOT NULL,
+                account_receivable_id TEXT NOT NULL,
+                untaxed_amount REAL NOT NULL,
+                tax_amount REAL NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sales_allowances (id, tenant_id, allowance_number, account_receivable_id, untaxed_amount, tax_amount, status, created_at)
+             VALUES ('alw_test_01', 'tnt_test', 'ALW-202611001', ?1, 95.0, 5.0, 'posted', 1000)",
+            params![ar_b09.id],
+        )
+        .unwrap();
+
+        // When: Generating aging report
+        let report = get_receivables_aging_impl(&conn, "tnt_test", as_of).unwrap();
+
+        // Then: Customer buckets are correctly populated
+        assert_eq!(report.customers.len(), 1);
+        let c = &report.customers[0];
+        assert_eq!(c.customer_partner_id, "cus_001");
+        // current = 100 + 200 = 300
+        assert_eq!(c.current, 300.0);
+        // 1-30 = 300 + 400 = 700
+        assert_eq!(c.overdue_1_30, 700.0);
+        // 31-60 = 500 + 600 = 1100
+        assert_eq!(c.overdue_31_60, 1100.0);
+        // 61-90 = 700 + 800 = 1500
+        assert_eq!(c.overdue_61_90, 1500.0);
+        // 90+ = 900 - 100 (allowance) = 800
+        assert_eq!(c.overdue_90_plus, 800.0);
+
+        // Verification of acceptance criteria:
+        // 有折讓時帳齡各桶合計精確等於未收餘額
+        let bucket_sum = round_2(
+            c.current + c.overdue_1_30 + c.overdue_31_60 + c.overdue_61_90 + c.overdue_90_plus,
+        );
+        assert_eq!(bucket_sum, c.total_outstanding);
+        assert_eq!(c.total_outstanding, 4400.0);
+
+        // Totals match customer
+        assert_eq!(report.totals.total_outstanding, 4400.0);
+        assert_eq!(report.totals.current, 300.0);
+        assert_eq!(report.totals.overdue_1_30, 700.0);
+        assert_eq!(report.totals.overdue_31_60, 1100.0);
+        assert_eq!(report.totals.overdue_61_90, 1500.0);
+        assert_eq!(report.totals.overdue_90_plus, 800.0);
+    }
+
+    #[test]
+    fn test_tc_228_b10_b11_and_empty_tenant() {
+        // Given: Empty tenant
+        let conn = setup_test_db();
+        let err = get_receivables_aging_impl(&conn, "", None).unwrap_err();
+        assert_eq!(err, AccountsReceivableError::EmptyTenantId);
+
+        let err_ws = get_receivables_aging_impl(&conn, "   ", None).unwrap_err();
+        assert_eq!(err_ws, AccountsReceivableError::EmptyTenantId);
+
+        // Given: Cross-month date calculation
+        let mut conn_mut = setup_test_db();
+        create_account_receivable(
+            &mut conn_mut,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountReceivableInput {
+                customer_partner_id: "cus_001".to_string(),
+                source_type: "customer_invoice".to_string(),
+                source_id: "inv_month".to_string(),
+                source_number: "INV-MONTH".to_string(),
+                external_reference: None,
+                document_date: "2026-01-01".to_string(),
+                due_date: "2026-01-31".to_string(),
+                amount: 150.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // When: as_of_date = "2026-03-02" (30 days overdue in non-leap year)
+        let rep = get_receivables_aging_impl(&conn_mut, "tnt_test", Some("2026-03-02".to_string()))
+            .unwrap();
+        assert_eq!(rep.customers.len(), 1);
+        assert_eq!(rep.customers[0].items[0].overdue_days, 30);
+        assert_eq!(rep.customers[0].items[0].bucket, "1-30");
+        assert_eq!(rep.customers[0].overdue_1_30, 150.0);
+
+        // When: as_of_date is None, defaults to current local date without panic
+        let rep_default = get_receivables_aging_impl(&conn_mut, "tnt_test", None).unwrap();
+        assert!(!rep_default.as_of_date.is_empty());
     }
 }

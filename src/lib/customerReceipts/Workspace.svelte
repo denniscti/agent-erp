@@ -65,6 +65,12 @@
   let voidError = $state('');
   let isVoiding = $state(false);
 
+  // Cancel Modal State
+  let isCancelModalOpen = $state(false);
+  let cancelTargetReceipt = $state(null);
+  let cancelError = $state('');
+  let isCancelling = $state(false);
+
   // Helpers
   function getTodayDateString() {
     const now = new Date();
@@ -514,22 +520,38 @@
     }
   }
 
-  async function handleCancelReceipt() {
-    errorMessage = '';
-    if (!confirm(`確定要取消收款單「${selectedReceipt.receipt_number}」嗎？`)) {
-      return;
-    }
+  // Cancel Modal Actions
+  function openCancelModal(receipt) {
+    if (!receipt || receipt.status !== 'draft') return;
+    cancelTargetReceipt = receipt;
+    cancelError = '';
+    isCancelModalOpen = true;
+  }
 
-    isActionLoading = true;
+  function closeCancelModal() {
+    isCancelModalOpen = false;
+    cancelTargetReceipt = null;
+    cancelError = '';
+  }
+
+  async function handleConfirmCancelSubmit() {
+    if (!cancelTargetReceipt) return;
+    isCancelling = true;
+    cancelError = '';
     try {
-      const cancelled = await cancelCustomerReceiptAction(selectedReceipt.id);
-      selectedReceipt = cancelled;
-      viewMode = 'detail';
+      const targetId = cancelTargetReceipt.id;
+      const cancelled = await cancelCustomerReceiptAction(targetId);
+      isCancelModalOpen = false;
+      cancelTargetReceipt = null;
+      if (selectedReceipt && selectedReceipt.id === targetId) {
+        selectedReceipt = cancelled;
+        viewMode = 'detail';
+      }
       await refreshReceipts();
     } catch (err) {
-      errorMessage = err.message || String(err);
+      cancelError = err.message || String(err);
     } finally {
-      isActionLoading = false;
+      isCancelling = false;
     }
   }
 
@@ -731,6 +753,9 @@
                       <button class="btn-action" onclick={() => openDraftEditView(rcpt)} title="編輯草稿與核銷">
                         編輯
                       </button>
+                      <button class="btn-action text-danger" onclick={() => openCancelModal(rcpt)} title="取消此收款單草稿" id={`btn-cancel-rcpt-${rcpt.id}`}>
+                        取消
+                      </button>
                     {:else}
                       <button class="btn-action" onclick={() => openDetailView(rcpt)} title="檢視明細">
                         檢視
@@ -762,7 +787,7 @@
           <span class="badge badge-warning">草稿中 (draft)</span>
         </div>
         <div class="panel-actions">
-          <button class="btn btn-secondary btn-sm" onclick={handleCancelReceipt} id="btn-cancel-receipt" disabled={isActionLoading}>
+          <button class="btn btn-secondary btn-sm" onclick={() => openCancelModal(selectedReceipt)} id="btn-cancel-receipt" disabled={isActionLoading}>
             取消此單
           </button>
           <button class="btn btn-success" onclick={handlePostReceipt} id="btn-post-receipt" disabled={isActionLoading || draftAllocCount === 0 || hasDraftAllocationErrors}>
@@ -1167,6 +1192,43 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+{/if}
+
+<!-- MODAL 3: CANCEL RECEIPT MODAL -->
+{#if isCancelModalOpen && cancelTargetReceipt}
+  <div class="modal-backdrop" onclick={closeCancelModal} onkeydown={(e) => e.key === 'Escape' && closeCancelModal()} role="presentation">
+    <div class="modal-box" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1" id="cancel-receipt-modal">
+      <div class="modal-header">
+        <h3 class="text-danger">取消收款單草稿</h3>
+        <button class="btn-close" onclick={closeCancelModal}>×</button>
+      </div>
+
+      {#if cancelError}
+        <div class="alert alert-danger mx-4 my-2">
+          {cancelError}
+        </div>
+      {/if}
+
+      <div class="modal-body">
+        <p class="mb-2">
+          確定要取消收款單草稿「<strong class="font-mono">{cancelTargetReceipt.receipt_number}</strong>」嗎？
+        </p>
+        <p class="text-sm text-muted mb-0">
+          客戶：<strong>{cancelTargetReceipt.customer_name_snapshot}</strong><br />
+          此單據為草稿尚未過帳，取消後狀態將轉為「已取消 (cancelled)」，不會扣減或影響任何應收帳款。
+        </p>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick={closeCancelModal} disabled={isCancelling}>
+          返回
+        </button>
+        <button type="button" class="btn btn-danger" id="btn-confirm-cancel-receipt" onclick={handleConfirmCancelSubmit} disabled={isCancelling}>
+          {isCancelling ? '取消中...' : '確認取消'}
+        </button>
+      </div>
     </div>
   </div>
 {/if}

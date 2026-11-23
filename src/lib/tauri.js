@@ -107,7 +107,8 @@ import {
   mockAccountsReceivable,
   formatMockAccountReceivable,
   mockCustomerReceipts,
-  mockCustomerReceiptAllocations
+  mockCustomerReceiptAllocations,
+  reset_mock_accounts_receivable
 } from './accountsReceivable/mocks.js';
 import {
   customerInvoiceMocks,
@@ -215,6 +216,7 @@ export {
   formatMockAccountReceivable,
   mockCustomerReceipts,
   mockCustomerReceiptAllocations,
+  reset_mock_accounts_receivable,
   customerInvoiceMocks,
   mockCustomerInvoices,
   mockCustomerInvoiceOrders,

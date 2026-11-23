@@ -206,31 +206,20 @@ export {
 } from './accountsPayable/store.js';
 
 export {
-  fetchQuotes,
-  fetchQuoteDetail,
-  getQuoteDetailReadOnly,
-  fetchPendingApprovalQuotes,
-  createQuoteAction,
-  updateQuoteHeaderAction,
-  addQuoteLineAction,
-  updateQuoteLineAction,
-  deleteQuoteLineAction,
-  submitQuoteAction,
-  withdrawQuoteApprovalAction,
-  approveQuoteAction,
-  rejectQuoteAction,
-  declineQuoteAction,
-  cancelQuoteAction,
-  convertQuoteAction,
-  selectQuote
+  queryAccountsReceivableAction, loadAccountsReceivableAction, getAccountReceivableAction,
+  loadReceivablesAgingAction
+} from './accountsReceivable/store.js';
+
+export {
+  fetchQuotes, fetchQuoteDetail, getQuoteDetailReadOnly, fetchPendingApprovalQuotes,
+  createQuoteAction, updateQuoteHeaderAction, addQuoteLineAction, updateQuoteLineAction,
+  deleteQuoteLineAction, submitQuoteAction, withdrawQuoteApprovalAction, approveQuoteAction,
+  rejectQuoteAction, declineQuoteAction, cancelQuoteAction, convertQuoteAction, selectQuote
 } from './quotes/store.js';
 
 export {
-  selectSalesOrder,
-  fetchSalesOrders,
-  fetchSalesOrderDetail,
-  shipSalesOrderAction,
-  cancelSalesOrderAction
+  selectSalesOrder, fetchSalesOrders, fetchSalesOrderDetail,
+  shipSalesOrderAction, cancelSalesOrderAction
 } from './salesOrders/store.js';
 
 import {
@@ -583,6 +572,14 @@ export const appState = $state({
   /** @type {any | null} */
   payablesAgingReport: null,
 
+  // Accounts Receivable cache (Issue #222, #228)
+  /** @type {any[]} */
+  accountsReceivable: [],
+  /** @type {any | null} */
+  currentAccountReceivableDetail: null,
+  /** @type {any | null} */
+  receivablesAgingReport: null,
+
   // Customer Receipts cache (Issue #227)
   /** @type {any[]} */
   customerReceipts: [],
@@ -711,6 +708,7 @@ export function getWorkspaceLabel(workspace) {
   if (ws === 'inventory') return '庫存查詢';
   if (ws === 'warehouses' || ws === 'warehouse') return '倉庫管理';
   if (ws === 'accounts-payable') return '應付帳款';
+  if (ws === 'accounts-receivable' || ws === 'ar') return '應收帳款';
   if (ws === 'vendor-bills' || ws === 'bills') return '請款單';
   if (ws === 'quotes' || ws === 'quote') return '報價單';
   if (ws === 'sales-orders' || ws === 'sales-order') return '銷售單';

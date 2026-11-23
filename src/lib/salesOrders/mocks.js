@@ -142,15 +142,26 @@ export function resetMockSalesOrders(tenantId) {
     const removedShipmentIds = new Set(
       mockSalesShipments.filter(s => removedIds.has(s.sales_order_id)).map(s => s.id)
     );
-    mockSalesOrders = mockSalesOrders.filter(o => (o.tenant_id || 'tnt_mock_1') !== tenantId);
-    mockSalesOrderLines = mockSalesOrderLines.filter(l => !removedIds.has(l.sales_order_id));
-    mockSalesShipments = mockSalesShipments.filter(s => !removedIds.has(s.sales_order_id));
-    mockSalesShipmentLines = mockSalesShipmentLines.filter(sl => !removedShipmentIds.has(sl.shipment_id));
+    const keptOrders = mockSalesOrders.filter(o => (o.tenant_id || 'tnt_mock_1') !== tenantId);
+    mockSalesOrders.length = 0;
+    mockSalesOrders.push(...keptOrders);
+
+    const keptLines = mockSalesOrderLines.filter(l => !removedIds.has(l.sales_order_id));
+    mockSalesOrderLines.length = 0;
+    mockSalesOrderLines.push(...keptLines);
+
+    const keptShipments = mockSalesShipments.filter(s => !removedIds.has(s.sales_order_id));
+    mockSalesShipments.length = 0;
+    mockSalesShipments.push(...keptShipments);
+
+    const keptShipmentLines = mockSalesShipmentLines.filter(sl => !removedShipmentIds.has(sl.shipment_id));
+    mockSalesShipmentLines.length = 0;
+    mockSalesShipmentLines.push(...keptShipmentLines);
   } else {
-    mockSalesOrders = [];
-    mockSalesOrderLines = [];
-    mockSalesShipments = [];
-    mockSalesShipmentLines = [];
+    mockSalesOrders.length = 0;
+    mockSalesOrderLines.length = 0;
+    mockSalesShipments.length = 0;
+    mockSalesShipmentLines.length = 0;
   }
   saveStorage('agent_erp_mock_sales_orders', mockSalesOrders);
   saveStorage('agent_erp_mock_sales_order_lines', mockSalesOrderLines);

@@ -124,7 +124,7 @@ export const openingReceivableMocks = {
     }, 0);
     const openingNumber = `OAR-${String(maxSeq + 1).padStart(5, '0')}`;
     const now = Math.floor(Date.now() / 1000);
-    const oarId = `oar_${now}_${Math.floor(Math.random() * 1000)}`;
+    const oarId = `oar_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
 
     const oar = {
       id: oarId,
@@ -145,7 +145,7 @@ export const openingReceivableMocks = {
       void_reason: null
     };
 
-    const arId = `ar_oar_${now}_${Math.floor(Math.random() * 1000)}`;
+    const arId = `ar_oar_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
     const ar = {
       id: arId,
       tenant_id: targetTenantId,
