@@ -707,6 +707,146 @@ export const warehouseMocks = {
       .sort((a, b) => b.created_at - a.created_at || b.conversion_number.localeCompare(a.conversion_number));
   },
 
+  get_inventory_valuation: async (args) => {
+    const { warehouse_id, warehouseId } = args || {};
+    const targetTenantId = resolveMockActiveTenantId();
+    if (!targetTenantId || !targetTenantId.trim()) {
+      throw new Error('租戶 ID 不能為空');
+    }
+    const rawWhId = warehouse_id !== undefined ? warehouse_id : warehouseId;
+    const targetWhId = (rawWhId !== undefined && rawWhId !== null && String(rawWhId).trim() !== '') ? String(rawWhId).trim() : null;
+
+    const tenantWhs = mockWarehouses.filter(w => (w.tenant_id || 'tnt_mock_1') === targetTenantId);
+    const tenantProducts = mockProducts.filter(p => (p.tenant_id || 'tnt_mock_1') === targetTenantId);
+    const prodIds = new Set(tenantProducts.map(p => p.id));
+    const tenantVariants = mockProductVariants.filter(v => prodIds.has(v.product_id));
+    const varIds = new Set(tenantVariants.map(v => v.id));
+    const tenantUnits = mockProductUnits.filter(u => varIds.has(u.variant_id));
+
+    // Find all movements for tenant
+    let movements = mockInventoryMovements.filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId);
+    if (targetWhId) {
+      movements = movements.filter(m => m.warehouse_id === targetWhId);
+    }
+
+    // Group movements by (unit_id, warehouse_id)
+    const groups = new Map();
+    for (const m of movements) {
+      const wid = m.warehouse_id || '';
+      const key = `${m.unit_id}:::${wid}`;
+      if (!groups.has(key)) {
+        groups.set(key, { unit_id: m.unit_id, warehouse_id: wid, qty: 0 });
+      }
+      groups.get(key).qty += Number(m.quantity_delta || 0);
+    }
+
+    const items = [];
+    let grand_total_quantity = 0;
+    let grand_total_cost = 0;
+    const subtotalMap = new Map();
+
+    for (const [key, group] of groups.entries()) {
+      if (Math.abs(group.qty) <= 1e-9) {
+        continue;
+      }
+      const unit = tenantUnits.find(u => u.id === group.unit_id);
+      const variant = unit ? tenantVariants.find(v => v.id === unit.variant_id) : null;
+      const product = variant ? tenantProducts.find(p => p.id === variant.product_id) : null;
+      const wh = tenantWhs.find(w => w.id === group.warehouse_id);
+
+      const whName = wh ? wh.name : '未指定倉庫';
+      const whCode = wh ? wh.code : '';
+      const prodName = product ? product.name : '未知商品';
+
+      if (group.qty < 0) {
+        throw new Error(`品項【${prodName}】在倉庫【${whName}】庫存數量為負數 (${group.qty.toFixed(2)})，存在未進貨即出貨之異常，成本為 0，無法計算庫存價值`);
+      }
+
+      // Compute weighted average cost for (unit_id, warehouse_id)
+      const unitMovements = mockInventoryMovements
+        .filter(m => (m.tenant_id || 'tnt_mock_1') === targetTenantId && m.unit_id === group.unit_id && (m.warehouse_id || '') === group.warehouse_id)
+        .sort((a, b) => (a.created_at || 0) - (b.created_at || 0) || (a.id > b.id ? 1 : -1));
+
+      let totalQty = 0;
+      let totalCost = 0;
+      for (const um of unitMovements) {
+        const delta = Number(um.quantity_delta || 0);
+        if (delta > 0) {
+          const cost = um.unit_cost !== null && um.unit_cost !== undefined ? Number(um.unit_cost) : null;
+          if (cost !== null) {
+            if (totalQty < 0) {
+              const newQty = totalQty + delta;
+              if (newQty > 0) {
+                totalQty = newQty;
+                totalCost = newQty * cost;
+              } else {
+                totalQty = newQty;
+                totalCost = 0;
+              }
+            } else {
+              totalCost += delta * cost;
+              totalQty += delta;
+            }
+          }
+        } else if (delta < 0) {
+          const runningAvg = (totalQty > 1e-9 && totalCost > 0) ? (totalCost / totalQty) : 0;
+          const deductQty = Math.min(Math.abs(delta), Math.max(0, totalQty));
+          totalCost -= deductQty * runningAvg;
+          totalQty -= Math.abs(delta);
+          if (totalQty <= 1e-9 || totalCost <= 1e-9) {
+            totalCost = 0;
+          }
+        }
+      }
+
+      const unit_cost = (totalQty > 1e-9 && totalCost > 0) ? (totalCost / totalQty) : 0;
+      const subtotal_cost = Math.max(0, group.qty * unit_cost);
+
+      grand_total_quantity += group.qty;
+      grand_total_cost += subtotal_cost;
+
+      if (!subtotalMap.has(group.warehouse_id)) {
+        subtotalMap.set(group.warehouse_id, {
+          warehouse_id: group.warehouse_id,
+          warehouse_code: whCode,
+          warehouse_name: whName,
+          total_quantity: 0,
+          total_cost: 0,
+        });
+      }
+      const st = subtotalMap.get(group.warehouse_id);
+      st.total_quantity += group.qty;
+      st.total_cost += subtotal_cost;
+
+      items.push({
+        warehouse_id: group.warehouse_id,
+        warehouse_code: whCode,
+        warehouse_name: whName,
+        product_id: product ? product.id : '',
+        product_name: prodName,
+        variant_id: variant ? variant.id : '',
+        variant_name: variant ? variant.name : '',
+        sku: variant ? variant.sku || null : null,
+        unit_id: group.unit_id,
+        unit_name: unit ? unit.unit_name : '',
+        current_quantity: group.qty,
+        unit_cost,
+        subtotal_cost,
+      });
+    }
+
+    items.sort((a, b) => (a.warehouse_code || '').localeCompare(b.warehouse_code || '') || (a.product_name || '').localeCompare(b.product_name || ''));
+
+    const warehouse_subtotals = Array.from(subtotalMap.values());
+
+    return {
+      items,
+      warehouse_subtotals,
+      grand_total_quantity,
+      grand_total_cost,
+    };
+  },
+
   reset_mock_unit_conversions: async (args) => {
     const { tenant_id, tenantId } = args || {};
     const targetTid = tenant_id || tenantId;

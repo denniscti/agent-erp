@@ -70,12 +70,13 @@
     selectUnitConversion,
     createUnitConversionAction,
     postUnitConversionAction,
-    cancelUnitConversionAction
+    cancelUnitConversionAction,
+    loadInventoryValuationAction
   } from '../store.svelte.js';
 
   let { initialSubTab = 'inventory' } = $props();
 
-  // Subtabs: 'inventory' | 'warehouses' | 'adjustments' | 'stocktakes' | 'transfers' | 'conversions'
+  // Subtabs: 'inventory' | 'warehouses' | 'adjustments' | 'stocktakes' | 'transfers' | 'conversions' | 'valuation'
   let activeSubTab = $state(initialSubTab);
 
   // Loading and error states
@@ -86,6 +87,11 @@
 
   // Warehouse filter for inventory query
   let selectedWarehouseId = $state('');
+
+  // Inventory Valuation State (Issue #283)
+  let valuationLoading = $state(false);
+  let valuationError = $state('');
+  let selectedValuationWhFilter = $state('');
 
   // Unit Conversions State (Issue #230)
   let conversionLoading = $state(false);
@@ -362,9 +368,12 @@
       if (!selectedConversionId && (!appState.unitConversions || appState.unitConversions.length === 0)) {
         loadConversions();
       }
+    } else if (route.includes('/warehouses/valuation')) {
+      activeSubTab = 'valuation';
+      loadValuation();
     } else if (route.startsWith('/app/warehouses')) {
       // Default to inventory view if just /app/warehouses
-      if (activeSubTab !== 'warehouses' && activeSubTab !== 'adjustments' && activeSubTab !== 'stocktakes' && activeSubTab !== 'transfers' && activeSubTab !== 'conversions') {
+      if (activeSubTab !== 'warehouses' && activeSubTab !== 'adjustments' && activeSubTab !== 'stocktakes' && activeSubTab !== 'transfers' && activeSubTab !== 'conversions' && activeSubTab !== 'valuation') {
         activeSubTab = 'inventory';
       }
     }
@@ -458,7 +467,26 @@
       navigate('/app/warehouses/conversions');
       selectUnitConversion(null);
       loadConversions();
+    } else if (tab === 'valuation') {
+      navigate('/app/warehouses/valuation');
+      loadValuation();
     }
+  }
+
+  async function loadValuation() {
+    valuationLoading = true;
+    valuationError = '';
+    try {
+      await loadInventoryValuationAction(selectedValuationWhFilter || null);
+    } catch (err) {
+      valuationError = err?.message || '載入庫存評價報表失敗';
+    } finally {
+      valuationLoading = false;
+    }
+  }
+
+  async function handleValuationFilterChange() {
+    await loadValuation();
   }
 
   async function handleWarehouseFilterChange() {
@@ -1924,6 +1952,21 @@
             <path d="m15 9 6-6"></path>
           </svg>
           單位轉換
+        </button>
+
+        <button
+          class="subtab-btn {activeSubTab === 'valuation' ? 'active' : ''}"
+          onclick={() => handleTabSwitch('valuation')}
+          id="tab-btn-valuation"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="1" x2="12" y2="23"></line>
+            <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+          </svg>
+          庫存價值
+          {#if (appState.inventoryValuationReport?.items || []).length > 0}
+            <span class="subtab-count">{(appState.inventoryValuationReport?.items || []).length}</span>
+          {/if}
         </button>
       </nav>
 
@@ -3911,6 +3954,136 @@
           {/if}
         </div>
       {/if}
+    {:else if activeSubTab === 'valuation'}
+      <!-- Inventory Valuation Report View (Issue #283) -->
+      <div class="valuation-view">
+        <!-- Filter and Action Bar -->
+        <div class="filter-bar glass-panel" style="margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; flex-wrap: wrap; gap: 10px;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <label for="valuation-warehouse-filter" style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">倉庫維度：</label>
+            <select
+              id="valuation-warehouse-filter"
+              bind:value={selectedValuationWhFilter}
+              onchange={handleValuationFilterChange}
+              class="form-select"
+              style="width: 220px; padding: 6px 10px; font-size: 0.85rem;"
+            >
+              <option value="">全部倉庫 (合計總額)</option>
+              {#each appState.warehouses as wh}
+                <option value={wh.id}>{wh.name} ({wh.code}){wh.is_default ? ' ★ 預設' : ''}{!wh.is_active ? ' (停用)' : ''}</option>
+              {/each}
+            </select>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button
+              class="btn btn-secondary btn-sm"
+              onclick={loadValuation}
+              disabled={valuationLoading}
+              id="btn-refresh-valuation"
+            >
+              {#if valuationLoading}載入中...{:else}↻ 重新計算庫存價值{/if}
+            </button>
+          </div>
+        </div>
+
+        {#if valuationError}
+          <div class="alert alert-error" style="margin-bottom: 12px; padding: 10px 14px; border-radius: 6px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; color: #fca5a5;">
+            ⚠️ {valuationError}
+          </div>
+        {/if}
+
+        <!-- Warehouse Subtotals Chips (when all warehouses selected) -->
+        {#if !selectedValuationWhFilter && (appState.inventoryValuationReport?.warehouse_subtotals || []).length > 0}
+          <div class="glass-panel" style="margin-bottom: 12px; padding: 12px 16px;">
+            <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">
+              🏬 各分倉估值小計
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+              {#each appState.inventoryValuationReport.warehouse_subtotals as sub}
+                <div class="warehouse-dist-chip" style="display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border-color);">
+                  <span style="font-weight: 600; color: var(--text-primary); font-size: 0.85rem;">{sub.warehouse_name}</span>
+                  {#if sub.warehouse_code}
+                    <span class="badge badge-slate" style="font-size: 0.7rem; font-family: monospace;">{sub.warehouse_code}</span>
+                  {/if}
+                  <span style="font-size: 0.82rem; color: var(--text-muted); margin-left: 4px;">數量：{sub.total_quantity}</span>
+                  <span class="font-bold text-emerald" style="font-size: 0.88rem; margin-left: 6px;">
+                    {formatCurrency(sub.total_cost)}
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <!-- Valuation Data Table -->
+        {#if (appState.inventoryValuationReport?.items || []).length === 0}
+          <div class="empty-state-panel glass-panel" id="zero-valuation-empty-state" style="padding: 32px 20px; text-align: center;">
+            <h4 style="color: var(--text-secondary); margin-bottom: 8px;">目前無任何庫存餘額或評價資料</h4>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">
+              {#if selectedValuationWhFilter}
+                此倉庫目前無任何有效庫存餘額。
+              {:else}
+                全體倉庫目前無任何庫存餘額。當有採購入庫或開帳紀錄時，將在此依當下加權平均成本即時呈現庫存資產價值。
+              {/if}
+            </p>
+          </div>
+        {:else}
+          <div class="table-container glass-panel">
+            <div class="table-responsive">
+              <table class="data-table" id="table-inventory-valuation">
+                <thead>
+                  <tr>
+                    {#if !selectedValuationWhFilter}
+                      <th>倉庫</th>
+                    {/if}
+                    <th>商品名稱</th>
+                    <th>規格/變體</th>
+                    <th>單位</th>
+                    <th class="text-right">即時庫存量</th>
+                    <th class="text-right">加權平均成本</th>
+                    <th class="text-right">庫存價值小計</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each appState.inventoryValuationReport.items as item}
+                    <tr>
+                      {#if !selectedValuationWhFilter}
+                        <td>🏢 {item.warehouse_name}</td>
+                      {/if}
+                      <td class="font-bold">{item.product_name}</td>
+                      <td>{item.variant_name || '-'}</td>
+                      <td><span class="unit-tag">{item.unit_name}</span></td>
+                      <td class="text-right font-bold qty-col {item.current_quantity > 0 ? 'text-emerald' : 'text-muted'}">
+                        {item.current_quantity}
+                      </td>
+                      <td class="text-right" style="font-family: monospace;">
+                        {formatCurrency(item.unit_cost)}
+                      </td>
+                      <td class="text-right font-bold text-emerald" style="font-family: monospace;">
+                        {formatCurrency(item.subtotal_cost)}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+                <tfoot>
+                  <tr style="border-top: 2px solid var(--border-color); background: rgba(255, 255, 255, 0.03); font-weight: bold;">
+                    <td colspan={!selectedValuationWhFilter ? 4 : 3} style="text-align: right; font-size: 0.95rem;">
+                      全表總計（Grand Total）：
+                    </td>
+                    <td class="text-right text-emerald" style="font-size: 0.95rem;" id="valuation-grand-total-qty">
+                      {appState.inventoryValuationReport?.grand_total_quantity || 0}
+                    </td>
+                    <td class="text-right text-muted" style="font-size: 0.85rem;">-</td>
+                    <td class="text-right text-emerald" style="font-size: 1.05rem; font-family: monospace;" id="valuation-grand-total-cost">
+                      {formatCurrency(appState.inventoryValuationReport?.grand_total_cost || 0)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        {/if}
+      </div>
     {/if}
   </div>
 </div>

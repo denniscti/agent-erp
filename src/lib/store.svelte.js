@@ -105,9 +105,7 @@ export {
   fetchUnitConversions,
   fetchUnitConversionDetail,
   selectUnitConversion,
-  createUnitConversionAction,
-  postUnitConversionAction,
-  cancelUnitConversionAction
+  createUnitConversionAction, postUnitConversionAction, cancelUnitConversionAction, loadInventoryValuationAction
 } from './warehouses/store.js';
 
 export {
@@ -494,6 +492,8 @@ export const appState = $state({
   inventoryLevels: [],
   /** @type {any[]} */
   inventoryMovements: [],
+  /** @type {{ items: any[], warehouse_subtotals: any[], grand_total_quantity: number, grand_total_cost: number }} */
+  inventoryValuationReport: { items: [], warehouse_subtotals: [], grand_total_quantity: 0, grand_total_cost: 0 },
 
   // Inventory Adjustments cache (Issue #180, #183)
   /** @type {any[]} */
@@ -1688,5 +1688,3 @@ export async function navigateToTask(taskId) {
   }
   navigate('/app/agent');
 }
-
-

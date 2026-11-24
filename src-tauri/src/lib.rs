@@ -596,6 +596,7 @@ pub fn run() {
             inventory_adjustments::list_inventory_adjustments,
             inventory_costing::backfill_sales_shipment_unit_cost,
             inventory_costing::get_weighted_average_cost,
+            inventory_costing::get_inventory_valuation,
             stocktakes::create_stocktake,
             stocktakes::update_stocktake_header,
             stocktakes::add_stocktake_lines,

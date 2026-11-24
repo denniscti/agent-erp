@@ -486,3 +486,29 @@ export async function cancelUnitConversionAction(conversionId) {
   }
 }
 
+/**
+ * Load current inventory valuation report
+ * @param {string | null} [warehouseId]
+ * @returns {Promise<{ items: any[], warehouse_subtotals: any[], grand_total_quantity: number, grand_total_cost: number }>}
+ */
+export async function loadInventoryValuationAction(warehouseId = null) {
+  try {
+    const payload = {};
+    if (warehouseId) {
+      payload.warehouse_id = warehouseId;
+      payload.warehouseId = warehouseId;
+    }
+    const report = await invoke('get_inventory_valuation', payload);
+    appState.inventoryValuationReport = report || {
+      items: [],
+      warehouse_subtotals: [],
+      grand_total_quantity: 0,
+      grand_total_cost: 0,
+    };
+    return appState.inventoryValuationReport;
+  } catch (err) {
+    console.error("Failed to load inventory valuation report:", err);
+    throw err;
+  }
+}
+
