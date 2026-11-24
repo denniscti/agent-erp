@@ -27,11 +27,11 @@ import warehousesManifest from './warehouses/manifest.json';
  */
 export const DOMAIN_MANIFESTS = [
   purchaseOrdersManifest,
+  vendorBillsManifest,
+  warehousesManifest,
+  accountsPayableManifest,
   quotesManifest,
   salesOrdersManifest,
-  vendorBillsManifest,
-  accountsPayableManifest,
-  warehousesManifest,
   inventoryAdjustmentsManifest,
   stocktakesManifest,
   stockTransfersManifest,
@@ -108,7 +108,7 @@ const CORE_ROUTES = [
     component: DOMAIN_LOADERS.agent,
     label: 'AI 助理對話',
     aliases: ['agent', '/agent'],
-    icon: 'message-square',
+    icon: 'agent',
     topLevelNav: true
   },
   {
@@ -118,7 +118,7 @@ const CORE_ROUTES = [
     label: '系統設定',
     aliases: ['settings', '/settings'],
     icon: 'settings',
-    topLevelNav: true
+    topLevelNav: false
   }
 ];
 
@@ -157,10 +157,21 @@ const ADDITIONAL_ROUTES = [
     aliases: ['opening-receivables', 'openingReceivables', '/app/openingReceivables']
   },
   {
+    id: 'customer-invoices',
+    path: '/app/customer-invoices',
+    component: DOMAIN_LOADERS.customerInvoices,
+    label: '銷項發票',
+    icon: 'file-check',
+    topLevelNav: true,
+    aliases: ['customer-invoices', 'customer-invoice', 'invoices', 'sales-invoices', '/app/invoices', '/app/customer-invoice']
+  },
+  {
     id: 'accounts-receivable',
     path: '/app/accounts-receivable',
     component: DOMAIN_LOADERS.accountsReceivable,
     label: '應收帳款',
+    icon: 'clock',
+    topLevelNav: true,
     aliases: ['accounts-receivable', 'ar', '/app/ar']
   },
   {
@@ -168,20 +179,17 @@ const ADDITIONAL_ROUTES = [
     path: '/app/customer-credit',
     component: DOMAIN_LOADERS.customerCredit,
     label: '客戶信用',
+    icon: 'shield-check',
+    topLevelNav: true,
     aliases: ['customer-credit', 'customer-credits', '/app/customer-credits']
-  },
-  {
-    id: 'customer-invoices',
-    path: '/app/customer-invoices',
-    component: DOMAIN_LOADERS.customerInvoices,
-    label: '銷項發票',
-    aliases: ['customer-invoices', 'customer-invoice', 'invoices', 'sales-invoices', '/app/invoices', '/app/customer-invoice']
   },
   {
     id: 'customer-receipts',
     path: '/app/customer-receipts',
     component: DOMAIN_LOADERS.customerReceipts,
-    label: '收款單',
+    label: '客戶收款單',
+    icon: 'receipt-card',
+    topLevelNav: true,
     aliases: ['customer-receipts', 'customerReceipts', 'receipts', '/app/customerReceipts', '/app/receipts']
   }
 ];
@@ -323,3 +331,74 @@ export function getWorkspaceRoutePath(ws) {
   const route = getRoute(ws);
   return route.path;
 }
+
+/**
+ * Resolves top-level navigation items driven by domain manifests and core routes.
+ * Supports passing custom manifests for test injection.
+ * @param {Array<any>} [manifests=DOMAIN_MANIFESTS]
+ * @returns {RouteDefinition[]}
+ */
+export function getTopLevelNavRoutes(manifests = DOMAIN_MANIFESTS) {
+  const safeManifests = Array.isArray(manifests) ? manifests : DOMAIN_MANIFESTS;
+
+  const domainNavs = safeManifests
+    .filter(m => m && typeof m === 'object' && m.topLevelNav)
+    .map(manifest => {
+      const primaryId = (Array.isArray(manifest.aliases) && manifest.aliases[0]) || manifest.id;
+      const loader = DOMAIN_LOADERS[manifest.id] || DOMAIN_LOADERS[primaryId] || DOMAIN_LOADERS.settings;
+      return {
+        id: primaryId,
+        domainId: manifest.id,
+        path: manifest.route,
+        component: loader,
+        label: manifest.label,
+        icon: manifest.icon,
+        topLevelNav: manifest.topLevelNav,
+        aliases: Array.isArray(manifest.aliases) ? manifest.aliases : [],
+        manifest
+      };
+    });
+
+  const coreNavs = CORE_ROUTES.filter(r => r.topLevelNav);
+  const additionalNavs = ADDITIONAL_ROUTES.filter(r => r.topLevelNav);
+  return [...coreNavs, ...domainNavs, ...additionalNavs];
+}
+
+/**
+ * Pre-resolved static list of default top-level navigation routes.
+ * @type {RouteDefinition[]}
+ */
+export const TOP_LEVEL_NAV_ROUTES = getTopLevelNavRoutes();
+
+/**
+ * Checks whether a navigation item is active based on current workspace or route path.
+ * Matches by item.id, item.domainId, item.path, or any alias defined in item.aliases.
+ * @param {RouteDefinition | Object} item
+ * @param {string | null | undefined} currentWs
+ * @param {string | null | undefined} [currentRoute]
+ * @returns {boolean}
+ */
+export function isNavActive(item, currentWs, currentRoute) {
+  if (!item || typeof item !== 'object') return false;
+  const cleanWs = typeof currentWs === 'string' ? currentWs.trim() : '';
+  const cleanRoute = typeof currentRoute === 'string' ? currentRoute.trim().replace(/^#/, '') : '';
+
+  if (cleanWs) {
+    if (item.id === cleanWs || item.domainId === cleanWs) return true;
+    if (Array.isArray(item.aliases)) {
+      if (item.aliases.some(a => typeof a === 'string' && a.trim() === cleanWs)) return true;
+    }
+  }
+
+  if (cleanRoute) {
+    if (item.path === cleanRoute) return true;
+    if (Array.isArray(item.aliases)) {
+      if (item.aliases.some(a => typeof a === 'string' && a.trim() === cleanRoute)) return true;
+    }
+    // Match /app/xxx prefix for sub-routes
+    if (item.path && cleanRoute.startsWith(item.path + '/')) return true;
+  }
+
+  return false;
+}
+

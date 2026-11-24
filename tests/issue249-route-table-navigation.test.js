@@ -505,19 +505,20 @@ test('TC-RT-INT-04: SettingsWorkspace imports logoutAction and simulateTokenExpi
   assert.match(settingsContent, /onclick=\{simulateTokenExpiry\}/, 'Workspace.svelte must bind onclick to simulateTokenExpiry');
 });
 
-test('TC-RT-INT-05: App.svelte vendor bills rail nav icon has valid SVG path syntax', () => {
-  // Given: src/App.svelte source code
-  const appContent = fs.readFileSync(appPath, 'utf-8');
+test('TC-RT-INT-05: App.svelte / Icon.svelte vendor bills rail nav icon has valid SVG path syntax', () => {
+  // Given: src/App.svelte or src/lib/components/Icon.svelte source code
+  const iconPath = path.join(rootDir, 'src/lib/components/Icon.svelte');
+  const targetContent = fs.existsSync(iconPath) ? fs.readFileSync(iconPath, 'utf-8') : fs.readFileSync(appPath, 'utf-8');
 
   // When:  Inspecting vendor bills icon SVG markup
   // Then:  Must contain valid arc sweep-flag syntax `0 0 0 2-2V8z`
   assert.match(
-    appContent,
+    targetContent,
     /<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"><\/path>/,
     'Vendor bills icon path must contain valid arc with sweep-flag 0'
   );
   assert.doesNotMatch(
-    appContent,
+    targetContent,
     /h12a2 2 0 0 2-2V8z/,
     'Must not contain corrupted arc syntax without sweep-flag'
   );
