@@ -1268,6 +1268,15 @@ pub fn ship_sales_order_with_note_impl(
             ],
         )?;
 
+        let unit_cost = crate::inventory_costing::calculate_weighted_average_cost(
+            &tx,
+            tid,
+            &item.line.unit_id,
+            &warehouse.id,
+            Some(now),
+        )
+        .map_err(SalesOrderError::DatabaseError)?;
+
         let mov_id = format!(
             "mov_so_{}_{}",
             now,
@@ -1277,13 +1286,14 @@ pub fn ship_sales_order_with_note_impl(
             "INSERT INTO inventory_movements (
                 id, tenant_id, unit_id, warehouse_id, quantity_delta, unit_cost,
                 reason, reference_type, reference_id, created_by, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'sales_shipment', 'sales_order', ?6, ?7, ?8)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'sales_shipment', 'sales_order', ?7, ?8, ?9)",
             params![
                 mov_id,
                 tid,
                 item.line.unit_id,
                 warehouse.id,
                 -item.actual_qty,
+                unit_cost,
                 trimmed_order_id,
                 trimmed_uid,
                 now,
@@ -1862,7 +1872,7 @@ mod tests {
         )
         .unwrap();
 
-        // Then: Status is shipped, ship_date defaulted to today, stock deducted by 10, movement recorded with unit_cost=NULL
+        // Then: Status is shipped, ship_date defaulted to today, stock deducted by 10, movement recorded with weighted average unit_cost
         assert_eq!(shipped.order.status, "shipped");
         assert_eq!(shipped.order.ship_date.as_deref(), Some("2026-11-11"));
         assert_eq!(shipped.order.shipped_by.as_deref(), Some("usr_wh"));
@@ -1895,7 +1905,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(delta, -10.0);
-        assert_eq!(unit_cost, None);
+        assert_eq!(unit_cost, Some(50.0));
         assert_eq!(reason, "sales_shipment");
         assert_eq!(ref_type, "sales_order");
         assert_eq!(ref_id, so.order.id);

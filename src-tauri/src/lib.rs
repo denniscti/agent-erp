@@ -12,6 +12,7 @@ pub mod customer_invoices;
 pub mod customer_receipts;
 pub mod departments;
 pub mod inventory_adjustments;
+pub mod inventory_costing;
 pub mod llm;
 pub mod llm_traces;
 pub mod opening_payables;
@@ -593,6 +594,8 @@ pub fn run() {
             inventory_adjustments::cancel_inventory_adjustment,
             inventory_adjustments::get_inventory_adjustment,
             inventory_adjustments::list_inventory_adjustments,
+            inventory_costing::backfill_sales_shipment_unit_cost,
+            inventory_costing::get_weighted_average_cost,
             stocktakes::create_stocktake,
             stocktakes::update_stocktake_header,
             stocktakes::add_stocktake_lines,
