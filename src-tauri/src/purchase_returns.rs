@@ -1,4 +1,4 @@
-ㄔuse rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1115,14 +1115,17 @@ pub fn list_purchase_returns_impl(
     conn: &Connection,
     tenant_id: &str,
     filter: ListPurchaseReturnsFilter,
-) -> Result<Vec<PurchaseReturnDetail>, PurchaseReturnError> {
+) -> Result<Vec<PurchaseReturn>, PurchaseReturnError> {
     let tid = tenant_id.trim();
     if tid.is_empty() {
         return Err(PurchaseReturnError::EmptyTenantId);
     }
 
     let mut sql = String::from(
-        "SELECT id
+        "SELECT id, tenant_id, return_number, purchase_order_id, vendor_bill_id,
+                account_payable_id, return_date, reason_code, status, total_amount,
+                note, created_by, created_at, posted_by, posted_at, voided_by,
+                voided_at, void_reason
          FROM purchase_returns
          WHERE tenant_id = ?1",
     );
@@ -1161,14 +1164,32 @@ pub fn list_purchase_returns_impl(
         params_vec.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
 
-    let id_rows = stmt.query_map(params_slice.as_slice(), |r| r.get::<_, String>(0))?;
+    let rows = stmt.query_map(params_slice.as_slice(), |r| {
+        Ok(PurchaseReturn {
+            id: r.get(0)?,
+            tenant_id: r.get(1)?,
+            return_number: r.get(2)?,
+            purchase_order_id: r.get(3)?,
+            vendor_bill_id: r.get(4)?,
+            account_payable_id: r.get(5)?,
+            return_date: r.get(6)?,
+            reason_code: r.get(7)?,
+            status: r.get(8)?,
+            total_amount: r.get(9)?,
+            note: r.get(10)?,
+            created_by: r.get(11)?,
+            created_at: r.get(12)?,
+            posted_by: r.get(13)?,
+            posted_at: r.get(14)?,
+            voided_by: r.get(15)?,
+            voided_at: r.get(16)?,
+            void_reason: r.get(17)?,
+        })
+    })?;
 
     let mut results = Vec::new();
-    for id_res in id_rows {
-        let id = id_res?;
-        if let Ok(detail) = get_purchase_return_impl(conn, tid, &id) {
-            results.push(detail);
-        }
+    for row in rows {
+        results.push(row?);
     }
 
     Ok(results)
@@ -1179,7 +1200,6 @@ pub fn list_purchase_returns_impl(
 // ==========================================
 
 #[tauri::command]
-#[specta::specta]
 pub fn create_purchase_return(
     app_handle: tauri::AppHandle,
     input: CreatePurchaseReturnInput,
@@ -1193,7 +1213,6 @@ pub fn create_purchase_return(
 }
 
 #[tauri::command]
-#[specta::specta]
 pub fn update_purchase_return(
     app_handle: tauri::AppHandle,
     input: UpdatePurchaseReturnInput,
@@ -1205,7 +1224,6 @@ pub fn update_purchase_return(
 }
 
 #[tauri::command]
-#[specta::specta]
 pub fn post_purchase_return(
     app_handle: tauri::AppHandle,
     id: String,
@@ -1218,7 +1236,6 @@ pub fn post_purchase_return(
 }
 
 #[tauri::command]
-#[specta::specta]
 pub fn void_purchase_return(
     app_handle: tauri::AppHandle,
     id: String,
@@ -1233,7 +1250,6 @@ pub fn void_purchase_return(
 }
 
 #[tauri::command]
-#[specta::specta]
 pub fn get_purchase_return(
     app_handle: tauri::AppHandle,
     id: String,
@@ -1245,11 +1261,10 @@ pub fn get_purchase_return(
 }
 
 #[tauri::command]
-#[specta::specta]
 pub fn list_purchase_returns(
     app_handle: tauri::AppHandle,
     filter: ListPurchaseReturnsFilter,
-) -> Result<Vec<PurchaseReturnDetail>, String> {
+) -> Result<Vec<PurchaseReturn>, String> {
     let db_path = crate::get_db_path(&app_handle);
     let conn = Connection::open(&db_path).map_err(|e| format!("DB Open Error: {}", e))?;
     let active_tid = crate::resolve_active_tenant_id(&conn)?;
@@ -2404,6 +2419,6 @@ mod tests {
         // And: Querying with tnt_test returns 1 item
         let list_test = list_purchase_returns_impl(&conn, "tnt_test", ListPurchaseReturnsFilter::default()).unwrap();
         assert_eq!(list_test.len(), 1);
-        assert_eq!(list_test[0].return_record.id, detail.return_record.id);
+        assert_eq!(list_test[0].id, detail.return_record.id);
     }
 }
