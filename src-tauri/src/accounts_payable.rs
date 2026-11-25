@@ -70,6 +70,9 @@ pub enum AccountsPayableError {
     #[error("此應付已有付款核銷：{0}，請先作廢付款單")]
     HasPostedPaymentAllocations(String),
 
+    #[error("此應付已有採購退貨單：{0}，請先作廢退回單")]
+    HasPostedReturns(String),
+
     #[error("原因必填")]
     VoidReasonRequired,
 
@@ -508,22 +511,35 @@ fn resolve_vendor_snapshot(
     }
 }
 
+fn table_exists(conn: &rusqlite::Connection, table_name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1",
+        rusqlite::params![table_name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 pub fn calculate_derived_amounts(
     status: &str,
     total_amount: f64,
     raw_paid_amount: f64,
+    raw_return_amount: f64,
 ) -> (f64, f64, SettlementStatus) {
     let rounded_total = round_2(total_amount);
     let rounded_paid = round_2(raw_paid_amount);
+    let rounded_return = round_2(raw_return_amount);
 
     if status == "voided" {
         return (0.0, 0.0, SettlementStatus::Unpaid);
     }
 
-    let outstanding = round_2(rounded_total - rounded_paid);
+    let total_offset = rounded_return;
+    let settled = round_2(rounded_paid + total_offset);
+    let outstanding = round_2(rounded_total - settled);
     if outstanding <= 0.0 {
         (rounded_paid, 0.0, SettlementStatus::Paid)
-    } else if outstanding >= rounded_total {
+    } else if settled <= 0.0 {
         (0.0, rounded_total, SettlementStatus::Unpaid)
     } else {
         (rounded_paid, outstanding, SettlementStatus::PartiallyPaid)
@@ -710,6 +726,22 @@ pub fn void_account_payable_in_tx(
         ));
     }
 
+    // AP-05: Check purchase returns (if table exists)
+    if table_exists(conn, "purchase_returns") {
+        let posted_return_res: Result<String, _> = conn.query_row(
+            "SELECT return_number
+             FROM purchase_returns
+             WHERE account_payable_id = ?1 AND tenant_id = ?2 AND status = 'posted'
+             ORDER BY created_at ASC LIMIT 1",
+            params![ap_id_trimmed, tid],
+            |row| row.get(0),
+        );
+
+        if let Ok(return_number) = posted_return_res {
+            return Err(AccountsPayableError::HasPostedReturns(return_number));
+        }
+    }
+
     let now = current_timestamp();
     let affected = conn.execute(
         "UPDATE accounts_payable
@@ -849,7 +881,7 @@ pub fn get_account_payable_impl(
     }
 
     // Call unified get_ap_info for outstanding balance
-    let (_tot, outstanding_amount, _, _, _, _) =
+    let (_tot, _outstanding_amount, _, _, _, _) =
         crate::vendor_payments::get_ap_info(conn, tid, target_id).map_err(|e| match e {
             crate::vendor_payments::VendorPaymentError::InvalidAllocationAccountPayable => {
                 AccountsPayableError::NotFound
@@ -857,8 +889,21 @@ pub fn get_account_payable_impl(
             _ => AccountsPayableError::DatabaseError(e.to_string()),
         })?;
 
-    let (paid_amount, _, settlement_status) =
-        calculate_derived_amounts(&ap.status, ap.amount, raw_paid_amount);
+    let raw_return_amount = if table_exists(conn, "purchase_returns") {
+        let sum_res: Result<Option<f64>, _> = conn.query_row(
+            "SELECT SUM(total_amount)
+             FROM purchase_returns
+             WHERE account_payable_id = ?1 AND tenant_id = ?2 AND status = 'posted'",
+            params![target_id, tid],
+            |r| r.get(0),
+        );
+        sum_res.unwrap_or(None).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    let (paid_amount, derived_outstanding, settlement_status) =
+        calculate_derived_amounts(&ap.status, ap.amount, raw_paid_amount, raw_return_amount);
 
     Ok(AccountPayableDetail {
         id: ap.id,
@@ -880,7 +925,7 @@ pub fn get_account_payable_impl(
         voided_at: ap.voided_at,
         void_reason: ap.void_reason,
         paid_amount,
-        outstanding_amount,
+        outstanding_amount: derived_outstanding,
         settlement_status,
         allocations,
     })
@@ -896,7 +941,21 @@ pub fn list_accounts_payable_impl(
         return Err(AccountsPayableError::EmptyTenantId);
     }
 
-    let mut query = String::from(
+    let has_returns = table_exists(conn, "purchase_returns");
+    let return_subquery = if has_returns {
+        "COALESCE(
+            (SELECT SUM(pr.total_amount)
+             FROM purchase_returns pr
+             WHERE pr.account_payable_id = ap.id
+               AND pr.tenant_id = ap.tenant_id
+               AND pr.status = 'posted'),
+            0.0
+        )"
+    } else {
+        "0.0"
+    };
+
+    let mut query = format!(
         "SELECT
             ap.id, ap.tenant_id, ap.vendor_partner_id, ap.vendor_name_snapshot,
             ap.source_type, ap.source_id, ap.source_number, ap.external_reference,
@@ -910,9 +969,11 @@ pub fn list_accounts_payable_impl(
                    AND pa.tenant_id = ap.tenant_id
                    AND p.status = 'posted'),
                 0.0
-            ) AS raw_paid_amount
+            ) AS raw_paid_amount,
+            {} AS raw_return_amount
         FROM accounts_payable ap
         WHERE ap.tenant_id = ?1",
+        return_subquery
     );
 
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tid.to_string())];
@@ -959,7 +1020,8 @@ pub fn list_accounts_payable_impl(
 
     let rows = stmt.query_map(params_slice.as_slice(), |row| {
         let raw_paid: f64 = row.get(18)?;
-        Ok((row_to_account_payable(row)?, raw_paid))
+        let raw_return: f64 = row.get(19)?;
+        Ok((row_to_account_payable(row)?, raw_paid, raw_return))
     })?;
 
     let settlement_filter = filter
@@ -969,9 +1031,9 @@ pub fn list_accounts_payable_impl(
 
     let mut items = Vec::new();
     for r in rows {
-        let (ap, raw_paid) = r?;
+        let (ap, raw_paid, raw_return) = r?;
         let (paid_amount, outstanding_amount, settlement_status) =
-            calculate_derived_amounts(&ap.status, ap.amount, raw_paid);
+            calculate_derived_amounts(&ap.status, ap.amount, raw_paid, raw_return);
 
         if let Some(expected_ss) = settlement_filter {
             if settlement_status != expected_ss {
@@ -3001,5 +3063,137 @@ mod tests {
             err_not_found.unwrap_err(),
             crate::vendor_payments::VendorPaymentError::InvalidAllocationAccountPayable
         );
+    }
+
+    #[test]
+    fn test_calculate_derived_amounts_with_returns() {
+        // Given: Normal open AP with amount 1000.0
+
+        // Case N1: Unpaid, no return
+        // When: Calculate derived amounts
+        // Then: Paid = 0, Outstanding = 1000, Status = Unpaid
+        let (p1, out1, st1) = calculate_derived_amounts("open", 1000.0, 0.0, 0.0);
+        assert_eq!(p1, 0.0);
+        assert_eq!(out1, 1000.0);
+        assert_eq!(st1, SettlementStatus::Unpaid);
+
+        // Case N2: Partially paid, no return
+        // When: Calculate derived amounts with 300 paid
+        // Then: Paid = 300, Outstanding = 700, Status = PartiallyPaid
+        let (p2, out2, st2) = calculate_derived_amounts("open", 1000.0, 300.0, 0.0);
+        assert_eq!(p2, 300.0);
+        assert_eq!(out2, 700.0);
+        assert_eq!(st2, SettlementStatus::PartiallyPaid);
+
+        // Case N3: Fully paid, no return
+        // When: Calculate derived amounts with 1000 paid
+        // Then: Paid = 1000, Outstanding = 0, Status = Paid
+        let (p3, out3, st3) = calculate_derived_amounts("open", 1000.0, 1000.0, 0.0);
+        assert_eq!(p3, 1000.0);
+        assert_eq!(out3, 0.0);
+        assert_eq!(st3, SettlementStatus::Paid);
+
+        // Case N4: Partially paid with return offset
+        // When: Calculate derived amounts with 400 paid and 200 return
+        // Then: Paid = 400, Outstanding = 400, Status = PartiallyPaid
+        let (p4, out4, st4) = calculate_derived_amounts("open", 1000.0, 400.0, 200.0);
+        assert_eq!(p4, 400.0);
+        assert_eq!(out4, 400.0);
+        assert_eq!(st4, SettlementStatus::PartiallyPaid);
+
+        // Case N5: Fully settled via payment + return
+        // When: Calculate derived amounts with 700 paid and 300 return
+        // Then: Paid = 700, Outstanding = 0, Status = Paid
+        let (p5, out5, st5) = calculate_derived_amounts("open", 1000.0, 700.0, 300.0);
+        assert_eq!(p5, 700.0);
+        assert_eq!(out5, 0.0);
+        assert_eq!(st5, SettlementStatus::Paid);
+
+        // Case N6: Fully settled purely via return
+        // When: Calculate derived amounts with 0 paid and 1000 return
+        // Then: Paid = 0, Outstanding = 0, Status = Paid
+        let (p6, out6, st6) = calculate_derived_amounts("open", 1000.0, 0.0, 1000.0);
+        assert_eq!(p6, 0.0);
+        assert_eq!(out6, 0.0);
+        assert_eq!(st6, SettlementStatus::Paid);
+
+        // Case B1: Voided account payable
+        // When: Calculate derived amounts for voided AP
+        // Then: Paid = 0, Outstanding = 0, Status = Unpaid
+        let (p7, out7, st7) = calculate_derived_amounts("voided", 1000.0, 0.0, 0.0);
+        assert_eq!(p7, 0.0);
+        assert_eq!(out7, 0.0);
+        assert_eq!(st7, SettlementStatus::Unpaid);
+    }
+
+    #[test]
+    fn test_void_account_payable_blocked_by_posted_purchase_returns() {
+        // Given: Test connection with tables and an open AP
+        let mut conn = setup_test_db();
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS purchase_returns (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                return_number TEXT NOT NULL,
+                purchase_order_id TEXT NOT NULL,
+                vendor_bill_id TEXT,
+                account_payable_id TEXT,
+                return_date TEXT NOT NULL,
+                reason_code TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total_amount REAL NOT NULL,
+                note TEXT,
+                created_by TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                posted_by TEXT,
+                posted_at INTEGER,
+                voided_by TEXT,
+                voided_at INTEGER,
+                void_reason TEXT
+            );",
+        )
+        .unwrap();
+
+        let ap = create_account_payable(
+            &mut conn,
+            "tnt_test",
+            "usr_admin",
+            CreateAccountPayableInput {
+                vendor_partner_id: "vnd_001".to_string(),
+                source_type: "vendor_bill".to_string(),
+                source_id: "bill_with_ret".to_string(),
+                source_number: "BILL-WITH-RET".to_string(),
+                external_reference: None,
+                document_date: "2026-11-01".to_string(),
+                due_date: "2026-11-30".to_string(),
+                amount: 1000.0,
+                currency: None,
+            },
+        )
+        .unwrap();
+
+        // And: A posted purchase return linked to this AP
+        conn.execute(
+            "INSERT INTO purchase_returns (
+                id, tenant_id, return_number, purchase_order_id, vendor_bill_id,
+                account_payable_id, return_date, reason_code, status, total_amount,
+                created_by, created_at
+            ) VALUES ('pret_1', 'tnt_test', 'PRET-00001', 'po_1', 'bill_with_ret',
+                      ?1, '2026-11-02', 'quality_issue', 'posted', 200.0, 'usr_admin', 1000)",
+            params![ap.id],
+        )
+        .unwrap();
+
+        // When: Attempting to void the AP
+        let err = void_account_payable(&mut conn, "tnt_test", "usr_admin", &ap.id, "想作廢").unwrap_err();
+
+        // Then: Blocked with HasPostedReturns
+        match err {
+            AccountsPayableError::HasPostedReturns(num) => {
+                assert_eq!(num, "PRET-00001");
+            }
+            other => panic!("Expected HasPostedReturns, got {:?}", other),
+        }
     }
 }

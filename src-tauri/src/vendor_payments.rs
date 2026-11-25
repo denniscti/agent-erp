@@ -473,7 +473,16 @@ fn resolve_vendor_snapshot(
     }
 }
 
-/// Helper to get current AP outstanding balance (AP total amount minus sum of allocations in posted payments)
+fn table_exists(conn: &Connection, table_name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?1",
+        params![table_name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Helper to get current AP outstanding balance (AP total amount minus sum of allocations in posted payments and posted returns)
 pub fn get_ap_info(
     conn: &Connection,
     tenant_id: &str,
@@ -529,7 +538,21 @@ pub fn get_ap_info(
         .map_err(|e| VendorPaymentError::DatabaseError(e.to_string()))?;
 
     let posted_sum: f64 = posted_stmt.query_row(params![ap_id, tenant_id], |r| r.get(0))?;
-    let outstanding = round_2(round_2(total_amount) - round_2(posted_sum)).max(0.0);
+
+    let posted_returns: f64 = if table_exists(conn, "purchase_returns") {
+        conn.query_row(
+            "SELECT COALESCE(SUM(total_amount), 0.0)
+             FROM purchase_returns
+             WHERE account_payable_id = ?1 AND tenant_id = ?2 AND status = 'posted'",
+            params![ap_id, tenant_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
+    let outstanding = round_2(round_2(total_amount) - round_2(posted_sum) - round_2(posted_returns)).max(0.0);
 
     Ok((
         total_amount,
