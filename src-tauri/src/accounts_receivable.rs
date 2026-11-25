@@ -75,6 +75,9 @@ pub enum AccountsReceivableError {
     #[error("此應收已有折讓單：{0}，請先作廢折讓單")]
     HasPostedAllowances(String),
 
+    #[error("此應收已有銷退單：{0}，請先作廢退回單")]
+    HasPostedReturns(String),
+
     #[error("原因必填")]
     VoidReasonRequired,
 
@@ -417,38 +420,36 @@ fn resolve_customer_snapshot(
 }
 
 /// Calculate derived values: received_amount, allowance_amount, outstanding_amount, settlement_status
-/// Outstanding amount = amount - received_amount - allowance_amount
+/// Outstanding amount = amount - received_amount - (allowance_amount + return_amount)
 /// For voided accounts, outstanding is 0.0 and settlement status is Unpaid.
 pub fn calculate_derived_amounts(
     status: &str,
     total_amount: f64,
     raw_received_amount: f64,
     raw_allowance_amount: f64,
+    raw_return_amount: f64,
 ) -> (f64, f64, f64, SettlementStatus) {
     let rounded_total = round_2(total_amount);
     let rounded_received = round_2(raw_received_amount);
     let rounded_allowance = round_2(raw_allowance_amount);
+    let rounded_return = round_2(raw_return_amount);
 
     if status == "voided" {
         return (0.0, 0.0, 0.0, SettlementStatus::Unpaid);
     }
 
-    let settled = round_2(rounded_received + rounded_allowance);
+    let total_offset = round_2(rounded_allowance + rounded_return);
+    let settled = round_2(rounded_received + total_offset);
     let outstanding = round_2(rounded_total - settled);
 
     if outstanding <= 0.0 {
-        (
-            rounded_received,
-            rounded_allowance,
-            0.0,
-            SettlementStatus::Paid,
-        )
+        (rounded_received, total_offset, 0.0, SettlementStatus::Paid)
     } else if settled <= 0.0 {
         (0.0, 0.0, rounded_total, SettlementStatus::Unpaid)
     } else {
         (
             rounded_received,
-            rounded_allowance,
+            total_offset,
             outstanding,
             SettlementStatus::PartiallyPaid,
         )
@@ -679,6 +680,22 @@ pub fn void_account_receivable_in_tx(
         }
     }
 
+    // Check sales returns (if table exists)
+    if table_exists(conn, "sales_returns") {
+        let posted_return_res: Result<String, _> = conn.query_row(
+            "SELECT return_number
+             FROM sales_returns
+             WHERE account_receivable_id = ?1 AND tenant_id = ?2 AND status = 'posted'
+             ORDER BY created_at ASC LIMIT 1",
+            params![ar_id_trimmed, tid],
+            |row| row.get(0),
+        );
+
+        if let Ok(return_number) = posted_return_res {
+            return Err(AccountsReceivableError::HasPostedReturns(return_number));
+        }
+    }
+
     let now = current_timestamp();
     let affected = conn.execute(
         "UPDATE accounts_receivable
@@ -810,12 +827,26 @@ pub fn get_account_receivable_impl(
         0.0
     };
 
+    let raw_return_amount = if table_exists(conn, "sales_returns") {
+        let sum_res: Result<Option<f64>, _> = conn.query_row(
+            "SELECT SUM(total_amount)
+             FROM sales_returns
+             WHERE account_receivable_id = ?1 AND tenant_id = ?2 AND status = 'posted'",
+            params![target_id, tid],
+            |r| r.get(0),
+        );
+        sum_res.unwrap_or(None).unwrap_or(0.0)
+    } else {
+        0.0
+    };
+
     let (received_amount, allowance_amount, outstanding_amount, settlement_status) =
         calculate_derived_amounts(
             &ar.status,
             ar.amount,
             raw_received_amount,
             raw_allowance_amount,
+            raw_return_amount,
         );
 
     Ok(AccountReceivableDetail {
@@ -858,6 +889,7 @@ pub fn list_accounts_receivable_impl(
     let has_receipts = table_exists(conn, "customer_receipt_allocations")
         && table_exists(conn, "customer_receipts");
     let has_allowances = table_exists(conn, "sales_allowances");
+    let has_returns = table_exists(conn, "sales_returns");
 
     let received_subquery = if has_receipts {
         "COALESCE(
@@ -886,6 +918,19 @@ pub fn list_accounts_receivable_impl(
         "0.0"
     };
 
+    let return_subquery = if has_returns {
+        "COALESCE(
+            (SELECT SUM(sr.total_amount)
+             FROM sales_returns sr
+             WHERE sr.account_receivable_id = ar.id
+               AND sr.tenant_id = ar.tenant_id
+               AND sr.status = 'posted'),
+            0.0
+        )"
+    } else {
+        "0.0"
+    };
+
     let mut query = format!(
         "SELECT
             ar.id, ar.tenant_id, ar.customer_partner_id, ar.customer_name_snapshot,
@@ -893,10 +938,11 @@ pub fn list_accounts_receivable_impl(
             ar.document_date, ar.due_date, ar.amount, ar.currency, ar.status,
             ar.created_by, ar.created_at, ar.voided_by, ar.voided_at, ar.void_reason,
             {} AS raw_received_amount,
-            {} AS raw_allowance_amount
+            {} AS raw_allowance_amount,
+            {} AS raw_return_amount
         FROM accounts_receivable ar
         WHERE ar.tenant_id = ?1",
-        received_subquery, allowance_subquery
+        received_subquery, allowance_subquery, return_subquery
     );
 
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tid.to_string())];
@@ -953,14 +999,21 @@ pub fn list_accounts_receivable_impl(
         let ar = row_to_account_receivable(row)?;
         let raw_received: f64 = row.get(18)?;
         let raw_allowance: f64 = row.get(19)?;
-        Ok((ar, raw_received, raw_allowance))
+        let raw_return: f64 = row.get(20)?;
+        Ok((ar, raw_received, raw_allowance, raw_return))
     })?;
 
     let mut items = Vec::new();
     for r in rows {
-        let (ar, raw_received, raw_allowance) = r?;
+        let (ar, raw_received, raw_allowance, raw_return) = r?;
         let (received_amount, allowance_amount, outstanding_amount, settlement_status) =
-            calculate_derived_amounts(&ar.status, ar.amount, raw_received, raw_allowance);
+            calculate_derived_amounts(
+                &ar.status,
+                ar.amount,
+                raw_received,
+                raw_allowance,
+                raw_return,
+            );
 
         if let Some(expected_status) = target_settlement {
             if settlement_status != expected_status {
@@ -2162,47 +2215,62 @@ mod tests {
     fn test_tc_ar_07_calculate_derived_amounts_scenarios() {
         // Given: Normal open invoice with amount 1000.0
 
-        // Case N1: Unpaid, no allowance
-        let (rec1, alw1, out1, st1) = calculate_derived_amounts("open", 1000.0, 0.0, 0.0);
+        // Case N1: Unpaid, no allowance, no return
+        let (rec1, alw1, out1, st1) = calculate_derived_amounts("open", 1000.0, 0.0, 0.0, 0.0);
         assert_eq!(rec1, 0.0);
         assert_eq!(alw1, 0.0);
         assert_eq!(out1, 1000.0);
         assert_eq!(st1, SettlementStatus::Unpaid);
 
-        // Case N2: Partially paid, no allowance
-        let (rec2, alw2, out2, st2) = calculate_derived_amounts("open", 1000.0, 300.0, 0.0);
+        // Case N2: Partially paid, no allowance, no return
+        let (rec2, alw2, out2, st2) = calculate_derived_amounts("open", 1000.0, 300.0, 0.0, 0.0);
         assert_eq!(rec2, 300.0);
         assert_eq!(alw2, 0.0);
         assert_eq!(out2, 700.0);
         assert_eq!(st2, SettlementStatus::PartiallyPaid);
 
-        // Case N3: Fully paid, no allowance
-        let (rec3, alw3, out3, st3) = calculate_derived_amounts("open", 1000.0, 1000.0, 0.0);
+        // Case N3: Fully paid, no allowance, no return
+        let (rec3, alw3, out3, st3) = calculate_derived_amounts("open", 1000.0, 1000.0, 0.0, 0.0);
         assert_eq!(rec3, 1000.0);
         assert_eq!(alw3, 0.0);
         assert_eq!(out3, 0.0);
         assert_eq!(st3, SettlementStatus::Paid);
 
         // Case N4: Partially paid with allowance
-        let (rec4, alw4, out4, st4) = calculate_derived_amounts("open", 1000.0, 400.0, 100.0);
+        let (rec4, alw4, out4, st4) = calculate_derived_amounts("open", 1000.0, 400.0, 100.0, 0.0);
         assert_eq!(rec4, 400.0);
         assert_eq!(alw4, 100.0);
         assert_eq!(out4, 500.0);
         assert_eq!(st4, SettlementStatus::PartiallyPaid);
 
         // Case N5: Fully settled via payment + allowance
-        let (rec5, alw5, out5, st5) = calculate_derived_amounts("open", 1000.0, 800.0, 200.0);
+        let (rec5, alw5, out5, st5) = calculate_derived_amounts("open", 1000.0, 800.0, 200.0, 0.0);
         assert_eq!(rec5, 800.0);
         assert_eq!(alw5, 200.0);
         assert_eq!(out5, 0.0);
         assert_eq!(st5, SettlementStatus::Paid);
 
+        // Case N6: Partially paid with return (no allowance)
+        let (rec6, off6, out6, st6) = calculate_derived_amounts("open", 1000.0, 300.0, 0.0, 200.0);
+        assert_eq!(rec6, 300.0);
+        assert_eq!(off6, 200.0);
+        assert_eq!(out6, 500.0);
+        assert_eq!(st6, SettlementStatus::PartiallyPaid);
+
+        // Case N7: Fully settled via payment + allowance + return
+        let (rec7, off7, out7, st7) =
+            calculate_derived_amounts("open", 1000.0, 500.0, 200.0, 300.0);
+        assert_eq!(rec7, 500.0);
+        assert_eq!(off7, 500.0);
+        assert_eq!(out7, 0.0);
+        assert_eq!(st7, SettlementStatus::Paid);
+
         // Case B1: Voided account receivable
-        let (rec6, alw6, out6, st6) = calculate_derived_amounts("voided", 1000.0, 0.0, 0.0);
-        assert_eq!(rec6, 0.0);
-        assert_eq!(alw6, 0.0);
-        assert_eq!(out6, 0.0);
-        assert_eq!(st6, SettlementStatus::Unpaid);
+        let (rec8, alw8, out8, st8) = calculate_derived_amounts("voided", 1000.0, 0.0, 0.0, 0.0);
+        assert_eq!(rec8, 0.0);
+        assert_eq!(alw8, 0.0);
+        assert_eq!(out8, 0.0);
+        assert_eq!(st8, SettlementStatus::Unpaid);
     }
 
     #[test]

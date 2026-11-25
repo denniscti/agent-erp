@@ -23,6 +23,7 @@ pub mod purchase_orders;
 pub mod quotes;
 pub mod sales_allowances;
 pub mod sales_orders;
+pub mod sales_returns;
 pub mod stock_transfers;
 pub mod stocktakes;
 pub mod tasks;
@@ -77,6 +78,7 @@ where
         "vendor_payments",
         "customer_receipts",
         "sales_allowances",
+        "sales_returns",
     ];
     if !ALLOWED_TABLES.contains(&table) {
         return Err(not_found_err);
@@ -292,6 +294,9 @@ fn init_db<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Result<(), St
 
     sales_allowances::create_sales_allowances_tables(&conn)
         .map_err(|e| format!("Failed to create sales allowances tables: {}", e))?;
+
+    sales_returns::create_sales_returns_tables(&conn)
+        .map_err(|e| format!("Failed to create sales returns tables: {}", e))?;
 
     quotes::create_quotes_tables(&conn)
         .map_err(|e| format!("Failed to create quotes tables: {}", e))?;
@@ -650,6 +655,12 @@ pub fn run() {
             sales_allowances::void_sales_allowance,
             sales_allowances::get_sales_allowance,
             sales_allowances::list_sales_allowances,
+            sales_returns::create_sales_return,
+            sales_returns::update_sales_return,
+            sales_returns::post_sales_return,
+            sales_returns::void_sales_return,
+            sales_returns::get_sales_return,
+            sales_returns::list_sales_returns,
             vendor_bills::create_vendor_bill,
             vendor_bills::update_vendor_bill_header,
             vendor_bills::add_vendor_bill_order,
