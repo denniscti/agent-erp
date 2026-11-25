@@ -3186,7 +3186,8 @@ mod tests {
         .unwrap();
 
         // When: Attempting to void the AP
-        let err = void_account_payable(&mut conn, "tnt_test", "usr_admin", &ap.id, "想作廢").unwrap_err();
+        let err =
+            void_account_payable(&mut conn, "tnt_test", "usr_admin", &ap.id, "想作廢").unwrap_err();
 
         // Then: Blocked with HasPostedReturns
         match err {

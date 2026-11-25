@@ -552,7 +552,8 @@ pub fn get_ap_info(
         0.0
     };
 
-    let outstanding = round_2(round_2(total_amount) - round_2(posted_sum) - round_2(posted_returns)).max(0.0);
+    let outstanding =
+        round_2(round_2(total_amount) - round_2(posted_sum) - round_2(posted_returns)).max(0.0);
 
     Ok((
         total_amount,

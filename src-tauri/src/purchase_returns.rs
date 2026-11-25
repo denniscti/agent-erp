@@ -696,8 +696,8 @@ pub fn post_purchase_return_impl(
              FROM purchase_returns
              WHERE id = ?1 AND tenant_id = ?2",
         )?;
-        let row_res: Result<(String, String, String, String), _> =
-            stmt.query_row(params![target_id, tid], |r| {
+        let row_res: Result<(String, String, String, String), _> = stmt
+            .query_row(params![target_id, tid], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             });
         match row_res {
@@ -799,26 +799,21 @@ pub fn post_purchase_return_impl(
 
     // 4. Accounts Payable offset check
     // Check if purchase_order has a posted vendor_bill
-    let bill_info_opt: Option<(String, f64, f64)> = if table_exists(
-        &tx,
-        "vendor_bill_orders",
-    ) && table_exists(
-        &tx,
-        "vendor_bills",
-    ) {
-        tx.query_row(
-            "SELECT vb.id, vb.untaxed_amount, vb.tax_amount
+    let bill_info_opt: Option<(String, f64, f64)> =
+        if table_exists(&tx, "vendor_bill_orders") && table_exists(&tx, "vendor_bills") {
+            tx.query_row(
+                "SELECT vb.id, vb.untaxed_amount, vb.tax_amount
              FROM vendor_bills vb
              JOIN vendor_bill_orders vbo ON vbo.bill_id = vb.id
              WHERE vbo.purchase_order_id = ?1 AND vb.tenant_id = ?2 AND vb.status = 'posted'
              LIMIT 1",
-            params![purchase_order_id, tid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()?
-    } else {
-        None
-    };
+                params![purchase_order_id, tid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+        } else {
+            None
+        };
 
     let (vendor_bill_id, account_payable_id, total_amount) = match bill_info_opt {
         Some((vb_id, vb_untaxed, vb_tax)) => {
@@ -872,9 +867,8 @@ pub fn post_purchase_return_impl(
                         )
                         .unwrap_or(0.0);
 
-                    let current_outstanding = round_2(
-                        ap_amount - paid_amount - other_posted_returns,
-                    );
+                    let current_outstanding =
+                        round_2(ap_amount - paid_amount - other_posted_returns);
 
                     if return_total > current_outstanding + 1e-6 {
                         return Err(PurchaseReturnError::AmountExceedsOutstanding(
@@ -946,7 +940,9 @@ pub fn void_purchase_return_impl(
         |r| r.get(0),
     ) {
         Ok(s) => s,
-        Err(rusqlite::Error::QueryReturnedNoRows) => return Err(PurchaseReturnError::ReturnNotFound),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(PurchaseReturnError::ReturnNotFound)
+        }
         Err(e) => return Err(PurchaseReturnError::DatabaseError(e.to_string())),
     };
 
@@ -1135,10 +1131,7 @@ pub fn list_purchase_returns_impl(
         let p = po_id.trim();
         if !p.is_empty() {
             params_vec.push(Box::new(p.to_string()));
-            sql.push_str(&format!(
-                " AND purchase_order_id = ?{}",
-                params_vec.len()
-            ));
+            sql.push_str(&format!(" AND purchase_order_id = ?{}", params_vec.len()));
         }
     }
 
@@ -1160,8 +1153,7 @@ pub fn list_purchase_returns_impl(
 
     sql.push_str(" ORDER BY created_at DESC");
 
-    let params_slice: Vec<&dyn rusqlite::ToSql> =
-        params_vec.iter().map(|b| b.as_ref()).collect();
+    let params_slice: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
 
     let rows = stmt.query_map(params_slice.as_slice(), |r| {
@@ -1467,7 +1459,11 @@ mod tests {
             params![movement_id, unit_id, po_id],
         ).unwrap();
 
-        (po_id.to_string(), unit_id.to_string(), movement_id.to_string())
+        (
+            po_id.to_string(),
+            unit_id.to_string(),
+            movement_id.to_string(),
+        )
     }
 
     // ==========================================
@@ -1491,7 +1487,8 @@ mod tests {
                 return_quantity: 3.0,
             }],
         };
-        let detail = create_purchase_return_impl(&mut conn, "tnt_test", "usr_tester", input).unwrap();
+        let detail =
+            create_purchase_return_impl(&mut conn, "tnt_test", "usr_tester", input).unwrap();
 
         // Then: Successfully created with PRET-00001 and draft status
         assert_eq!(detail.return_record.return_number, "PRET-00001");
@@ -1653,13 +1650,23 @@ mod tests {
 
         // Then: Total amount includes tax (420.0), linked to vb_01 and ap_01
         assert_eq!(posted.return_record.total_amount, 420.0);
-        assert_eq!(posted.return_record.vendor_bill_id.as_deref(), Some("vb_01"));
-        assert_eq!(posted.return_record.account_payable_id.as_deref(), Some("ap_01"));
+        assert_eq!(
+            posted.return_record.vendor_bill_id.as_deref(),
+            Some("vb_01")
+        );
+        assert_eq!(
+            posted.return_record.account_payable_id.as_deref(),
+            Some("ap_01")
+        );
 
         // And: Accounts payable outstanding is reduced from 1050.0 to 630.0
-        let ap_detail = crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_01").unwrap();
+        let ap_detail =
+            crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_01").unwrap();
         assert_eq!(ap_detail.outstanding_amount, 630.0);
-        assert_eq!(ap_detail.settlement_status, crate::accounts_payable::SettlementStatus::PartiallyPaid);
+        assert_eq!(
+            ap_detail.settlement_status,
+            crate::accounts_payable::SettlementStatus::PartiallyPaid
+        );
     }
 
     #[test]
@@ -1703,7 +1710,10 @@ mod tests {
 
         // Then: Status is void, and reversing movement with +3.0 and reason='purchase_return_void' is inserted
         assert_eq!(voided.return_record.status, "void");
-        assert_eq!(voided.return_record.void_reason.as_deref(), Some("Mistaken return"));
+        assert_eq!(
+            voided.return_record.void_reason.as_deref(),
+            Some("Mistaken return")
+        );
 
         let (delta, reason): (f64, String) = conn
             .query_row(
@@ -1766,7 +1776,8 @@ mod tests {
         )
         .unwrap();
 
-        let ap_before_void = crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_02").unwrap();
+        let ap_before_void =
+            crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_02").unwrap();
         assert_eq!(ap_before_void.outstanding_amount, 630.0);
 
         // When: Voiding the posted return
@@ -1780,9 +1791,13 @@ mod tests {
         .unwrap();
 
         // Then: AP outstanding is automatically restored back to 1050.0
-        let ap_after_void = crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_02").unwrap();
+        let ap_after_void =
+            crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_02").unwrap();
         assert_eq!(ap_after_void.outstanding_amount, 1050.0);
-        assert_eq!(ap_after_void.settlement_status, crate::accounts_payable::SettlementStatus::Unpaid);
+        assert_eq!(
+            ap_after_void.settlement_status,
+            crate::accounts_payable::SettlementStatus::Unpaid
+        );
     }
 
     #[test]
@@ -1897,12 +1912,17 @@ mod tests {
             },
         )
         .unwrap();
-        post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id).unwrap();
+        post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id)
+            .unwrap();
 
         // Then: AP outstanding is exactly 0.0, and settlement_status is Paid
-        let ap = crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_exact").unwrap();
+        let ap = crate::accounts_payable::get_account_payable_impl(&conn, "tnt_test", "ap_exact")
+            .unwrap();
         assert_eq!(ap.outstanding_amount, 0.0);
-        assert_eq!(ap.settlement_status, crate::accounts_payable::SettlementStatus::Paid);
+        assert_eq!(
+            ap.settlement_status,
+            crate::accounts_payable::SettlementStatus::Paid
+        );
     }
 
     // ==========================================
@@ -2230,7 +2250,8 @@ mod tests {
             },
         )
         .unwrap();
-        post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id).unwrap();
+        post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id)
+            .unwrap();
 
         // When & Then: update fails with NotDraftForUpdate
         let err_update = update_purchase_return_impl(
@@ -2248,7 +2269,9 @@ mod tests {
         assert_eq!(err_update, PurchaseReturnError::NotDraftForUpdate);
 
         // When & Then: post fails with NotDraftForPost
-        let err_post = post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id).unwrap_err();
+        let err_post =
+            post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id)
+                .unwrap_err();
         assert_eq!(err_post, PurchaseReturnError::NotDraftForPost);
     }
 
@@ -2307,7 +2330,8 @@ mod tests {
             },
         )
         .unwrap();
-        post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id).unwrap();
+        post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id)
+            .unwrap();
 
         // When & Then: Voiding with empty string or whitespace reason fails with VoidReasonRequired
         let err = void_purchase_return_impl(
@@ -2375,7 +2399,9 @@ mod tests {
         )
         .unwrap();
 
-        let err = post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id).unwrap_err();
+        let err =
+            post_purchase_return_impl(&mut conn, "tnt_test", "usr_1", &detail.return_record.id)
+                .unwrap_err();
 
         // Then: AmountExceedsOutstanding error
         match err {
@@ -2410,14 +2436,19 @@ mod tests {
         .unwrap();
 
         // When: Querying with another tenant
-        let get_err = get_purchase_return_impl(&conn, "tnt_other", &detail.return_record.id).unwrap_err();
+        let get_err =
+            get_purchase_return_impl(&conn, "tnt_other", &detail.return_record.id).unwrap_err();
         assert_eq!(get_err, PurchaseReturnError::ReturnNotFound);
 
-        let list_other = list_purchase_returns_impl(&conn, "tnt_other", ListPurchaseReturnsFilter::default()).unwrap();
+        let list_other =
+            list_purchase_returns_impl(&conn, "tnt_other", ListPurchaseReturnsFilter::default())
+                .unwrap();
         assert_eq!(list_other.len(), 0);
 
         // And: Querying with tnt_test returns 1 item
-        let list_test = list_purchase_returns_impl(&conn, "tnt_test", ListPurchaseReturnsFilter::default()).unwrap();
+        let list_test =
+            list_purchase_returns_impl(&conn, "tnt_test", ListPurchaseReturnsFilter::default())
+                .unwrap();
         assert_eq!(list_test.len(), 1);
         assert_eq!(list_test[0].id, detail.return_record.id);
     }
